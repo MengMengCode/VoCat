@@ -435,7 +435,7 @@ func (s *Server) handleDevicePath(
 
 	entry, physicalID, physicalPresent := s.physicalForConfig(config)
 	if len(tail) > 0 && tail[0] == "esim" {
-		return s.handleESIM(w, r, tail[1:], physicalID, physicalPresent)
+		return s.handleESIM(w, r, tail[1:], config.ID, physicalID, physicalPresent)
 	}
 	switch strings.Join(tail, "/") {
 	case "overview":

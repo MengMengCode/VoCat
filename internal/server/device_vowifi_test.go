@@ -30,6 +30,11 @@ func (controller *fakeVoWiFiController) RequestEnabled(
 	enabled bool,
 ) (vowifi.State, error) {
 	controller.enabled = append(controller.enabled, enabled)
+	if !enabled && controller.err == nil {
+		controller.state.Enabled = false
+		controller.state.Active = false
+		controller.state.Phase = vowifi.PhaseIdle
+	}
 	return controller.state, controller.err
 }
 

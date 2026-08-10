@@ -18,6 +18,7 @@ import (
 	"vocat/internal/modem"
 	"vocat/internal/store"
 	"vocat/internal/update"
+	"vocat/internal/vowifi"
 )
 
 func decodeData(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
@@ -214,7 +215,7 @@ func TestHandleESIMShapes(t *testing.T) {
 	server := &Server{logger: regionTestLogger()}
 
 	overview := httptest.NewRecorder()
-	server.handleESIM(overview, httptest.NewRequest(http.MethodGet, "/esim", nil), []string{}, "dev1", false)
+	server.handleESIM(overview, httptest.NewRequest(http.MethodGet, "/esim", nil), []string{}, "dev1", "dev1", false)
 	if overview.Code != http.StatusOK {
 		t.Fatalf("overview status = %d", overview.Code)
 	}
@@ -223,34 +224,34 @@ func TestHandleESIMShapes(t *testing.T) {
 	}
 
 	profiles := httptest.NewRecorder()
-	server.handleESIM(profiles, httptest.NewRequest(http.MethodGet, "/esim/profiles", nil), []string{"profiles"}, "dev1", false)
+	server.handleESIM(profiles, httptest.NewRequest(http.MethodGet, "/esim/profiles", nil), []string{"profiles"}, "dev1", "dev1", false)
 	if profiles.Code != http.StatusOK {
 		t.Fatalf("profiles status = %d", profiles.Code)
 	}
 
 	notif := httptest.NewRecorder()
-	server.handleESIM(notif, httptest.NewRequest(http.MethodGet, "/esim/notifications", nil), []string{"notifications"}, "dev1", false)
+	server.handleESIM(notif, httptest.NewRequest(http.MethodGet, "/esim/notifications", nil), []string{"notifications"}, "dev1", "dev1", false)
 	if notif.Code != http.StatusOK {
 		t.Fatalf("notifications status = %d", notif.Code)
 	}
 
 	// Download is a GET+SSE endpoint, so POST is rejected.
 	downloadPost := httptest.NewRecorder()
-	server.handleESIM(downloadPost, httptest.NewRequest(http.MethodPost, "/esim/actions/download", nil), []string{"actions", "download"}, "dev1", false)
+	server.handleESIM(downloadPost, httptest.NewRequest(http.MethodPost, "/esim/actions/download", nil), []string{"actions", "download"}, "dev1", "dev1", false)
 	if downloadPost.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("download POST status = %d, want 405", downloadPost.Code)
 	}
 
 	// Download with no device manager reports 503.
 	download := httptest.NewRecorder()
-	server.handleESIM(download, httptest.NewRequest(http.MethodGet, "/esim/actions/download?smdp=rsp.example.com", nil), []string{"actions", "download"}, "dev1", false)
+	server.handleESIM(download, httptest.NewRequest(http.MethodGet, "/esim/actions/download?smdp=rsp.example.com", nil), []string{"actions", "download"}, "dev1", "dev1", false)
 	if download.Code != http.StatusServiceUnavailable {
 		t.Fatalf("download (no device) status = %d, want 503", download.Code)
 	}
 
 	// Switch with no physical modem present reports 503.
 	absent := httptest.NewRecorder()
-	server.handleESIM(absent, httptest.NewRequest(http.MethodPost, "/esim/actions/switch", strings.NewReader(`{"iccid":"8900000000000000001"}`)), []string{"actions", "switch"}, "dev1", false)
+	server.handleESIM(absent, httptest.NewRequest(http.MethodPost, "/esim/actions/switch", strings.NewReader(`{"iccid":"8900000000000000001"}`)), []string{"actions", "switch"}, "dev1", "dev1", false)
 	if absent.Code != http.StatusServiceUnavailable {
 		t.Fatalf("switch (no device) status = %d, want 503", absent.Code)
 	}
@@ -260,7 +261,7 @@ func TestHandleESIMShapes(t *testing.T) {
 	swOK := httptest.NewRecorder()
 	swReq := httptest.NewRequest(http.MethodPost, "/esim/actions/switch", strings.NewReader(`{"iccid":"8900000000000000001","aid_hex":"A0"}`))
 	swReq.Header.Set("Content-Type", "application/json")
-	present.handleESIM(swOK, swReq, []string{"actions", "switch"}, "dev1", true)
+	present.handleESIM(swOK, swReq, []string{"actions", "switch"}, "dev1", "dev1", true)
 	if swOK.Code != http.StatusOK {
 		t.Fatalf("switch happy-path status = %d, body=%s", swOK.Code, swOK.Body.String())
 	}
@@ -272,7 +273,7 @@ func TestHandleESIMShapes(t *testing.T) {
 	disableOK := httptest.NewRecorder()
 	disableReq := httptest.NewRequest(http.MethodPost, "/esim/actions/disable", strings.NewReader(`{"iccid":"8900000000000000001","aid_hex":"A0000005591010FFFFFFFF8900000100"}`))
 	disableReq.Header.Set("Content-Type", "application/json")
-	present.handleESIM(disableOK, disableReq, []string{"actions", "disable"}, "dev1", true)
+	present.handleESIM(disableOK, disableReq, []string{"actions", "disable"}, "dev1", "dev1", true)
 	if disableOK.Code != http.StatusOK {
 		t.Fatalf("disable happy-path status = %d, body=%s", disableOK.Code, disableOK.Body.String())
 	}
@@ -284,7 +285,7 @@ func TestHandleESIMShapes(t *testing.T) {
 	renameOK := httptest.NewRecorder()
 	renameReq := httptest.NewRequest(http.MethodPatch, "/esim/profiles/8900000000000000001", strings.NewReader(`{"name":"Test profile","aid_hex":"A0000005591010FFFFFFFF8900000100"}`))
 	renameReq.Header.Set("Content-Type", "application/json")
-	present.handleESIM(renameOK, renameReq, []string{"profiles", "8900000000000000001"}, "dev1", true)
+	present.handleESIM(renameOK, renameReq, []string{"profiles", "8900000000000000001"}, "dev1", "dev1", true)
 	if renameOK.Code != http.StatusOK {
 		t.Fatalf("rename happy-path status = %d, body=%s", renameOK.Code, renameOK.Body.String())
 	}
@@ -294,9 +295,55 @@ func TestHandleESIMShapes(t *testing.T) {
 
 	// Download on a present device but with no smdp address reports 400.
 	dlNoSmdp := httptest.NewRecorder()
-	present.handleESIM(dlNoSmdp, httptest.NewRequest(http.MethodGet, "/esim/actions/download", nil), []string{"actions", "download"}, "dev1", true)
+	present.handleESIM(dlNoSmdp, httptest.NewRequest(http.MethodGet, "/esim/actions/download", nil), []string{"actions", "download"}, "dev1", "dev1", true)
 	if dlNoSmdp.Code != http.StatusBadRequest {
 		t.Fatalf("download (no smdp) status = %d, want 400", dlNoSmdp.Code)
+	}
+}
+
+func TestEsimSwitchStopsVoWiFiAndPersistsDisabledPolicy(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	config := store.Device{ID: "dev1", Name: "410", VoWiFiEnabled: true}
+	if err := database.UpsertDevice(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeVoWiFiController{state: vowifi.State{
+		DeviceID: "dev1",
+		Enabled:  true,
+		Active:   true,
+		Phase:    vowifi.PhaseAccessReady,
+	}}
+	server := &Server{
+		store:               database,
+		logger:              regionTestLogger(),
+		maxRequestBodyBytes: 4096,
+		devices:             fakeDeviceController{},
+		vowifi:              controller,
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/esim/actions/switch",
+		strings.NewReader(`{"iccid":"8900000000000000001","aid_hex":"A0"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handleESIM(response, request, []string{"actions", "switch"}, "dev1", "dev1", true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if len(controller.enabled) != 1 || controller.enabled[0] {
+		t.Fatalf("VoWiFi requests = %v, want one disable", controller.enabled)
+	}
+	stored, err := database.Device(context.Background(), "dev1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.VoWiFiEnabled {
+		t.Fatal("VoWiFi device policy remained enabled after profile switch")
 	}
 }
 

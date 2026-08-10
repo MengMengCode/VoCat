@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"vocat/internal/device"
+	"vocat/internal/store"
+	"vocat/internal/vowifi"
 )
 
 func esimUnavailable(w http.ResponseWriter) {
@@ -15,7 +18,7 @@ func esimUnavailable(w http.ResponseWriter) {
 }
 
 // handleESIM routes every /devices/{id}/esim* path.
-func (s *Server) handleESIM(w http.ResponseWriter, r *http.Request, rest []string, physicalID string, physicalPresent bool) bool {
+func (s *Server) handleESIM(w http.ResponseWriter, r *http.Request, rest []string, configID string, physicalID string, physicalPresent bool) bool {
 	if len(rest) == 0 || (len(rest) == 1 && strings.TrimSpace(rest[0]) == "") {
 		if !requireMethod(w, r, http.MethodGet) {
 			return true
@@ -60,7 +63,7 @@ func (s *Server) handleESIM(w http.ResponseWriter, r *http.Request, rest []strin
 			if !requireMethod(w, r, http.MethodPost) {
 				return true
 			}
-			s.handleEsimSwitch(w, r, physicalID, physicalPresent)
+			s.handleEsimSwitch(w, r, configID, physicalID, physicalPresent)
 			return true
 		}
 		if len(rest) == 2 && rest[1] == "disable" {
@@ -316,7 +319,7 @@ func (s *Server) handleEsimRename(w http.ResponseWriter, r *http.Request, physic
 
 // handleEsimSwitch enables one already-installed profile by ICCID (切卡). The
 // eUICC EnableProfile command needs no authentication key.
-func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, physicalID string, physicalPresent bool) {
+func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, configID string, physicalID string, physicalPresent bool) {
 	if s.devices == nil {
 		writeError(w, http.StatusServiceUnavailable, "device_manager_unavailable", "device manager is unavailable")
 		return
@@ -342,11 +345,77 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, physic
 	// which normally takes longer than the server's ordinary response deadline.
 	controller := http.NewResponseController(w)
 	_ = controller.SetWriteDeadline(time.Time{})
+	if err := s.quiesceVoWiFiForESIM(r.Context(), configID); err != nil {
+		writeError(w, http.StatusConflict, "vowifi_quiesce_failed", err.Error())
+		return
+	}
 	if err := s.devices.ESIMSwitchProfile(r.Context(), physicalID, iccid, request.AIDHex); err != nil {
 		s.writeDeviceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"status": "switched", "iccid": iccid, "verified": true}})
+}
+
+// quiesceVoWiFiForESIM prevents an in-flight USIM AKA exchange from racing an
+// ES10c EnableProfile command. A profile switch changes the subscriber
+// identity, so the old card's desired VoWiFi session is intentionally left
+// disabled; the new card can then be enabled under its own policy.
+func (s *Server) quiesceVoWiFiForESIM(ctx context.Context, configID string) error {
+	configID = strings.TrimSpace(configID)
+	if configID == "" || s.vowifi == nil {
+		return nil
+	}
+	state, stateErr := s.vowifi.State(configID)
+	if stateErr != nil {
+		return fmt.Errorf("stop VoWiFi before eSIM switch: %w", stateErr)
+	}
+
+	var previous *store.Device
+	if s.store != nil {
+		config, err := s.store.Device(ctx, configID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("load device policy before eSIM switch: %w", err)
+		}
+		if err == nil && config.VoWiFiEnabled {
+			copy := config
+			previous = &copy
+			config.VoWiFiEnabled = false
+			if err := s.store.UpsertDevice(ctx, config); err != nil {
+				return fmt.Errorf("disable VoWiFi policy before eSIM switch: %w", err)
+			}
+		}
+	}
+
+	needsStop := state.Enabled || state.Active ||
+		(state.Phase != vowifi.PhaseIdle && state.Phase != vowifi.PhaseFailed)
+	if needsStop {
+		if _, err := s.vowifi.RequestEnabled(configID, false); err != nil {
+			if previous != nil {
+				_ = s.store.UpsertDevice(context.Background(), *previous)
+			}
+			return fmt.Errorf("stop VoWiFi before eSIM switch: %w", err)
+		}
+	}
+
+	waitContext, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		state, err := s.vowifi.State(configID)
+		if err != nil {
+			return fmt.Errorf("confirm VoWiFi stopped before eSIM switch: %w", err)
+		}
+		if !state.Enabled && !state.Active &&
+			(state.Phase == vowifi.PhaseIdle || state.Phase == vowifi.PhaseFailed) {
+			return nil
+		}
+		select {
+		case <-waitContext.Done():
+			return fmt.Errorf("wait for VoWiFi to stop before eSIM switch: %w", waitContext.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *Server) handleEsimDisable(w http.ResponseWriter, r *http.Request, physicalID string, physicalPresent bool) {
