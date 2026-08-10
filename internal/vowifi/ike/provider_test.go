@@ -193,6 +193,43 @@ func (unusedInstaller) Install(context.Context, ChildSAConfig) (ChildSAHandle, e
 	return nil, errors.New("test: installer must not run")
 }
 
+type relayOrderedChild struct {
+	relayDone <-chan struct{}
+}
+
+func (child relayOrderedChild) Close(ctx context.Context) error {
+	select {
+	case <-child.relayDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestSessionCloseStopsRelayBeforeChildDataplane(t *testing.T) {
+	t.Parallel()
+	transport := newFakeSessionTransport()
+	relay := newSessionRelay(
+		transport,
+		legacyTestSuite(),
+		ikeKeys{},
+		[8]byte{1},
+		[8]byte{2},
+		true,
+		time.Hour,
+	)
+	session := &Session{
+		child:     relayOrderedChild{relayDone: relay.done},
+		relay:     relay,
+		transport: transport,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	if err := session.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 func TestProviderVodafoneFirstAuthIsEAPOnlyAndRequestsIMSAPN(t *testing.T) {
 	capture := &firstAuthCaptureTransport{t: t}
 	provider, err := NewProvider(Config{

@@ -19,7 +19,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const userspaceTunnelMTU = 1380
+const (
+	userspaceTunnelMTU  = 1380
+	tunReadPollInterval = 100 * time.Millisecond
+)
 
 type linuxUserspaceInstaller struct {
 	ipCommand string
@@ -120,7 +123,11 @@ func openLinuxTUN(name string) (*os.File, string, error) {
 		return nil, "", fmt.Errorf("ike: invalid TUN interface name: %w", err)
 	}
 	request.SetUint16(uint16(unix.IFF_TUN | unix.IFF_NO_PI))
-	descriptor, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
+	descriptor, err := unix.Open(
+		"/dev/net/tun",
+		unix.O_RDWR|unix.O_CLOEXEC,
+		0,
+	)
 	if err != nil {
 		return nil, "", fmt.Errorf("ike: open /dev/net/tun: %w", err)
 	}
@@ -475,7 +482,7 @@ func (handle *linuxUserspaceHandle) copyTUNToRelay() {
 	defer handle.wait.Done()
 	buffer := make([]byte, 65535)
 	for {
-		count, err := handle.tun.Read(buffer)
+		count, err := handle.readTUNPacket(buffer)
 		if err != nil {
 			if handle.runContext.Err() == nil && !errors.Is(err, os.ErrClosed) {
 				handle.fail(fmt.Errorf("ike: read TUN packet: %w", err))
@@ -499,6 +506,40 @@ func (handle *linuxUserspaceHandle) copyTUNToRelay() {
 			}
 			return
 		}
+	}
+}
+
+func (handle *linuxUserspaceHandle) readTUNPacket(buffer []byte) (int, error) {
+	descriptor := int(handle.tun.Fd())
+	for {
+		if err := handle.runContext.Err(); err != nil {
+			return 0, err
+		}
+		poll := []unix.PollFd{{Fd: int32(descriptor), Events: unix.POLLIN}}
+		ready, err := unix.Poll(poll, int(tunReadPollInterval/time.Millisecond))
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if ready == 0 {
+			continue
+		}
+		if err := handle.runContext.Err(); err != nil {
+			return 0, err
+		}
+		if poll[0].Revents&unix.POLLIN == 0 {
+			if poll[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+				return 0, os.ErrClosed
+			}
+			continue
+		}
+		count, err := unix.Read(descriptor, buffer)
+		if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) {
+			continue
+		}
+		return count, err
 	}
 }
 
@@ -583,9 +624,13 @@ func (handle *linuxUserspaceHandle) Close(ctx context.Context) error {
 	handle.mu.Unlock()
 
 	handle.cancelRun()
+	// TUN reads used to block forever after cancellation on the 410 kernel.
+	// Wait for the context-aware poll loops before network cleanup, then close
+	// the non-persistent descriptor so the deterministic interface name is
+	// available to the next reconnect.
+	handle.wait.Wait()
 	cleanupErr := handle.cleanupNetwork(ctx)
 	handle.closeTUN()
-	handle.wait.Wait()
 	// A terminal data-plane error is delivered exactly once through Failures.
 	// Close reports only teardown errors so the orchestrator does not record
 	// the same runtime cause again as a cleanup failure.

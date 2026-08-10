@@ -96,6 +96,39 @@ func (blockingNATTRelay) ReceiveESP(ctx context.Context, _ []byte) (int, error) 
 	return 0, ctx.Err()
 }
 
+func TestLinuxUserspaceTUNReaderStopsOnCancel(t *testing.T) {
+	t.Parallel()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	runContext, cancel := context.WithCancel(context.Background())
+	handle := &linuxUserspaceHandle{
+		tun:        reader,
+		runContext: runContext,
+		cancel:     cancel,
+	}
+	handle.wait.Add(1)
+	done := make(chan struct{})
+	go func() {
+		handle.copyTUNToRelay()
+		close(done)
+	}()
+	handle.cancelRun()
+
+	select {
+	case <-done:
+		_ = reader.Close()
+	case <-time.After(time.Second):
+		// Release the old blocking implementation before failing the test.
+		_ = reader.Close()
+		<-done
+		t.Fatal("TUN reader did not stop after runtime cancellation")
+	}
+}
+
 func TestLinuxUserspaceInstallerLifecycle(t *testing.T) {
 	if os.Getenv("VOCAT_NETNS_TEST") != "1" {
 		t.Skip("set VOCAT_NETNS_TEST=1 inside an isolated Linux network namespace")

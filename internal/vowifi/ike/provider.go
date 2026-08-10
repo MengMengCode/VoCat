@@ -862,14 +862,16 @@ func (session *Session) Close(ctx context.Context) error {
 	session.transport = nil
 	session.mu.Unlock()
 	var errs []error
-	if child != nil {
-		if err := child.Close(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("remove CHILD_SA: %w", err))
-		}
-	}
+	// Stop the relay first so a userspace CHILD_SA cannot remain blocked in an
+	// inbound ESP receive while Close waits for its data-plane workers.
 	if relay != nil {
 		if err := relay.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close session relay: %w", err))
+		}
+	}
+	if child != nil {
+		if err := child.Close(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("remove CHILD_SA: %w", err))
 		}
 	}
 	if transport != nil {
