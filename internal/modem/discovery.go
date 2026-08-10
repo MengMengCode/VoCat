@@ -37,10 +37,10 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 	usbRoot := filepath.Join(d.SysRoot, "bus", "usb", "devices")
 	entries, err := os.ReadDir(usbRoot)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("discover Quectel USB devices: %w", err)
 		}
-		return nil, fmt.Errorf("discover Quectel USB devices: %w", err)
+		entries = nil
 	}
 
 	aliases := readSerialAliases(filepath.Join(d.DevRoot, "serial", "by-id"))
@@ -131,8 +131,125 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 		state.candidate.ATPort = selectATPort(state.candidate.Ports)
 		result = append(result, state.candidate)
 	}
+	for _, native := range d.discoverNativeWWAN() {
+		merged := false
+		for index := range result {
+			if result[index].NetworkInterface == "" ||
+				result[index].NetworkInterface != native.NetworkInterface {
+				continue
+			}
+			if result[index].QMIControl == "" {
+				result[index].QMIControl = native.QMIControl
+			}
+			if !result[index].HasATPort() && native.HasATPort() {
+				result[index].ATPort = native.ATPort
+				result[index].Ports = append(result[index].Ports, native.Ports...)
+			}
+			merged = true
+			break
+		}
+		if !merged {
+			result = append(result, native)
+		}
+	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
+}
+
+// discoverNativeWWAN finds embedded Qualcomm/OpenStick-style modems exposed by
+// Linux's WWAN class. Unlike USB modems, these ports live directly under
+// /sys/class/wwan and use /dev/wwan0at0 plus /dev/wwan0qmi0 instead of ttyUSB
+// and cdc-wdm nodes.
+func (d *SysFSDiscoverer) discoverNativeWWAN() []Candidate {
+	classRoot := filepath.Join(d.SysRoot, "class", "wwan")
+	entries, err := os.ReadDir(classRoot)
+	if err != nil {
+		return nil
+	}
+	type nativePorts struct {
+		at  []string
+		qmi []string
+	}
+	groups := make(map[string]*nativePorts)
+	for _, entry := range entries {
+		parent, kind := splitNativeWWANPortName(entry.Name())
+		if parent == "" || kind == "" {
+			continue
+		}
+		path := filepath.Join(d.DevRoot, entry.Name())
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		group := groups[parent]
+		if group == nil {
+			group = &nativePorts{}
+			groups[parent] = group
+		}
+		switch kind {
+		case "at":
+			group.at = append(group.at, entry.Name())
+		case "qmi":
+			group.qmi = append(group.qmi, entry.Name())
+		}
+	}
+
+	result := make([]Candidate, 0, len(groups))
+	for parent, group := range groups {
+		if len(group.qmi) == 0 {
+			continue
+		}
+		sort.Strings(group.at)
+		sort.Strings(group.qmi)
+		candidate := Candidate{
+			ID:           parent,
+			Manufacturer: "Qualcomm",
+			Product:      "410 WiFi stick",
+			USBPath:      filepath.Join(classRoot, parent),
+			QMIControl:   filepath.Join(d.DevRoot, group.qmi[0]),
+		}
+		if _, err := os.Stat(filepath.Join(d.SysRoot, "class", "net", parent)); err == nil {
+			candidate.NetworkInterface = parent
+		}
+		for _, name := range group.at {
+			candidate.Ports = append(candidate.Ports, Port{
+				Path: filepath.Join(d.DevRoot, name),
+				Name: name,
+				Role: PortRoleAT,
+			})
+		}
+		if len(candidate.Ports) > 0 {
+			candidate.ATPort = candidate.Ports[0]
+		}
+		result = append(result, candidate)
+	}
+	return result
+}
+
+func splitNativeWWANPortName(name string) (parent, kind string) {
+	if !strings.HasPrefix(name, "wwan") {
+		return "", ""
+	}
+	index := len("wwan")
+	for index < len(name) && name[index] >= '0' && name[index] <= '9' {
+		index++
+	}
+	if index == len("wwan") || index == len(name) {
+		return "", ""
+	}
+	parent = name[:index]
+	for _, marker := range []string{"at", "qmi"} {
+		if !strings.HasPrefix(name[index:], marker) {
+			continue
+		}
+		suffix := name[index+len(marker):]
+		if suffix == "" || strings.IndexFunc(suffix, func(character rune) bool {
+			return character < '0' || character > '9'
+		}) >= 0 {
+			return "", ""
+		}
+		return parent, marker
+	}
+	return "", ""
 }
 
 func parseUSBInterfaceName(name string) (int, bool) {

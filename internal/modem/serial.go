@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"go.bug.st/serial"
 )
@@ -20,6 +21,22 @@ func (opener SerialOpener) Open(ctx context.Context, port Port) (Client, error) 
 	path := port.OpenPath()
 	if path == "" {
 		return nil, errors.New("modem: candidate has no AT port")
+	}
+	if isNativeWWANATPath(path) {
+		rawPort, err := openNativeWWANATTransport(path)
+		if err != nil {
+			return nil, fmt.Errorf("open WWAN AT port %s: %w", path, err)
+		}
+		if err := rawPort.ResetInputBuffer(); err != nil {
+			_ = rawPort.Close()
+			return nil, fmt.Errorf("reset WWAN AT input buffer %s: %w", path, err)
+		}
+		session, err := NewSession(rawPort, opener.SessionOptions)
+		if err != nil {
+			_ = rawPort.Close()
+			return nil, err
+		}
+		return session, nil
 	}
 	baudRate := opener.BaudRate
 	if baudRate <= 0 {
@@ -44,4 +61,9 @@ func (opener SerialOpener) Open(ctx context.Context, port Port) (Client, error) 
 		return nil, err
 	}
 	return session, nil
+}
+
+func isNativeWWANATPath(path string) bool {
+	_, kind := splitNativeWWANPortName(filepath.Base(filepath.Clean(path)))
+	return kind == "at"
 }

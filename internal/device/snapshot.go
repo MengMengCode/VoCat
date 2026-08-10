@@ -30,7 +30,9 @@ func (manager *Manager) readSnapshot(
 		return snapshot, fmt.Errorf("probe modem: %w", err)
 	}
 	snapshot.Responsive = true
-	snapshot.Manufacturer, snapshot.Model, snapshot.Firmware = parseATI(ati.Lines)
+	var atiIMEI string
+	snapshot.Manufacturer, snapshot.Model, snapshot.Firmware, atiIMEI = parseATI(ati.Lines)
+	snapshot.IMEI = atiIMEI
 	if snapshot.Model == "" && !strings.EqualFold(candidate.Product, "Android") {
 		snapshot.Model = candidate.Product
 	}
@@ -102,23 +104,37 @@ func (manager *Manager) readSnapshot(
 		snapshot.RegistrationStatus = 1
 		snapshot.RegistrationSource = "COPS"
 	}
-	if response, ok := optional("AT+CGSN"); ok {
-		snapshot.IMEI = parseIdentifier(
-			response,
-			[]string{"+CGSN:", "+GSN:"},
-			14,
-			17,
-		)
+	if snapshot.IMEI == "" {
+		response, ok := optional("AT+CGSN")
+		if ok {
+			snapshot.IMEI = parseIdentifier(
+				response,
+				[]string{"+CGSN:", "+GSN:"},
+				14,
+				17,
+			)
+		}
 	}
 
-	ccid, ccidErr := manager.command(ctx, client, "AT+CCID")
-	if ccidErr != nil {
-		ccid, ccidErr = manager.command(ctx, client, "AT+QCCID")
+	var ccidErr error
+	for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+ICCID"} {
+		var ccid modem.Response
+		ccid, ccidErr = manager.command(ctx, client, command)
+		if ccidErr != nil {
+			continue
+		}
+		snapshot.ICCID = parseICCIDIdentifier(
+			ccid,
+			[]string{"+CCID:", "+QCCID:", "+ICCID:", "ICCID:"},
+			18,
+			22,
+		)
+		if snapshot.ICCID != "" {
+			break
+		}
 	}
-	if ccidErr != nil {
+	if snapshot.ICCID == "" && ccidErr != nil {
 		snapshot.Warnings = append(snapshot.Warnings, "read ICCID: "+ccidErr.Error())
-	} else {
-		snapshot.ICCID = parseICCIDIdentifier(ccid, []string{"+CCID:", "+QCCID:"}, 18, 22)
 	}
 	if response, ok := optional("AT+CIMI"); ok {
 		snapshot.IMSI = parseIdentifier(response, []string{"+CIMI:"}, 10, 18)
@@ -158,13 +174,20 @@ func parseRegistrationStatus(response modem.Response) (int, bool) {
 	return 0, false
 }
 
-func parseATI(lines []string) (manufacturer, model, firmware string) {
+func parseATI(lines []string) (manufacturer, model, firmware, imei string) {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		upper := strings.ToUpper(line)
 		switch {
+		case strings.HasPrefix(upper, "MANUFACTURER:"):
+			manufacturer = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+		case strings.HasPrefix(upper, "MODEL:"):
+			model = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
 		case strings.HasPrefix(upper, "REVISION:"):
 			firmware = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+		case strings.HasPrefix(upper, "IMEI:"):
+			response := modem.Response{Lines: []string{line}}
+			imei = parseIdentifier(response, []string{"IMEI:"}, 14, 17)
 		case strings.Contains(upper, "QUECTEL"):
 			manufacturer = line
 		case strings.HasPrefix(upper, "EC20") || strings.HasPrefix(upper, "EC25"):

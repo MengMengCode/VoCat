@@ -26,6 +26,7 @@ import (
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
+	"vocat/internal/modem"
 	"vocat/internal/server"
 	"vocat/internal/store"
 	"vocat/internal/update"
@@ -668,6 +669,7 @@ func provisionDiscoveredDevices(
 	}
 	for _, discovered := range manager.List() {
 		candidate := discovered.Candidate
+		deviceType := provisionedDeviceType(candidate)
 		backend := "at"
 		control := candidate.ATPort.OpenPath()
 		if candidate.QMIControl != "" {
@@ -681,6 +683,7 @@ func provisionDiscoveredDevices(
 		if err := database.UpsertDevice(ctx, store.Device{
 			ID:             discovered.ID,
 			Name:           name,
+			DeviceType:     deviceType,
 			Interface:      candidate.NetworkInterface,
 			ControlDevice:  control,
 			ATPort:         candidate.ATPort.OpenPath(),
@@ -700,6 +703,16 @@ func provisionDiscoveredDevices(
 		}
 	}
 	return nil
+}
+
+func provisionedDeviceType(candidate modem.Candidate) string {
+	classPath := filepath.ToSlash(filepath.Clean(candidate.USBPath))
+	controlName := filepath.Base(filepath.Clean(candidate.QMIControl))
+	if strings.Contains(classPath, "/class/wwan/") &&
+		strings.HasPrefix(controlName, "wwan") && strings.Contains(controlName, "qmi") {
+		return store.DeviceTypeWiFi410
+	}
+	return store.DeviceTypePCIeEC20EC25
 }
 
 // persistLogsToStore subscribes to the live log hub and durably appends every

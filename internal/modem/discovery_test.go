@@ -190,6 +190,44 @@ func TestSysFSDiscoveryIgnoresNonQuectelUSB(t *testing.T) {
 	}
 }
 
+func TestSysFSDiscoveryFindsNativeWWANQMIAndATPorts(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+
+	for _, name := range []string{"wwan0", "wwan0at0", "wwan0qmi0"} {
+		mustMkdir(t, filepath.Join(sysRoot, "class", "wwan", name))
+	}
+	mustWrite(t, filepath.Join(devRoot, "wwan0at0"), "")
+	mustWrite(t, filepath.Join(devRoot, "wwan0qmi0"), "")
+	mustMkdir(t, filepath.Join(sysRoot, "class", "net", "wwan0"))
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1: %#v", len(candidates), candidates)
+	}
+	candidate := candidates[0]
+	if candidate.ID != "wwan0" {
+		t.Fatalf("ID = %q, want wwan0", candidate.ID)
+	}
+	if candidate.USBPath != filepath.Join(sysRoot, "class", "wwan", "wwan0") {
+		t.Fatalf("USB path = %q", candidate.USBPath)
+	}
+	if candidate.ATPort.OpenPath() != filepath.Join(devRoot, "wwan0at0") ||
+		candidate.ATPort.Role != PortRoleAT {
+		t.Fatalf("AT port = %#v", candidate.ATPort)
+	}
+	if candidate.QMIControl != filepath.Join(devRoot, "wwan0qmi0") {
+		t.Fatalf("QMI control = %q", candidate.QMIControl)
+	}
+	if candidate.NetworkInterface != "wwan0" {
+		t.Fatalf("network interface = %q", candidate.NetworkInterface)
+	}
+}
+
 func mustWrite(t *testing.T, path, value string) {
 	t.Helper()
 	mustMkdir(t, filepath.Dir(path))
