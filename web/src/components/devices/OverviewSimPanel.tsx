@@ -19,7 +19,9 @@ export function OverviewSimPanel({ device, simOperatorDisplay, e911Starting, onS
   const modem = device.modem;
   const sensitive = !showSensitive;
   const activeEsim = (device.activeEsimProfileName || "").trim();
-  const flightOn = device.vowifiActive || modem?.operatingMode === 0 || modem?.operatingMode === 4;
+  const flightOn = Boolean(
+    device.flightMode || device.vowifiActive || [0, 4, 7].includes(Number(modem?.operatingMode)),
+  );
   const carrierFlag = flagEmoji(carrierIso(modem?.imsi));
   const operatorValue =
     carrierFlag && simOperatorDisplay !== "--" ? `${carrierFlag} ${simOperatorDisplay}` : simOperatorDisplay;

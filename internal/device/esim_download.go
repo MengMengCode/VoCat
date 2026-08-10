@@ -299,5 +299,6 @@ func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInv
 		}
 		return nil, ErrNoEUICC
 	}
+	manager.cacheActiveESIMProfileName(id, entries)
 	return entries, nil
 }

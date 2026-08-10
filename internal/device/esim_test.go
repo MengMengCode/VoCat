@@ -319,3 +319,28 @@ func TestMarkCachedProfileEnabled(t *testing.T) {
 		t.Fatalf("target profile state = %#v", info.Profiles[1])
 	}
 }
+
+func TestActiveESIMProfileNameUsesEnabledCachedProfile(t *testing.T) {
+	manager := &Manager{esimCache: map[string]EsimInfo{
+		"wwan0": {Profiles: []EsimProfile{
+			{ICCID: "89441000400316034372", Name: "Vodafone UK eSIM", State: 0},
+			{ICCID: "89636624020107210949", Name: "DITO +639910074034", ServiceProvider: "DITO", State: 1},
+		}},
+	}}
+
+	if got := manager.ActiveESIMProfileName("wwan0"); got != "DITO +639910074034" {
+		t.Fatalf("active eSIM profile name = %q", got)
+	}
+	if got := manager.ActiveESIMProfileName("missing"); got != "" {
+		t.Fatalf("missing active eSIM profile name = %q", got)
+	}
+
+	manager.cacheActiveESIMProfileName("wwan0", []EsimInventoryEntry{{
+		Info: EsimInfo{Profiles: []EsimProfile{{
+			ICCID: "89636624020107210949", Name: "", ServiceProvider: "DITO", State: 1,
+		}}},
+	}})
+	if got := manager.ActiveESIMProfileName("wwan0"); got != "DITO" {
+		t.Fatalf("inventory active eSIM profile name = %q", got)
+	}
+}

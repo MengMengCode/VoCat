@@ -97,6 +97,71 @@ func (info *EsimInfo) EnabledProfile() *EsimProfile {
 	return nil
 }
 
+// ActiveESIMProfileName returns the display name of the enabled profile from
+// the most recent eUICC inventory. It is deliberately cache-only: device
+// overview rendering must never open a logical channel on every SSE tick.
+func (manager *Manager) ActiveESIMProfileName(id string) string {
+	manager.esimCacheMu.RLock()
+	activeName := strings.TrimSpace(manager.esimActiveName[id])
+	info, ok := manager.esimCache[id]
+	if ok {
+		info = cloneESIMInfo(info)
+	}
+	manager.esimCacheMu.RUnlock()
+	if activeName != "" {
+		return activeName
+	}
+	if !ok {
+		return ""
+	}
+	for _, profile := range info.Profiles {
+		if profile.State != 1 {
+			continue
+		}
+		return firstNonEmptyString(
+			profile.Name,
+			profile.Nickname,
+			profile.ServiceProvider,
+			profile.ICCID,
+		)
+	}
+	return ""
+}
+
+func (manager *Manager) cacheActiveESIMProfileName(id string, entries []EsimInventoryEntry) {
+	name := ""
+	for _, entry := range entries {
+		for _, profile := range entry.Info.Profiles {
+			if profile.State == 1 {
+				name = firstNonEmptyString(profile.Name, profile.Nickname, profile.ServiceProvider, profile.ICCID)
+				break
+			}
+		}
+		if name != "" {
+			break
+		}
+	}
+	manager.esimCacheMu.Lock()
+	if manager.esimActiveName == nil {
+		manager.esimActiveName = make(map[string]string)
+	}
+	if name == "" {
+		delete(manager.esimActiveName, id)
+	} else {
+		manager.esimActiveName[id] = name
+	}
+	manager.esimCacheMu.Unlock()
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // decodeICCID converts a GSM BCD (nibble-swapped) ICCID to its digit string.
 func decodeICCID(raw []byte) string {
 	var builder strings.Builder
