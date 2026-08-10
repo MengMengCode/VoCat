@@ -715,9 +715,7 @@ func provisionDiscoveredDevices(
 
 func provisionedDeviceType(candidate modem.Candidate) string {
 	classPath := filepath.ToSlash(filepath.Clean(candidate.USBPath))
-	controlName := filepath.Base(filepath.Clean(candidate.QMIControl))
-	if strings.Contains(classPath, "/class/wwan/") &&
-		strings.HasPrefix(controlName, "wwan") && strings.Contains(controlName, "qmi") {
+	if strings.Contains(classPath, "/class/wwan/") {
 		return store.DeviceTypeWiFi410
 	}
 	return store.DeviceTypePCIeEC20EC25

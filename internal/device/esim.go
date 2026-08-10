@@ -182,11 +182,23 @@ func parseCSIM(response modem.Response) ([]byte, int, error) {
 	return raw[:len(raw)-2], sw, nil
 }
 
+// euiccChannelBackend hides how a logical channel reaches the UICC. Ordinary
+// Quectel USB modems use AT+CSIM, while native OpenStick/410 WWAN devices must
+// use QMI-UIM because their WWAN AT firmware rejects AT+CSIM.
+type euiccChannelBackend interface {
+	exchange(context.Context, []byte) ([]byte, int, error)
+	close(context.Context) error
+}
+
 // euiccChannel is an open logical channel to the eUICC's ISD-R.
 type euiccChannel struct {
+	backend euiccChannelBackend
+}
+
+type atEUICCChannelBackend struct {
 	manager *Manager
 	id      string
-	channel int
+	channel byte
 }
 
 // csimAPDUTimeout bounds a single AT+CSIM exchange. Loading a BoundProfilePackage
@@ -258,6 +270,15 @@ func (manager *Manager) openEuiccOnce(ctx context.Context, id string) (*euiccCha
 }
 
 func (manager *Manager) openEuiccOnceAID(ctx context.Context, id, aidHex string) (*euiccChannel, error) {
+	if controlDevice, ok, err := manager.nativeQMIControl(id); err != nil {
+		return nil, err
+	} else if ok {
+		return manager.openQMIEuiccOnceAID(ctx, controlDevice, aidHex)
+	}
+	return manager.openATEuiccOnceAID(ctx, id, aidHex)
+}
+
+func (manager *Manager) openATEuiccOnceAID(ctx context.Context, id, aidHex string) (*euiccChannel, error) {
 	// MANAGE CHANNEL (open): 00 70 00 00 01 -> "<channel> 90 00". This EC20
 	// firmware requires the explicit one-byte expected length: Le=00 opens a
 	// channel but then rejects SELECT ISD-R at the AT+CSIM layer.
@@ -268,7 +289,8 @@ func (manager *Manager) openEuiccOnceAID(ctx context.Context, id, aidHex string)
 	if sw != 0x9000 || len(payload) != 1 {
 		return nil, errNoLogicalChannel
 	}
-	channel := &euiccChannel{manager: manager, id: id, channel: int(payload[0])}
+	backend := &atEUICCChannelBackend{manager: manager, id: id, channel: payload[0]}
+	channel := &euiccChannel{backend: backend}
 
 	// SELECT ISD-R by AID on the logical channel: CLA=channel, INS=A4, P1=04.
 	aidHex = strings.ToUpper(strings.TrimSpace(aidHex))
@@ -277,8 +299,8 @@ func (manager *Manager) openEuiccOnceAID(ctx context.Context, id, aidHex string)
 		channel.close(context.Background())
 		return nil, fmt.Errorf("esim: invalid ISD-R AID %q", aidHex)
 	}
-	selectAID := append([]byte{byte(channel.channel), 0xA4, 0x04, 0x00, byte(len(aid))}, aid...)
-	_, sw, err = manager.csim(ctx, id, selectAID)
+	selectAID := append([]byte{0x00, 0xA4, 0x04, 0x00, byte(len(aid))}, aid...)
+	_, sw, err = backend.exchange(ctx, selectAID)
 	if err != nil {
 		channel.close(context.Background())
 		return nil, err
@@ -331,16 +353,21 @@ func isTransientEuiccCME(err error) bool {
 
 // close releases the logical channel (MANAGE CHANNEL close).
 func (channel *euiccChannel) close(ctx context.Context) {
-	closeAPDU := []byte{0x00, 0x70, 0x80, byte(channel.channel), 0x00}
-	_, _, _ = channel.manager.csim(ctx, channel.id, closeAPDU)
+	if channel == nil || channel.backend == nil {
+		return
+	}
+	_ = channel.backend.close(ctx)
 }
 
-// transmit sends one APDU on the logical channel (CLA high nibble from insClass,
-// channel number in the low nibble), following 61xx "more data" continuations,
-// and returns the assembled payload.
+// transmit sends one APDU on the logical channel, following 61xx "more data"
+// continuations, and returns the assembled payload. The backend either encodes
+// the channel in CLA for AT+CSIM or supplies it separately to QMI-UIM.
 func (channel *euiccChannel) transmit(ctx context.Context, apdu []byte, insClass byte) ([]byte, int, error) {
-	apdu[0] = (apdu[0] & 0xF0) | byte(channel.channel)
-	payload, sw, err := channel.manager.csim(ctx, channel.id, apdu)
+	if channel == nil || channel.backend == nil || len(apdu) == 0 {
+		return nil, 0, errors.New("esim: invalid eUICC APDU channel")
+	}
+	command := append([]byte(nil), apdu...)
+	payload, sw, err := channel.backend.exchange(ctx, command)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -348,8 +375,8 @@ func (channel *euiccChannel) transmit(ctx context.Context, apdu []byte, insClass
 	guard := 0
 	for sw>>8 == 0x61 && guard < 24 {
 		guard++
-		getResponse := []byte{0x80 | byte(channel.channel), 0xC0, 0x00, 0x00, byte(sw & 0xFF)}
-		frag, nextSW, err := channel.manager.csim(ctx, channel.id, getResponse)
+		getResponse := []byte{insClass & 0xF0, 0xC0, 0x00, 0x00, byte(sw & 0xFF)}
+		frag, nextSW, err := channel.backend.exchange(ctx, getResponse)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -357,6 +384,27 @@ func (channel *euiccChannel) transmit(ctx context.Context, apdu []byte, insClass
 		sw = nextSW
 	}
 	return assembled, sw, nil
+}
+
+func (backend *atEUICCChannelBackend) exchange(
+	ctx context.Context,
+	apdu []byte,
+) ([]byte, int, error) {
+	if backend == nil || backend.manager == nil || len(apdu) == 0 {
+		return nil, 0, errors.New("esim: invalid AT eUICC channel")
+	}
+	command := append([]byte(nil), apdu...)
+	command[0] = (command[0] & 0xF0) | (backend.channel & 0x0F)
+	return backend.manager.csim(ctx, backend.id, command)
+}
+
+func (backend *atEUICCChannelBackend) close(ctx context.Context) error {
+	if backend == nil || backend.manager == nil {
+		return nil
+	}
+	closeAPDU := []byte{0x00, 0x70, 0x80, backend.channel, 0x00}
+	_, _, err := backend.manager.csim(ctx, backend.id, closeAPDU)
+	return err
 }
 
 // es10 runs one ES10 command: it wraps the DER request body in one or more
@@ -852,25 +900,38 @@ func (manager *Manager) verifySwitchedICCID(ctx context.Context, id, expected st
 	var lastICCID string
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		for _, command := range []string{"AT+CCID", "AT+QCCID"} {
-			commandContext, cancel := context.WithTimeout(ctx, manager.commandTimeout)
-			response, err := manager.ExecuteAT(commandContext, id, command)
-			cancel()
-			if err != nil {
-				lastErr = err
-				continue
+		live, nativeQMI, qmiErr := manager.readNativeQMIICCID(ctx, id)
+		if nativeQMI {
+			if qmiErr != nil {
+				lastErr = qmiErr
+			} else {
+				lastICCID = live
+				if live == expected {
+					return nil
+				}
+				lastErr = fmt.Errorf("modem still reports ICCID %s", live)
 			}
-			live := parseICCIDIdentifier(response, []string{"+CCID:", "+QCCID:"}, 18, 22)
-			if live == "" {
-				lastErr = errors.New("modem response contained no valid ICCID")
-				continue
+		} else {
+			for _, command := range []string{"AT+CCID", "AT+QCCID"} {
+				commandContext, cancel := context.WithTimeout(ctx, manager.commandTimeout)
+				response, err := manager.ExecuteAT(commandContext, id, command)
+				cancel()
+				if err != nil {
+					lastErr = err
+					continue
+				}
+				live = parseICCIDIdentifier(response, []string{"+CCID:", "+QCCID:"}, 18, 22)
+				if live == "" {
+					lastErr = errors.New("modem response contained no valid ICCID")
+					continue
+				}
+				lastICCID = live
+				if live == expected {
+					return nil
+				}
+				lastErr = fmt.Errorf("modem still reports ICCID %s", live)
+				break
 			}
-			lastICCID = live
-			if live == expected {
-				return nil
-			}
-			lastErr = fmt.Errorf("modem still reports ICCID %s", live)
-			break
 		}
 		if attempt+1 < attempts {
 			select {
@@ -884,4 +945,30 @@ func (manager *Manager) verifySwitchedICCID(ctx context.Context, id, expected st
 		return fmt.Errorf("esim: EnableProfile was accepted but target ICCID %s did not become active after modem recovery (current ICCID %s)", expected, lastICCID)
 	}
 	return fmt.Errorf("esim: EnableProfile was accepted but target ICCID %s could not be verified after modem recovery: %w", expected, lastErr)
+}
+
+func (manager *Manager) readNativeQMIICCID(ctx context.Context, id string) (string, bool, error) {
+	controlDevice, native, err := manager.nativeQMIControl(id)
+	if err != nil || !native {
+		return "", native, err
+	}
+	if manager.qmiEUICCOpener == nil {
+		return "", true, errors.New("QMI-UIM ICCID verification is unavailable")
+	}
+	readContext, cancel := context.WithTimeout(ctx, manager.commandTimeout)
+	defer cancel()
+	session, err := manager.qmiEUICCOpener(readContext, controlDevice)
+	if err != nil {
+		return "", true, fmt.Errorf("open QMI-UIM session for ICCID verification: %w", err)
+	}
+	defer session.Close()
+	iccid, err := session.GetICCID(readContext)
+	if err != nil {
+		return "", true, fmt.Errorf("read active ICCID through QMI-UIM: %w", err)
+	}
+	iccid = strings.TrimRight(strings.ToUpper(strings.TrimSpace(iccid)), "F")
+	if !validProfileICCID(iccid) {
+		return "", true, errors.New("QMI-UIM returned no valid active ICCID")
+	}
+	return iccid, true, nil
 }

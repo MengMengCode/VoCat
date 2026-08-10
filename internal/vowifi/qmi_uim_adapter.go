@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+
+	"vocat/internal/qmiport"
 )
 
 const qmiUIMSIMAuthSlot uint8 = 1
@@ -233,6 +235,7 @@ func closeQMIUIMChannel(session qmiUIMSession, channel byte) error {
 type productionQMIUIMSession struct {
 	client *qmi.Client
 	uim    *qmi.UIMService
+	lease  *qmiport.Lease
 }
 
 func openQMIUIMSession(
@@ -241,19 +244,29 @@ func openQMIUIMSession(
 ) (qmiUIMSession, error) {
 	openCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	lease, err := qmiport.Acquire(openCtx, controlDevice)
+	if err != nil {
+		return nil, err
+	}
 	opts := qmi.DefaultClientOptions()
+	// qmicli and eUICC management share this native control port. qmi-proxy
+	// provides QMUX fan-out while qmiport prevents the old 410 WWAN driver from
+	// removing DATA5_CNTL between short-lived AKA requests.
+	opts.UseProxy = true
 	// QMI diagnostics must never include authentication APDUs or key material.
 	opts.Logf = func(qmi.ClientLogLevel, string, ...any) {}
 	client, err := qmi.NewClientWithOptions(openCtx, controlDevice, opts)
 	if err != nil {
+		lease.Release()
 		return nil, err
 	}
 	uim, err := qmi.NewUIMServiceWithContext(openCtx, client)
 	if err != nil {
 		_ = client.Close()
+		lease.Release()
 		return nil, err
 	}
-	return &productionQMIUIMSession{client: client, uim: uim}, nil
+	return &productionQMIUIMSession{client: client, uim: uim, lease: lease}, nil
 }
 
 func (session *productionQMIUIMSession) GetICCID(ctx context.Context) (string, error) {
@@ -299,6 +312,10 @@ func (session *productionQMIUIMSession) Close() error {
 	}
 	if session.client != nil {
 		errs = append(errs, session.client.Close())
+	}
+	if session.lease != nil {
+		session.lease.Release()
+		session.lease = nil
 	}
 	return errors.Join(errs...)
 }

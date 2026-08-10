@@ -195,7 +195,10 @@ func (d *SysFSDiscoverer) discoverNativeWWAN() []Candidate {
 
 	result := make([]Candidate, 0, len(groups))
 	for parent, group := range groups {
-		if len(group.qmi) == 0 {
+		// Keep the native modem addressable through its AT port while the old
+		// OpenStick kernel is recreating DATA5_CNTL. Requiring qmi here makes the
+		// whole 410 disappear and prevents the CFUN reset that restores QMI.
+		if len(group.qmi) == 0 && len(group.at) == 0 {
 			continue
 		}
 		sort.Strings(group.at)
@@ -205,7 +208,9 @@ func (d *SysFSDiscoverer) discoverNativeWWAN() []Candidate {
 			Manufacturer: "Qualcomm",
 			Product:      "410 WiFi stick",
 			USBPath:      filepath.Join(classRoot, parent),
-			QMIControl:   filepath.Join(d.DevRoot, group.qmi[0]),
+		}
+		if len(group.qmi) > 0 {
+			candidate.QMIControl = filepath.Join(d.DevRoot, group.qmi[0])
 		}
 		if _, err := os.Stat(filepath.Join(d.SysRoot, "class", "net", parent)); err == nil {
 			candidate.NetworkInterface = parent

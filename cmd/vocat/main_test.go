@@ -231,6 +231,10 @@ func TestProvisionedDeviceTypeRecognizesNativeWWAN(t *testing.T) {
 	if got := provisionedDeviceType(native); got != store.DeviceTypeWiFi410 {
 		t.Fatalf("native WWAN type = %q, want %q", got, store.DeviceTypeWiFi410)
 	}
+	native.QMIControl = ""
+	if got := provisionedDeviceType(native); got != store.DeviceTypeWiFi410 {
+		t.Fatalf("native WWAN recovery type = %q, want %q", got, store.DeviceTypeWiFi410)
+	}
 
 	usb := modem.Candidate{
 		USBPath:    "/sys/bus/usb/devices/1-6",

@@ -34,6 +34,7 @@ type Manager struct {
 	longTimeout    time.Duration
 	smsTimeout     time.Duration
 	scanTimeout    time.Duration
+	qmiEUICCOpener qmiEUICCSessionOpener
 	started        bool
 	devices        map[string]*managedDevice
 	ussdSessions   map[string]ussdSession
@@ -87,6 +88,7 @@ func NewManager(options Options) (*Manager, error) {
 		longTimeout:    options.LongTimeout,
 		smsTimeout:     options.SMSTimeout,
 		scanTimeout:    options.ScanTimeout,
+		qmiEUICCOpener: openQMIEUICCSession,
 		devices:        make(map[string]*managedDevice),
 		ussdSessions:   make(map[string]ussdSession),
 		esimRecoveries: make(map[string]chan struct{}),
