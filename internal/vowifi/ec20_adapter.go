@@ -142,11 +142,23 @@ func (adapter *EC20Adapter) ReadIdentity(
 		return SIMIdentity{}, err
 	}
 
-	imeiResponse, err := adapter.execute(ctx, deviceID, "AT+CGSN")
-	if err != nil {
-		return SIMIdentity{}, fmt.Errorf("read EC20 IMEI: %w", err)
+	// Native OpenStick/410 WWAN firmware exposes the IMEI in ATI but may leave
+	// AT+CGSN unanswered. Prefer the already-supported identification command
+	// and retain CGSN as a fallback for ordinary EC20 firmware.
+	imeiResponse, imeiErr := adapter.execute(ctx, deviceID, "ATI")
+	imei := ""
+	if imeiErr == nil {
+		imei = digitIdentifier(imeiResponse, []string{"IMEI:", "+CGSN:", "+GSN:"}, 14, 17)
 	}
-	imei := digitIdentifier(imeiResponse, []string{"+CGSN:", "+GSN:"}, 14, 17)
+	if imei == "" {
+		imeiResponse, imeiErr = adapter.execute(ctx, deviceID, "AT+CGSN")
+		if imeiErr == nil {
+			imei = digitIdentifier(imeiResponse, []string{"+CGSN:", "+GSN:"}, 14, 17)
+		}
+	}
+	if imeiErr != nil {
+		return SIMIdentity{}, fmt.Errorf("read EC20 IMEI: %w", imeiErr)
+	}
 	if imei == "" {
 		return SIMIdentity{}, errors.New("vocat: EC20 returned no valid IMEI")
 	}
@@ -279,7 +291,7 @@ func (adapter *EC20Adapter) readICCID(
 ) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		for _, command := range []string{"AT+CCID", "AT+QCCID"} {
+		for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+ICCID"} {
 			response, err := adapter.execute(ctx, deviceID, command)
 			if err != nil {
 				lastErr = err
@@ -287,7 +299,7 @@ func (adapter *EC20Adapter) readICCID(
 			}
 			value := iccidIdentifier(
 				response,
-				[]string{"+CCID:", "+QCCID:"},
+				[]string{"+CCID:", "+QCCID:", "+ICCID:", "ICCID:"},
 				18,
 				22,
 			)

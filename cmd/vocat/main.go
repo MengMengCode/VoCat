@@ -543,6 +543,14 @@ func newVoWiFiOrchestrator(
 	database *store.Store,
 	adapter *vowifi.EC20Adapter,
 ) (*vowifi.Orchestrator, error) {
+	var akaProvider vowifi.AKAProvider = adapter
+	if deviceConfig.DeviceType == store.DeviceTypeWiFi410 {
+		qmiProvider, err := vowifi.NewQMIUIMAKAProvider(deviceConfig.ControlDevice)
+		if err != nil {
+			return nil, fmt.Errorf("device %q QMI-UIM provider: %w", deviceConfig.ID, err)
+		}
+		akaProvider = qmiProvider
+	}
 	apn := deviceConfig.APN
 	if apn == "" {
 		apn = "ims"
@@ -551,7 +559,7 @@ func newVoWiFiOrchestrator(
 	if err != nil {
 		return nil, fmt.Errorf("device %q IKE provider: %w", deviceConfig.ID, err)
 	}
-	imsProvider, err := ims.NewProvider(adapter, ims.Config{
+	imsProvider, err := ims.NewProvider(akaProvider, ims.Config{
 		// The userspace SWu data plane currently carries the protected P-CSCF
 		// signalling path over TCP.
 		Transport: "tcp",
@@ -639,7 +647,7 @@ func newVoWiFiOrchestrator(
 	}
 	orchestrator, err := vowifi.New(vowifi.Dependencies{
 		SIM:    adapter,
-		AKA:    adapter,
+		AKA:    akaProvider,
 		Radio:  adapter,
 		Proxy:  integration.ProxyResolver{Store: database},
 		Tunnel: tunnelProvider,
