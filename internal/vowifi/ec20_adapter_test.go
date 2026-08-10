@@ -491,6 +491,59 @@ func TestEC20AdapterRadioTransactionRestoresCFUNAndPDPContexts(
 	transcript.assertDone()
 }
 
+func TestEC20AdapterUsesConfiguredRFOffMode(t *testing.T) {
+	t.Parallel()
+	transcript := &ec20Transcript{
+		t: t,
+		steps: []ec20TranscriptStep{
+			{command: "AT+CFUN?", lines: []string{"+CFUN: 1"}},
+			{command: "AT+CFUN=0"},
+			{command: "AT+CFUN?", lines: []string{"+CFUN: 0"}},
+		},
+	}
+	adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{
+		RFOffMode: func(context.Context, string) (int, error) {
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.EnterVoWiFiRFOff(
+		context.Background(),
+		"wifi-410",
+	); err != nil {
+		t.Fatalf("EnterVoWiFiRFOff: %v", err)
+	}
+	transcript.assertDone()
+}
+
+func TestEC20AdapterAcceptsQualcommOfflineMode(t *testing.T) {
+	t.Parallel()
+	transcript := &ec20Transcript{
+		t: t,
+		steps: []ec20TranscriptStep{
+			{command: "AT+CFUN?", lines: []string{"+CFUN: 7"}},
+			{command: "AT+CFUN?", lines: []string{"+CFUN: 7"}},
+		},
+	}
+	adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{
+		RFOffMode: func(context.Context, string) (int, error) {
+			return 0, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.EnterVoWiFiRFOff(
+		context.Background(),
+		"wifi-410",
+	); err != nil {
+		t.Fatalf("EnterVoWiFiRFOff: %v", err)
+	}
+	transcript.assertDone()
+}
+
 func TestEC20AdapterNeverStartsCellularDataByDefault(t *testing.T) {
 	t.Parallel()
 	transcript := &ec20Transcript{

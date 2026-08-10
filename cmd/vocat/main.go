@@ -495,6 +495,13 @@ func configureVoWiFiRuntime(
 		Devices: deviceManager,
 	}
 	adapter, err := vowifi.NewEC20Adapter(mapper, vowifi.EC20AdapterOptions{
+		RFOffMode: func(callbackContext context.Context, deviceID string) (int, error) {
+			deviceConfig, err := database.Device(callbackContext, deviceID)
+			if err != nil {
+				return 0, fmt.Errorf("load device %q RF-off mode: %w", deviceID, err)
+			}
+			return voWiFiRFOffModeForDeviceType(deviceConfig.DeviceType), nil
+		},
 		// The test deployment is deliberately non-cellular. VoWiFi teardown
 		// may restore CFUN, but it must never reactivate a PDP context.
 		RestoreCellularData: false,
@@ -536,6 +543,13 @@ func configureVoWiFiRuntime(
 		}
 	}
 	return manager, nil
+}
+
+func voWiFiRFOffModeForDeviceType(deviceType string) int {
+	if store.NormalizeDeviceType(deviceType) == store.DeviceTypeWiFi410 {
+		return 0
+	}
+	return 4
 }
 
 func newVoWiFiOrchestrator(

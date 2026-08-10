@@ -1474,7 +1474,8 @@ func deviceSummary(entry device.Device) map[string]any {
 		"phone_number_source":      phoneSource,
 		"network_connected":        false,
 		"registration_state_label": registrationLabel(snapshot),
-		"flight_mode":              modeKnown && (mode == 0 || mode == 4),
+		// Native Qualcomm WWAN firmware reports QMI DMS offline as CFUN=7.
+		"flight_mode": modeKnown && (mode == 0 || mode == 4 || mode == 7),
 	}
 }
 

@@ -148,6 +148,18 @@ func TestParseICCIDIdentifierStripsTwoFillerNibbles(t *testing.T) {
 	}
 }
 
+func TestRadioOffModesIncludeQualcommOffline(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []int{0, 4, 7} {
+		if !isRadioOffMode(mode) {
+			t.Fatalf("CFUN=%d was not classified as radio off", mode)
+		}
+	}
+	if isRadioOffMode(1) {
+		t.Fatal("CFUN=1 was classified as radio off")
+	}
+}
+
 func TestManagerRequiresStartAndKnownDevice(t *testing.T) {
 	manager, err := NewManager(Options{
 		Discoverer: staticDiscoverer{},

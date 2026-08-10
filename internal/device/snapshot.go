@@ -334,7 +334,8 @@ func parseCFUN(response modem.Response) (int, bool) {
 }
 
 func isRadioOffMode(mode int) bool {
-	return mode == 0 || mode == 4
+	// Native Qualcomm WWAN firmware exposes QMI DMS offline as CFUN=7.
+	return mode == 0 || mode == 4 || mode == 7
 }
 
 func valueAfterPrefix(response modem.Response, prefix string) string {

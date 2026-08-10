@@ -57,6 +57,12 @@ type EC20AdapterOptions struct {
 	// the MNC length. The returned MCC/MNC must exactly prefix the live IMSI.
 	HomePLMN func(deviceID, iccid, imsi string) (mcc, mnc string, ok bool)
 
+	// RFOffMode selects the CFUN mode used to enter the modem's VoWiFi
+	// radio-off state. Legacy EC20/EC25 devices default to CFUN=4. Native
+	// Qualcomm 410 firmware uses CFUN=0 and may report the equivalent QMI
+	// offline state as CFUN=7.
+	RFOffMode func(context.Context, string) (int, error)
+
 	// RestoreCellularData permits reactivating PDP contexts that were active
 	// before the VoWiFi transaction. It is deliberately false by default:
 	// VoWiFi must never start billable cellular data unless an operator has
@@ -643,23 +649,48 @@ func (adapter *EC20Adapter) EnterVoWiFiRFOff(
 	ctx context.Context,
 	deviceID string,
 ) error {
+	targetMode := 4
+	if adapter.options.RFOffMode != nil {
+		configured, err := adapter.options.RFOffMode(ctx, deviceID)
+		if err != nil {
+			return fmt.Errorf("resolve modem RF-off mode: %w", err)
+		}
+		if !isVoWiFiRFOffMode(configured) {
+			return fmt.Errorf("vocat: unsupported modem RF-off mode CFUN=%d", configured)
+		}
+		targetMode = configured
+	}
 	mode, err := adapter.readOperatingMode(ctx, deviceID)
 	if err != nil {
 		return err
 	}
-	if mode != 4 {
-		if _, err := adapter.execute(ctx, deviceID, "AT+CFUN=4"); err != nil {
-			return fmt.Errorf("enter EC20 RF-off mode: %w", err)
+	if !isVoWiFiRFOffMode(mode) {
+		if _, err := adapter.execute(
+			ctx,
+			deviceID,
+			fmt.Sprintf("AT+CFUN=%d", targetMode),
+		); err != nil {
+			return fmt.Errorf(
+				"enter modem RF-off mode with CFUN=%d: %w",
+				targetMode,
+				err,
+			)
 		}
 	}
 	mode, err = adapter.readOperatingMode(ctx, deviceID)
 	if err != nil {
 		return err
 	}
-	if mode != 4 {
-		return fmt.Errorf("vocat: EC20 reported CFUN=%d after RF-off request", mode)
+	if !isVoWiFiRFOffMode(mode) {
+		return fmt.Errorf("vocat: modem reported CFUN=%d after RF-off request", mode)
 	}
 	return nil
+}
+
+func isVoWiFiRFOffMode(mode int) bool {
+	// Qualcomm's native WWAN firmware reports QMI DMS offline as CFUN=7.
+	// Modes 0 and 4 are the standard minimum-functionality and RF-off forms.
+	return mode == 0 || mode == 4 || mode == 7
 }
 
 func (adapter *EC20Adapter) Restore(
@@ -704,7 +735,7 @@ func (adapter *EC20Adapter) Restore(
 		}
 		checkpoint.activeCIDs = nil
 	}
-	if (snapshot.OperatingMode == 0 || snapshot.OperatingMode == 4) &&
+	if isVoWiFiRFOffMode(snapshot.OperatingMode) &&
 		len(checkpoint.activeCIDs) > 0 {
 		return errors.New("vocat: EC20 snapshot has active data in RF-off mode")
 	}

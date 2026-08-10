@@ -49,3 +49,19 @@ func TestConfiguredDeviceSummaryIgnoresVoWiFiRuntimeFromPreviousSIM(t *testing.T
 		t.Fatalf("runtime = %#v", got["vowifi_runtime"])
 	}
 }
+
+func TestDeviceSummaryTreatsQualcommOfflineAsFlightMode(t *testing.T) {
+	t.Parallel()
+	got := deviceSummary(device.Device{
+		ID:         "wifi-410",
+		Discovered: true,
+		Snapshot: &device.Snapshot{
+			Responsive:    true,
+			ModeKnown:     true,
+			OperatingMode: 7,
+		},
+	})
+	if got["flight_mode"] != true {
+		t.Fatalf("flight_mode = %#v, want true", got["flight_mode"])
+	}
+}

@@ -226,12 +226,13 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 	// Mark the radio transaction before the first mutating call: a provider
 	// may return an error after partially changing the modem.
 	resources.radioChanged = true
-	// Enter RF-off before reconciling PDP contexts. Some QMI-capable EC20
-	// firmware automatically owns CID 1 while CFUN=1 and rejects a direct
-	// CGACT=0 command even though the Linux data interface is down. CFUN=4
-	// tears down packet service at the baseband; StopCellularData then acts as
-	// a fail-closed verification and removes any context that unexpectedly
-	// survived RF-off.
+	// Enter RF-off before reconciling PDP contexts. Some QMI-capable firmware
+	// automatically owns CID 1 while the radio is online and rejects a direct
+	// CGACT=0 command even though the Linux data interface is down. The adapter
+	// selects the modem-specific RF-off form (CFUN=4 for EC20/EC25, CFUN=0 or
+	// the equivalent reported CFUN=7 state for native Qualcomm 410). The data
+	// stop then acts as a fail-closed verification and removes any context that
+	// unexpectedly survived RF-off.
 	if err := orchestrator.deps.Radio.EnterVoWiFiRFOff(setupContext, orchestrator.options.DeviceID); err != nil {
 		return fail(PhaseAccessReady, err)
 	}

@@ -245,3 +245,13 @@ func TestProvisionedDeviceTypeRecognizesNativeWWAN(t *testing.T) {
 		t.Fatalf("USB modem type = %q, want %q", got, store.DeviceTypePCIeEC20EC25)
 	}
 }
+
+func TestVoWiFiRFOffModeForDeviceType(t *testing.T) {
+	t.Parallel()
+	if got := voWiFiRFOffModeForDeviceType(store.DeviceTypeWiFi410); got != 0 {
+		t.Fatalf("WiFi 410 RF-off mode = %d, want 0", got)
+	}
+	if got := voWiFiRFOffModeForDeviceType(store.DeviceTypePCIeEC20EC25); got != 4 {
+		t.Fatalf("EC20 RF-off mode = %d, want 4", got)
+	}
+}
