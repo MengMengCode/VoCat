@@ -28,6 +28,7 @@ type Manager struct {
 	esimRecoveries map[string]chan struct{}
 	esimCacheMu    sync.RWMutex
 	esimCache      map[string]EsimInfo
+	esimActiveName map[string]string
 	discoverer     modem.Discoverer
 	opener         modem.Opener
 	commandTimeout time.Duration
@@ -35,6 +36,7 @@ type Manager struct {
 	smsTimeout     time.Duration
 	scanTimeout    time.Duration
 	qmiEUICCOpener qmiEUICCSessionOpener
+	qmiRadioOpener qmiRadioSessionOpener
 	started        bool
 	devices        map[string]*managedDevice
 	ussdSessions   map[string]ussdSession
@@ -89,10 +91,12 @@ func NewManager(options Options) (*Manager, error) {
 		smsTimeout:     options.SMSTimeout,
 		scanTimeout:    options.ScanTimeout,
 		qmiEUICCOpener: openQMIEUICCSession,
+		qmiRadioOpener: openQMIRadioSession,
 		devices:        make(map[string]*managedDevice),
 		ussdSessions:   make(map[string]ussdSession),
 		esimRecoveries: make(map[string]chan struct{}),
 		esimCache:      make(map[string]EsimInfo),
+		esimActiveName: make(map[string]string),
 	}, nil
 }
 

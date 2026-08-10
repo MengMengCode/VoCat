@@ -55,6 +55,10 @@ type DeviceController interface {
 	ESIMChipInfo(context.Context, string) (*device.EsimChipInfo, error)
 }
 
+type activeESIMProfileReader interface {
+	ActiveESIMProfileName(string) string
+}
+
 type deviceConfigPayload struct {
 	ID                 string `json:"id"`
 	Name               string `json:"name"`
@@ -1025,8 +1029,43 @@ func (s *Server) handleFlightMode(w http.ResponseWriter, r *http.Request, id str
 			}
 		}
 	}
+	if !request.Enabled && result.Changed {
+		s.scheduleRadioRefresh(id)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": result})
 	return true
+}
+
+// scheduleRadioRefresh follows a successful flight-mode exit until the modem
+// has had time to camp on a network. Overview SSE serves Manager's cached
+// snapshot, so without these refreshes the page can keep showing the pre-flight
+// operator indefinitely even though QMI DMS already brought the radio online.
+func (s *Server) scheduleRadioRefresh(id string) {
+	go func() {
+		const attempts = 10
+		for attempt := 0; attempt < attempts; attempt++ {
+			delay := 750 * time.Millisecond
+			if attempt > 0 {
+				delay = 3 * time.Second
+			}
+			timer := time.NewTimer(delay)
+			<-timer.C
+
+			entry, err := s.devices.Get(id)
+			if err != nil {
+				return
+			}
+			if entry.Snapshot != nil && entry.Snapshot.FlightMode {
+				return
+			}
+			refreshContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			snapshot, err := s.devices.Refresh(refreshContext, id)
+			cancel()
+			if err == nil && (snapshot.RegistrationStatus == 1 || snapshot.RegistrationStatus == 5) {
+				return
+			}
+		}
+	}()
 }
 
 func (s *Server) handleCellularData(
@@ -1266,6 +1305,13 @@ func (s *Server) configuredDeviceSummary(
 	result["network_connected"] = config.NetworkEnabled
 	result["data_connected"] = config.NetworkEnabled
 	result["vowifi_enabled"] = config.VoWiFiEnabled
+	if entry != nil {
+		if reader, ok := s.devices.(activeESIMProfileReader); ok {
+			if name := strings.TrimSpace(reader.ActiveESIMProfileName(entry.ID)); name != "" {
+				result["active_esim_profile_name"] = name
+			}
+		}
+	}
 	if runtime, err := s.store.VoWiFiRuntime(context.Background(), config.ID); err == nil {
 		currentICCID := ""
 		var currentSnapshot *device.Snapshot

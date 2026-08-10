@@ -274,6 +274,10 @@ func (manager *Manager) SetFlight(
 	if err := manager.validateActive(id, state); err != nil {
 		return FlightResult{}, err
 	}
+	if result, handled, err := manager.setNativeQMIFlight(ctx, id, state, enabled); handled {
+		manager.setResult(id, state, nil, err)
+		return result, err
+	}
 	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
 	if err != nil {
 		manager.setResult(id, state, nil, err)
