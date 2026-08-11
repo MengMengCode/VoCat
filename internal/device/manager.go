@@ -59,6 +59,7 @@ type managedDevice struct {
 	lastError         string
 	lastUpdated       time.Time
 	discovered        bool
+	recovering        bool
 	preFlightMode     *int
 	resetClientOnLock bool
 }
@@ -256,6 +257,7 @@ func copyDevice(id string, state *managedDevice) Device {
 		Snapshot:    snapshot,
 		LastError:   state.lastError,
 		Discovered:  state.discovered,
+		Recovering:  state.recovering,
 		LastUpdated: state.lastUpdated,
 	}
 }
@@ -320,7 +322,7 @@ func (manager *Manager) setResult(
 	if manager.devices[id] != state {
 		return
 	}
-	if snapshot != nil {
+	if snapshot != nil && (err == nil || state.snapshot == nil) {
 		value := *snapshot
 		value.Warnings = append([]string(nil), snapshot.Warnings...)
 		state.snapshot = &value
@@ -330,6 +332,9 @@ func (manager *Manager) setResult(
 		state.lastError = err.Error()
 	} else {
 		state.lastError = ""
+		if snapshot != nil {
+			state.recovering = false
+		}
 	}
 }
 
@@ -464,7 +469,7 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 	}
 	state.client = nil
 	state.preFlightMode = nil
-	manager.clearSnapshot(id, state)
+	manager.beginRecovery(id, state)
 	manager.setResult(id, state, nil, err)
 	return err
 }
@@ -502,16 +507,24 @@ func (manager *Manager) rebootForProfileSwitch(ctx context.Context, id string) e
 	}
 	state.client = nil
 	state.preFlightMode = nil
-	manager.clearSnapshot(id, state)
+	manager.beginRecovery(id, state)
 	manager.setResult(id, state, nil, err)
 	return err
 }
 
-func (manager *Manager) clearSnapshot(id string, state *managedDevice) {
+func (manager *Manager) beginRecovery(id string, state *managedDevice) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	if manager.devices[id] == state {
-		state.snapshot = nil
+		state.recovering = true
+	}
+}
+
+func (manager *Manager) finishRecovery(id string) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if state := manager.devices[id]; state != nil {
+		state.recovering = false
 	}
 }
 

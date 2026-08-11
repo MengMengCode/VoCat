@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -70,6 +71,22 @@ func (transport *firstAuthCaptureTransport) answerIKEInit(packet []byte) ([]byte
 	payloads, err := parsePayloadChain(header.NextPayload, body)
 	if err != nil {
 		return nil, err
+	}
+	sa, err := onePayload(payloads, payloadSA)
+	if err != nil {
+		return nil, err
+	}
+	offers, err := parseProposals(sa.Body)
+	if err != nil || len(offers) != 1 {
+		return nil, fmt.Errorf("test: parse offered IKE proposal: %w", err)
+	}
+	hasSHA1PRF := containsTransform(offers[0], transformPRF, prfHMACSHA1)
+	hasSHA1Integrity := containsTransform(offers[0], transformIntegrity, integrityHMACSHA1_96)
+	if hasSHA1PRF != transport.allowSHA1 || hasSHA1Integrity != transport.allowSHA1 {
+		transport.t.Fatalf(
+			"SHA-1 offer PRF=%v integrity=%v, want both %v",
+			hasSHA1PRF, hasSHA1Integrity, transport.allowSHA1,
+		)
 	}
 	ke, err := onePayload(payloads, payloadKE)
 	if err != nil {
@@ -324,6 +341,65 @@ func TestProviderVodafoneDefaultsToStrongCryptoDespitePLMN(t *testing.T) {
 	}
 }
 
+func TestProviderTelefonicaGermanyAutomaticallyOffersSHA1WithMODP2048(t *testing.T) {
+	capture := &firstAuthCaptureTransport{t: t, allowSHA1: true}
+	provider, err := NewProvider(Config{
+		Random:    constantReader{value: 0x42},
+		Timeout:   time.Second,
+		Installer: unusedInstaller{},
+		APN:       "ims",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.transportFactory = func(
+		context.Context,
+		transportConfig,
+		vowifi.ProxyRoute,
+		string,
+	) (datagramTransport, error) {
+		return capture, nil
+	}
+	_, err = provider.Start(context.Background(), vowifi.TunnelRequest{
+		DeviceID: "openstick-1",
+		Identity: vowifi.SIMIdentity{
+			ICCID:   "8949000000000000000",
+			IMSI:    "262070123456789",
+			HomeMCC: "262",
+			HomeMNC: "07",
+		},
+		EPDG: "epdg.epc.mnc007.mcc262.pub.3gppnetwork.org",
+		AKA:  &testAKAProvider{},
+	})
+	if !errors.Is(err, errFirstAuthObserved) {
+		t.Fatalf("Start() error = %v, want capture sentinel", err)
+	}
+	if capture.useMODP1024 {
+		t.Fatal("Telefonica compatibility unexpectedly enabled MODP1024")
+	}
+}
+
+func TestTelefonicaGermanySHA1CompatibilityIsCarrierScoped(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		identity vowifi.SIMIdentity
+		want     bool
+	}{
+		{name: "O2 two-digit MNC", identity: vowifi.SIMIdentity{HomeMCC: "262", HomeMNC: "07"}, want: true},
+		{name: "O2 three-digit MNC", identity: vowifi.SIMIdentity{HomeMCC: "262", HomeMNC: "003"}, want: true},
+		{name: "German non-Telefonica", identity: vowifi.SIMIdentity{HomeMCC: "262", HomeMNC: "02"}, want: false},
+		{name: "same MNC abroad", identity: vowifi.SIMIdentity{HomeMCC: "234", HomeMNC: "07"}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := telefonicaGermanySHA1Compatibility(test.identity); got != test.want {
+				t.Fatalf("compatibility = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestProviderWeakCryptoRequiresExplicitOptIn(t *testing.T) {
 	strongIKE := ikeOffer(dhMODP2048, false)
 	strongESP := espOffer([]byte{1, 2, 3, 4}, false)
@@ -372,6 +448,15 @@ func transformIDs(item proposal, kind uint8) []uint16 {
 		}
 	}
 	return result
+}
+
+func containsTransform(item proposal, kind uint8, id uint16) bool {
+	for _, candidate := range item.Transforms {
+		if candidate.Type == kind && candidate.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func equalUint16s(left, right []uint16) bool {

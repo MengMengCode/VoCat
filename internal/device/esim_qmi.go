@@ -156,7 +156,9 @@ func (manager *Manager) recoverQMIEuiccChannel(ctx context.Context, id string) e
 	if powerOnErr != nil {
 		return fmt.Errorf("esim: QMI-UIM recovery could not power on slot %d: %w", qmiEUICCSlot, powerOnErr)
 	}
-	manager.clearSnapshot(id, state)
+	// UIM power-cycling does not make the AT control plane disappear. Preserve
+	// the last responsive modem snapshot; a profile switch will separately mark
+	// the full modem reset as recovering and refresh its subscriber identity.
 
 	readyContext, cancelReady := manager.withTimeout(context.WithoutCancel(ctx), manager.longTimeout)
 	defer cancelReady()

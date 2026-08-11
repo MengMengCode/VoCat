@@ -65,3 +65,23 @@ func TestDeviceSummaryTreatsQualcommOfflineAsFlightMode(t *testing.T) {
 		t.Fatalf("flight_mode = %#v, want true", got["flight_mode"])
 	}
 }
+
+func TestDeviceSummaryExposesModemRecoveryWithoutCallingItOffline(t *testing.T) {
+	t.Parallel()
+	entry := device.Device{
+		ID:         "wifi-410",
+		Discovered: true,
+		Recovering: true,
+		Snapshot: &device.Snapshot{
+			Responsive: true,
+			ICCID:      "8949000000000000000",
+		},
+	}
+	got := deviceSummary(entry)
+	if got["running"] != true || got["control_online"] != true {
+		t.Fatalf("recovery summary lost the responsive control plane: %#v", got)
+	}
+	if got["lifecycle_phase"] != "recovering" {
+		t.Fatalf("lifecycle phase = %#v, want recovering", got["lifecycle_phase"])
+	}
+}

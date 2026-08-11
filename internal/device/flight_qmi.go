@@ -104,7 +104,7 @@ func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
 		state.client = nil
 	}
 	state.preFlightMode = nil
-	manager.clearSnapshot(id, state)
+	manager.beginRecovery(id, state)
 
 	openContext, cancelOpen := manager.withTimeout(ctx, manager.commandTimeout*5)
 	session, err := manager.qmiRadioOpener(openContext, controlDevice)

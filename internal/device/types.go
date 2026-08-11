@@ -59,6 +59,7 @@ type Device struct {
 	Snapshot    *Snapshot       `json:"snapshot,omitempty"`
 	LastError   string          `json:"lastError,omitempty"`
 	Discovered  bool            `json:"discovered"`
+	Recovering  bool            `json:"recovering,omitempty"`
 	LastUpdated time.Time       `json:"lastUpdated,omitempty"`
 }
 

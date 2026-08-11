@@ -1797,6 +1797,8 @@ func lifecyclePhase(entry device.Device) string {
 	switch {
 	case !entry.Discovered:
 		return "missing"
+	case entry.Recovering:
+		return "recovering"
 	case entry.LastError != "":
 		return "degraded"
 	case entry.Snapshot == nil:

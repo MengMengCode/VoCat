@@ -105,6 +105,12 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if epdg == "" || strings.ContainsAny(epdg, " \t\r\n/:") {
 		return nil, errors.New("ike: ePDG must be a hostname")
 	}
+	// Telefonica Germany's O2 ePDGs currently discard a SHA-256-only
+	// IKE_SA_INIT instead of returning NO_PROPOSAL_CHOSEN. Advertise SHA-1 as a
+	// lower-priority compatibility transform for those home PLMNs while keeping
+	// MODP2048 and the strong-first ordering. Other carriers still require the
+	// explicit AllowSHA1 setting before any legacy transform is advertised.
+	allowSHA1 := provider.config.AllowSHA1 || telefonicaGermanySHA1Compatibility(request.Identity)
 	aka, err := newAKAClientWithMethod(request.Identity, request.AKA, provider.config.EAPMethod)
 	if err != nil {
 		return nil, err
@@ -140,7 +146,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if _, err := io.ReadFull(provider.config.Random, initiatorNonce); err != nil {
 		return nil, fmt.Errorf("ike: generate initiator nonce: %w", err)
 	}
-	ikeProposalBody, err := marshalProposals([]proposal{ikeOffer(group, provider.config.AllowSHA1)})
+	ikeProposalBody, err := marshalProposals([]proposal{ikeOffer(group, allowSHA1)})
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +217,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if ikeSuite.DHID != group {
 		return nil, fmt.Errorf("ike: responder selected DH group %d but KE used group %d", ikeSuite.DHID, group)
 	}
-	if !provider.config.AllowSHA1 &&
+	if !allowSHA1 &&
 		(ikeSuite.PRFID != prfHMACSHA256 || ikeSuite.IntegrityID != integrityHMACSHA256_128) {
 		return nil, errors.New("ike: responder selected legacy IKE crypto while legacy compatibility is disabled")
 	}
@@ -269,7 +275,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 		return nil, err
 	}
 	childInboundSPI := binary.BigEndian.Uint32(childInboundSPIBytes[:])
-	childOfferBody, err := marshalProposals([]proposal{espOffer(childInboundSPIBytes[:], provider.config.AllowSHA1)})
+	childOfferBody, err := marshalProposals([]proposal{espOffer(childInboundSPIBytes[:], allowSHA1)})
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +446,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if err != nil {
 		return nil, err
 	}
-	if !provider.config.AllowSHA1 && childSuite.IntegrityID != integrityHMACSHA256_128 {
+	if !allowSHA1 && childSuite.IntegrityID != integrityHMACSHA256_128 {
 		return nil, errors.New("ike: responder selected legacy ESP integrity while legacy compatibility is disabled")
 	}
 	childOutboundSPI := binary.BigEndian.Uint32(childProposals[0].SPI)
@@ -563,6 +569,22 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	}
 	closeTransport = false
 	return session, nil
+}
+
+func telefonicaGermanySHA1Compatibility(identity vowifi.SIMIdentity) bool {
+	if strings.TrimSpace(identity.HomeMCC) != "262" {
+		return false
+	}
+	mnc := strings.TrimLeft(strings.TrimSpace(identity.HomeMNC), "0")
+	if mnc == "" {
+		mnc = "0"
+	}
+	switch mnc {
+	case "3", "5", "7", "8", "11", "16", "17", "77":
+		return true
+	default:
+		return false
+	}
 }
 
 func buildInitialEAPOnlyAuth(

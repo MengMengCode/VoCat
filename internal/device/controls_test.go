@@ -163,8 +163,11 @@ func TestProfileSwitchRecoveryUsesQMIModemResetForNativeWWAN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if entry.Snapshot != nil {
-		t.Fatalf("stale snapshot survived native modem reset: %#v", entry.Snapshot)
+	if entry.Snapshot == nil {
+		t.Fatal("last responsive snapshot was discarded during native modem recovery")
+	}
+	if !entry.Recovering {
+		t.Fatal("native modem reset was not exposed as recovering")
 	}
 }
 

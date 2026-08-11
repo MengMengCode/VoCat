@@ -887,17 +887,17 @@ func (manager *Manager) recoverAfterProfileSwitch(id string) {
 // after an eSIM profile switch + modem reboot. /overview only serves the cached
 // snapshot, and nothing else live-reads post-switch, so without this the card
 // stays on "--" forever. The EC20 takes ~10-15s to come back from AT+CFUN=1,1,
-// so we delay first, then retry with backoff. Transport errors during the
-// reboot window are fine — Fix 1 discards the poisoned client and reopens on
-// the next attempt. All errors are swallowed: this is best-effort self-healing
-// and setResult already records the last failure for the UI.
+// so retries tolerate the temporary AT outage. Native QMI reports ICCID
+// readiness before this function starts, so an immediate first attempt avoids
+// an unnecessary offline-looking settle delay on OpenStick. Transport errors
+// during the reboot window are fine — the poisoned client is discarded and
+// reopened on the next attempt. setResult retains the last responsive snapshot
+// while the explicit Recovering flag tells the UI that it is temporarily stale.
 func (manager *Manager) refreshAfterProfileSwitch(id string) {
 	const (
-		settle   = 8 * time.Second
-		interval = 4 * time.Second
-		attempts = 6
+		interval = 2 * time.Second
+		attempts = 8
 	)
-	time.Sleep(settle)
 	for attempt := 0; attempt < attempts; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), manager.commandTimeout*4)
 		_, err := manager.Refresh(ctx, id)
@@ -905,8 +905,11 @@ func (manager *Manager) refreshAfterProfileSwitch(id string) {
 		if err == nil {
 			return
 		}
-		time.Sleep(interval)
+		if attempt+1 < attempts {
+			time.Sleep(interval)
+		}
 	}
+	manager.finishRecovery(id)
 }
 
 // enableProfileResult extracts the EnableProfile result code (tag 80) from the

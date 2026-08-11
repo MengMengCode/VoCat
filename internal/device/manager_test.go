@@ -199,3 +199,37 @@ func TestExecuteSensitiveATDoesNotPersistCommandOrModemError(t *testing.T) {
 	}
 	client.assertDone(t)
 }
+
+func TestRecoveryKeepsLastResponsiveSnapshotUntilRefreshSucceeds(t *testing.T) {
+	manager, id := newStartedTestManager(t, &transcriptClient{})
+	state, err := manager.lookup(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastGood := &Snapshot{DeviceID: id, Responsive: true, ICCID: "8949000000000000000"}
+	manager.setResult(id, state, lastGood, nil)
+	manager.beginRecovery(id, state)
+	failed := &Snapshot{DeviceID: id, Responsive: false}
+	manager.setResult(id, state, failed, errors.New("modem is rebooting"))
+
+	entry, err := manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Snapshot == nil || !entry.Snapshot.Responsive || entry.Snapshot.ICCID != lastGood.ICCID {
+		t.Fatalf("snapshot after failed recovery refresh = %#v", entry.Snapshot)
+	}
+	if !entry.Recovering {
+		t.Fatal("failed recovery refresh cleared recovering state")
+	}
+
+	refreshed := &Snapshot{DeviceID: id, Responsive: true, ICCID: "8949000000000000001"}
+	manager.setResult(id, state, refreshed, nil)
+	entry, err = manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Recovering || entry.Snapshot == nil || entry.Snapshot.ICCID != refreshed.ICCID {
+		t.Fatalf("device after successful recovery refresh = %#v", entry)
+	}
+}
