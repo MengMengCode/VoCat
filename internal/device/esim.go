@@ -55,10 +55,10 @@ var (
 // HTTP layer can render the empty state instead of an error.
 var ErrNoEUICC = errNoEUICC
 
-// ErrEUICCChannelStuck means the modem kept rejecting MANAGE CHANNEL or
-// SELECT ISD-R with the EC20's non-descriptive +CME ERROR: 0 after retries.
-// This is observed after SIM hot-swap and requires a modem restart; repeating
-// the same profile-list request cannot reset the baseband's UIM/APDU state.
+// ErrEUICCChannelStuck means the modem kept rejecting MANAGE CHANNEL / SELECT
+// ISD-R, or QMI-UIM still returned INJECT_TIMEOUT after one automatic UIM reset
+// and slot power cycle. Repeating the same request cannot safely improve that
+// state; the modem or host must be restarted.
 var ErrEUICCChannelStuck = errEUICCChannelStuck
 
 // EsimProfile is one eUICC profile decoded from GetProfilesInfo.
@@ -304,30 +304,43 @@ func (manager *Manager) openEuicc(ctx context.Context, id string) (*euiccChannel
 }
 
 func (manager *Manager) openEuiccAID(ctx context.Context, id, aidHex string) (*euiccChannel, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if manager.esimRecoveryActive(id) {
 		return nil, errESIMRecovering
 	}
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	transientAttempts := 0
+	qmiRecovered := false
+	for {
 		channel, err := manager.openEuiccOnceAID(ctx, id, aidHex)
 		if err == nil {
 			return channel, nil
 		}
-		lastErr = err
+		if isQMIUIMInjectTimeout(err) {
+			if qmiRecovered {
+				return nil, fmt.Errorf("%w: %v", ErrEUICCChannelStuck, err)
+			}
+			if recoveryErr := manager.recoverQMIEuiccChannel(ctx, id); recoveryErr != nil {
+				return nil, fmt.Errorf("%w: %v", ErrEUICCChannelStuck, errors.Join(err, recoveryErr))
+			}
+			qmiRecovered = true
+			continue
+		}
 		if !isTransientEuiccCME(err) {
 			return nil, err
 		}
-		if attempt == 2 {
+		transientAttempts++
+		if transientAttempts >= 3 {
 			return nil, fmt.Errorf("%w: %v", ErrEUICCChannelStuck, err)
 		}
-		delay := time.Duration(attempt+1) * 250 * time.Millisecond
+		delay := time.Duration(transientAttempts) * 250 * time.Millisecond
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(delay):
 		}
 	}
-	return nil, lastErr
 }
 
 func (manager *Manager) openEuiccOnce(ctx context.Context, id string) (*euiccChannel, error) {

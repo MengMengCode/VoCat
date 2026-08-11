@@ -16,11 +16,16 @@ import (
 
 const qmiEUICCSlot uint8 = 1
 
+const qmiErrorInjectTimeout uint16 = 0x0050
+
 type qmiEUICCSession interface {
 	GetICCID(context.Context) (string, error)
 	OpenLogicalChannel(context.Context, uint8, []byte) (byte, error)
 	CloseLogicalChannel(context.Context, uint8, byte) error
 	SendAPDU(context.Context, uint8, byte, []byte) ([]byte, error)
+	Reset(context.Context) error
+	PowerOffSIM(context.Context, uint8) error
+	PowerOnSIM(context.Context, uint8) error
 	Close() error
 }
 
@@ -88,6 +93,94 @@ func (manager *Manager) openQMIEuiccOnceAID(
 		slot:          qmiEUICCSlot,
 		channel:       channel,
 	}}, nil
+}
+
+func isQMIUIMInjectTimeout(err error) bool {
+	qmiErr := qmi.GetQMIError(err)
+	return qmiErr != nil &&
+		qmiErr.Service == qmi.ServiceUIM &&
+		qmiErr.MessageID == qmi.UIMOpenLogicalChannel &&
+		qmiErr.ErrorCode == qmiErrorInjectTimeout
+}
+
+// recoverQMIEuiccChannel clears a wedged UIM command and power-cycles the card.
+// OpenStick 410 can leave ordinary USIM reads working while every ISD-R channel
+// open returns INJECT_TIMEOUT after EnableProfile. A UIM reset plus slot power
+// cycle is narrower and faster than rebooting Linux, while still forcing the
+// baseband to discard the stale eUICC channel and subscriber cache.
+func (manager *Manager) recoverQMIEuiccChannel(ctx context.Context, id string) error {
+	state, err := manager.lookup(id)
+	if err != nil {
+		return err
+	}
+	state.opMu.Lock()
+	defer state.opMu.Unlock()
+	if err := manager.validateActive(id, state); err != nil {
+		return err
+	}
+	controlDevice := strings.TrimSpace(manager.candidateFor(state).QMIControl)
+	if controlDevice == "" || manager.qmiEUICCOpener == nil {
+		return errors.New("esim: QMI-UIM recovery is unavailable")
+	}
+
+	openContext, cancelOpen := manager.withTimeout(ctx, manager.commandTimeout*5)
+	session, err := manager.qmiEUICCOpener(openContext, controlDevice)
+	cancelOpen()
+	if err != nil {
+		return fmt.Errorf("esim: open QMI-UIM recovery session: %w", err)
+	}
+	defer session.Close()
+
+	resetContext, cancelReset := manager.withTimeout(ctx, manager.commandTimeout*2)
+	resetErr := session.Reset(resetContext)
+	cancelReset()
+	offContext, cancelOff := manager.withTimeout(ctx, manager.commandTimeout*2)
+	offErr := session.PowerOffSIM(offContext, qmiEUICCSlot)
+	cancelOff()
+	if offErr != nil {
+		return fmt.Errorf("esim: QMI-UIM recovery could not power off slot %d: %w", qmiEUICCSlot, errors.Join(resetErr, offErr))
+	}
+
+	timer := time.NewTimer(250 * time.Millisecond)
+	select {
+	case <-ctx.Done():
+		if !timer.Stop() {
+			<-timer.C
+		}
+	case <-timer.C:
+	}
+	// Power-on must run even if the HTTP caller disconnected after power-off.
+	powerOnContext, cancelPowerOn := context.WithTimeout(context.WithoutCancel(ctx), manager.commandTimeout*2)
+	powerOnErr := session.PowerOnSIM(powerOnContext, qmiEUICCSlot)
+	cancelPowerOn()
+	if powerOnErr != nil {
+		return fmt.Errorf("esim: QMI-UIM recovery could not power on slot %d: %w", qmiEUICCSlot, powerOnErr)
+	}
+	manager.clearSnapshot(id, state)
+
+	readyContext, cancelReady := manager.withTimeout(context.WithoutCancel(ctx), manager.longTimeout)
+	defer cancelReady()
+	var lastErr error
+	for {
+		iccid, readErr := session.GetICCID(readyContext)
+		if readErr == nil && strings.TrimSpace(iccid) != "" {
+			return nil
+		}
+		if readErr != nil {
+			lastErr = readErr
+		} else {
+			lastErr = errors.New("QMI-UIM returned an empty ICCID")
+		}
+		wait := time.NewTimer(time.Second)
+		select {
+		case <-readyContext.Done():
+			if !wait.Stop() {
+				<-wait.C
+			}
+			return fmt.Errorf("esim: QMI-UIM did not become ready after recovery: %w", errors.Join(resetErr, lastErr, readyContext.Err()))
+		case <-wait.C:
+		}
+	}
 }
 
 func (backend *qmiEUICCChannelBackend) exchange(
@@ -207,6 +300,18 @@ func (session *productionDeviceQMIUIMSession) SendAPDU(
 	apdu []byte,
 ) ([]byte, error) {
 	return session.uim.SendAPDU(ctx, slot, channel, apdu)
+}
+
+func (session *productionDeviceQMIUIMSession) Reset(ctx context.Context) error {
+	return session.uim.Reset(ctx)
+}
+
+func (session *productionDeviceQMIUIMSession) PowerOffSIM(ctx context.Context, slot uint8) error {
+	return session.uim.PowerOffSIM(ctx, slot)
+}
+
+func (session *productionDeviceQMIUIMSession) PowerOnSIM(ctx context.Context, slot uint8) error {
+	return session.uim.PowerOnSIM(ctx, slot)
 }
 
 func (session *productionDeviceQMIUIMSession) Close() error {

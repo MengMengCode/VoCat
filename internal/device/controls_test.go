@@ -140,6 +140,34 @@ func TestSetFlightDoesNotFallBackToUnsupportedATWhenQMIUnavailable(t *testing.T)
 	}
 }
 
+func TestProfileSwitchRecoveryUsesQMIModemResetForNativeWWAN(t *testing.T) {
+	manager, atOpener, id := newStartedNativeQMITestManager(t)
+	session := &fakeQMIRadioSession{mode: qmi.ModeOnline}
+	manager.qmiRadioOpener = func(context.Context, string) (qmiRadioSession, error) {
+		return session, nil
+	}
+
+	if err := manager.rebootForProfileSwitch(context.Background(), id); err != nil {
+		t.Fatalf("rebootForProfileSwitch() error = %v", err)
+	}
+	if len(session.setModes) != 1 || session.setModes[0] != qmi.ModeReset {
+		t.Fatalf("QMI reset modes = %v", session.setModes)
+	}
+	if session.closeCount != 1 {
+		t.Fatalf("QMI close count = %d", session.closeCount)
+	}
+	if atOpener.openCount != 0 {
+		t.Fatalf("AT opener used %d times for native profile-switch reset", atOpener.openCount)
+	}
+	entry, err := manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Snapshot != nil {
+		t.Fatalf("stale snapshot survived native modem reset: %#v", entry.Snapshot)
+	}
+}
+
 func TestSetFlightWaitsForAsynchronousQMIModeTransition(t *testing.T) {
 	manager, atOpener, id := newStartedNativeQMITestManager(t)
 	session := &fakeQMIRadioSession{

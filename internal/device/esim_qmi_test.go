@@ -8,14 +8,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+
 	"vocat/internal/modem"
 )
 
 type fakeDeviceQMIUIMSession struct {
 	iccid       string
+	iccids      []string
 	getICCIDErr error
 	openSlot    uint8
 	openAID     []byte
+	openErr     error
 	channel     byte
 	sendSlots   []uint8
 	sendChannel []byte
@@ -24,10 +28,21 @@ type fakeDeviceQMIUIMSession struct {
 	sendStarted chan struct{}
 	sendOnce    sync.Once
 	closeSlot   uint8
+	resetCount  int
+	resetErr    error
+	powerOff    []uint8
+	powerOffErr error
+	powerOn     []uint8
+	powerOnErr  error
 	closed      bool
 }
 
 func (session *fakeDeviceQMIUIMSession) GetICCID(context.Context) (string, error) {
+	if len(session.iccids) > 0 {
+		iccid := session.iccids[0]
+		session.iccids = session.iccids[1:]
+		return iccid, session.getICCIDErr
+	}
 	return session.iccid, session.getICCIDErr
 }
 
@@ -38,7 +53,7 @@ func (session *fakeDeviceQMIUIMSession) OpenLogicalChannel(
 ) (byte, error) {
 	session.openSlot = slot
 	session.openAID = append([]byte(nil), aid...)
-	return session.channel, nil
+	return session.channel, session.openErr
 }
 
 func (session *fakeDeviceQMIUIMSession) CloseLogicalChannel(
@@ -68,6 +83,21 @@ func (session *fakeDeviceQMIUIMSession) SendAPDU(
 	response := append([]byte(nil), session.responses[0]...)
 	session.responses = session.responses[1:]
 	return response, nil
+}
+
+func (session *fakeDeviceQMIUIMSession) Reset(context.Context) error {
+	session.resetCount++
+	return session.resetErr
+}
+
+func (session *fakeDeviceQMIUIMSession) PowerOffSIM(_ context.Context, slot uint8) error {
+	session.powerOff = append(session.powerOff, slot)
+	return session.powerOffErr
+}
+
+func (session *fakeDeviceQMIUIMSession) PowerOnSIM(_ context.Context, slot uint8) error {
+	session.powerOn = append(session.powerOn, slot)
+	return session.powerOnErr
 }
 
 func TestNativeWWANEuiccQMITransmitWaitsForDeviceOperationLock(t *testing.T) {
@@ -221,6 +251,118 @@ func TestNativeWWANEuiccUsesQMIUIMLogicalChannel(t *testing.T) {
 		t.Fatalf("AT opener used %d times for native QMI eUICC", opener.openCount)
 	}
 	client.assertDone(t)
+}
+
+func TestNativeWWANEuiccRecoversQMIInjectTimeout(t *testing.T) {
+	const id = "wwan0"
+	manager, err := NewManager(Options{
+		Discoverer: staticDiscoverer{candidates: []modem.Candidate{{
+			ID:         id,
+			QMIControl: "/dev/wwan0qmi0",
+		}}},
+		CommandTimeout: time.Second,
+		LongTimeout:    time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
+
+	injectTimeout := &qmi.QMIError{
+		Service:   qmi.ServiceUIM,
+		MessageID: qmi.UIMOpenLogicalChannel,
+		Result:    1,
+		ErrorCode: qmiErrorInjectTimeout,
+	}
+	failed := &fakeDeviceQMIUIMSession{openErr: injectTimeout}
+	recovery := &fakeDeviceQMIUIMSession{iccid: "89492026266006792824"}
+	retried := &fakeDeviceQMIUIMSession{channel: 4}
+	sessions := []qmiEUICCSession{failed, recovery, retried}
+	manager.qmiEUICCOpener = func(context.Context, string) (qmiEUICCSession, error) {
+		if len(sessions) == 0 {
+			return nil, errors.New("unexpected QMI-UIM session")
+		}
+		session := sessions[0]
+		sessions = sessions[1:]
+		return session, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	channel, err := manager.openEuiccAID(ctx, id, isdRAID)
+	if err != nil {
+		t.Fatalf("openEuiccAID() error = %v", err)
+	}
+	channel.close(context.Background())
+	if recovery.resetCount != 1 || len(recovery.powerOff) != 1 || recovery.powerOff[0] != qmiEUICCSlot ||
+		len(recovery.powerOn) != 1 || recovery.powerOn[0] != qmiEUICCSlot {
+		t.Fatalf(
+			"recovery reset/off/on = %d/%v/%v",
+			recovery.resetCount,
+			recovery.powerOff,
+			recovery.powerOn,
+		)
+	}
+	if retried.openSlot != qmiEUICCSlot || retried.channel != 4 || !retried.closed {
+		t.Fatalf("retried session = slot %d channel %d closed %v", retried.openSlot, retried.channel, retried.closed)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("unused QMI-UIM sessions = %d", len(sessions))
+	}
+}
+
+func TestNativeWWANEuiccDoesNotLoopRecoveryAfterRepeatedQMIInjectTimeout(t *testing.T) {
+	const id = "wwan0"
+	manager, err := NewManager(Options{
+		Discoverer: staticDiscoverer{candidates: []modem.Candidate{{
+			ID:         id,
+			QMIControl: "/dev/wwan0qmi0",
+		}}},
+		CommandTimeout: time.Second,
+		LongTimeout:    time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
+
+	injectTimeout := &qmi.QMIError{
+		Service:   qmi.ServiceUIM,
+		MessageID: qmi.UIMOpenLogicalChannel,
+		Result:    1,
+		ErrorCode: qmiErrorInjectTimeout,
+	}
+	first := &fakeDeviceQMIUIMSession{openErr: injectTimeout}
+	recovery := &fakeDeviceQMIUIMSession{iccid: "89492026266006792824"}
+	second := &fakeDeviceQMIUIMSession{openErr: injectTimeout}
+	sessions := []qmiEUICCSession{first, recovery, second}
+	manager.qmiEUICCOpener = func(context.Context, string) (qmiEUICCSession, error) {
+		if len(sessions) == 0 {
+			return nil, errors.New("unexpected repeated QMI-UIM recovery")
+		}
+		session := sessions[0]
+		sessions = sessions[1:]
+		return session, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = manager.openEuiccAID(ctx, id, isdRAID)
+	if !errors.Is(err, ErrEUICCChannelStuck) {
+		t.Fatalf("openEuiccAID() error = %v, want ErrEUICCChannelStuck", err)
+	}
+	if recovery.resetCount != 1 || len(recovery.powerOff) != 1 || len(recovery.powerOn) != 1 {
+		t.Fatalf("recovery repeated or incomplete: reset/off/on = %d/%v/%v", recovery.resetCount, recovery.powerOff, recovery.powerOn)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("unused QMI-UIM sessions = %d", len(sessions))
+	}
 }
 
 func TestVerifySwitchedICCIDUsesNativeQMIUIM(t *testing.T) {

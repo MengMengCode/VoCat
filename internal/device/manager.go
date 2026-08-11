@@ -485,6 +485,10 @@ func (manager *Manager) rebootForProfileSwitch(ctx context.Context, id string) e
 	if err := manager.validateActive(id, state); err != nil {
 		return err
 	}
+	if handled, resetErr := manager.resetNativeQMIModemForProfileSwitchLocked(ctx, id, state); handled {
+		manager.setResult(id, state, nil, resetErr)
+		return resetErr
+	}
 	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
 	if err != nil {
 		manager.setResult(id, state, nil, err)

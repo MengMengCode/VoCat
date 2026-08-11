@@ -83,6 +83,45 @@ func (session *productionQMIRadioSession) Close() error {
 	return errors.Join(closeErrors...)
 }
 
+// resetNativeQMIModemForProfileSwitchLocked performs the native equivalent of
+// AT+CFUN=1,1. The caller holds state.opMu. OpenStick 410 firmware accepts QMI
+// DMS ModeReset but does not reliably reset its UIM/eUICC state through the AT
+// command, which can leave an accepted EnableProfile pending indefinitely.
+func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
+	ctx context.Context,
+	id string,
+	state *managedDevice,
+) (bool, error) {
+	controlDevice, native, err := manager.nativeQMIControl(id)
+	if err != nil || !native {
+		return native, err
+	}
+	if manager.qmiRadioOpener == nil {
+		return true, errors.New("QMI DMS modem reset is unavailable")
+	}
+	if state.client != nil {
+		_ = state.client.Close()
+		state.client = nil
+	}
+	state.preFlightMode = nil
+	manager.clearSnapshot(id, state)
+
+	openContext, cancelOpen := manager.withTimeout(ctx, manager.commandTimeout*5)
+	session, err := manager.qmiRadioOpener(openContext, controlDevice)
+	cancelOpen()
+	if err != nil {
+		return true, fmt.Errorf("open QMI DMS modem reset: %w", err)
+	}
+	defer session.Close()
+	resetContext, cancelReset := manager.withTimeout(ctx, manager.longTimeout)
+	err = session.SetOperatingMode(resetContext, qmi.ModeReset)
+	cancelReset()
+	if err != nil {
+		return true, fmt.Errorf("reset modem through QMI DMS: %w", err)
+	}
+	return true, nil
+}
+
 func (manager *Manager) setNativeQMIFlight(
 	ctx context.Context,
 	id string,
