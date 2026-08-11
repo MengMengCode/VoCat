@@ -773,13 +773,14 @@ func (session *Session) buildRegister(
 	requestURI := "sip:" + session.identity.domain
 	routeURI := "sip:" + session.endpoint.address() + ";transport=" + session.transport + ";lr"
 	contact := fmt.Sprintf(
-		"<sip:%s@%s;transport=%s>;+sip.instance=\"<%s>\";+g.3gpp.smsip;audio;"+
+		"<sip:%s@%s;transport=%s>;+g.3gpp.accesstype=\"wlan1\";+sip.instance=\"<%s>\";"+
+			"+g.3gpp.smsip;audio;"+
 			`+g.3gpp.icsi-ref="%s"`,
 		session.identity.user,
 		contactAddress,
 		session.transport,
 		session.instanceID,
-		"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel",
+		"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel,urn%3Aurn-7%3A3gpp-service.ims.icsi.oma.cpm.msg,urn%3Aurn-7%3A3gpp-service.ims.icsi.oma.cpm.sms",
 	)
 	lines := []string{
 		"REGISTER " + requestURI + " SIP/2.0",
@@ -792,7 +793,7 @@ func (session *Session) buildRegister(
 		fmt.Sprintf("CSeq: %d REGISTER", cseq),
 		"Contact: " + contact,
 		fmt.Sprintf("Expires: %d", expires),
-		"Supported: path, gruu",
+		"Supported: path, sec-agree",
 		"Allow: REGISTER, MESSAGE, INVITE, ACK, CANCEL, BYE, OPTIONS",
 		"User-Agent: " + session.provider.config.UserAgent,
 	}

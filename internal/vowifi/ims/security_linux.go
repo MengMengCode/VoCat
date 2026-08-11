@@ -27,6 +27,14 @@ type linuxIPSecHandle struct {
 }
 
 func (installer linuxIPSecInstaller) Install(ctx context.Context, config IPSecSAConfig) (IPSecSAHandle, error) {
+	// OpenStick's iproute2 rejects the zero-length cipher_null key required by
+	// O2's hmac-md5-96/null Security-Server offer.  Keep the CLI path for the
+	// original SHA-1/AES default, and use native XFRM netlink for the carrier
+	// transforms that need exact algorithm/key encoding.
+	if normalizedAuthAlgorithm(config.AuthAlgorithm) != securityAlgorithmSHA1 ||
+		normalizedEncryptionAlgorithm(config.EncryptionAlgorithm) != securityEncryptionAES {
+		return installNativeIPSec(ctx, config)
+	}
 	command := installer.ipCommand
 	if command == "" {
 		command = "ip"

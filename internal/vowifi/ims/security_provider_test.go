@@ -387,7 +387,12 @@ func serveProtectedRegistrar(
 		return result, fmt.Errorf("initial sec-agree headers = %#v", headers)
 	}
 	result.securityClient = headers["security-client"]
-	proposal, err := parseSecurityMechanism(result.securityClient)
+	securityClientItems := splitHeaderValues([]string{result.securityClient})
+	if len(securityClientItems) == 0 {
+		_ = initialConnection.Close()
+		return result, errors.New("initial Security-Client is empty")
+	}
+	proposal, err := parseSecurityMechanism(securityClientItems[0])
 	if err != nil {
 		_ = initialConnection.Close()
 		return result, fmt.Errorf("parse initial Security-Client: %w", err)

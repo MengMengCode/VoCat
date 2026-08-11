@@ -36,6 +36,32 @@ func TestParseSecurityAgreementSelectsSupportedIPSec(t *testing.T) {
 	}
 }
 
+func TestSecurityProposalAdvertisesO2CompatibleMechanisms(t *testing.T) {
+	proposal, err := newSecurityProposal(net.ParseIP("127.0.0.1"), 40666, 55610)
+	if err != nil {
+		t.Fatalf("newSecurityProposal() error = %v", err)
+	}
+	items := splitHeaderValues([]string{proposal.headerValue()})
+	if len(items) != 6 {
+		t.Fatalf("Security-Client mechanism count = %d, want 6: %q", len(items), proposal.headerValue())
+	}
+	if !strings.Contains(proposal.headerValue(), "alg=hmac-md5-96") ||
+		!strings.Contains(proposal.headerValue(), "ealg=null") {
+		t.Fatalf("Security-Client omitted O2 hmac-md5-96/null offer: %q", proposal.headerValue())
+	}
+	selected, err := parseSecurityAgreement([]string{
+		"ipsec-3gpp;q=1.000;alg=hmac-md5-96;prot=esp;mod=trans;ealg=null;" +
+			"spi-c=2001;spi-s=2002;port-c=50601;port-s=50600",
+	}, proposal)
+	if err != nil {
+		t.Fatalf("parseSecurityAgreement(O2) error = %v", err)
+	}
+	if selected.selected.algorithm != securityAlgorithmMD5 ||
+		selected.selected.encryption != securityEncryptionNull {
+		t.Fatalf("selected O2 mechanism = %#v", selected.selected)
+	}
+}
+
 func TestParseSecurityAgreementFailsClosed(t *testing.T) {
 	proposal := securityProposal{
 		spiClient:  1001,
@@ -105,6 +131,65 @@ func TestExpandIPSecKeys(t *testing.T) {
 	integrity[0] ^= 0xff
 	if ck[0] != 0 || ik[0] != 16 {
 		t.Fatal("expanded keys alias AKA key material")
+	}
+	noEncryption, md5Integrity, err := expandIPSecKeysFor(
+		securityAlgorithmMD5,
+		securityEncryptionNull,
+		ck,
+		ik,
+	)
+	if err != nil {
+		t.Fatalf("expandIPSecKeysFor(O2) error = %v", err)
+	}
+	if len(noEncryption) != 0 || !reflect.DeepEqual(md5Integrity, ik) {
+		t.Fatalf("O2 keys = encryption %v, integrity %v", noEncryption, md5Integrity)
+	}
+	threeDES, _, err := expandIPSecKeysFor(securityAlgorithmMD5, securityEncryption3DES, ck, ik)
+	if err != nil {
+		t.Fatalf("expandIPSecKeysFor(3DES) error = %v", err)
+	}
+	if !reflect.DeepEqual(threeDES, append(append([]byte(nil), ck...), ck[:8]...)) {
+		t.Fatalf("3DES key = %v", threeDES)
+	}
+}
+
+func TestXFRMPlanSupportsO2MD5Null(t *testing.T) {
+	config := testIPSecSAConfig()
+	config.AuthAlgorithm = securityAlgorithmMD5
+	config.EncryptionAlgorithm = securityEncryptionNull
+	config.EncryptionKey = nil
+	config.IntegrityKey = config.IntegrityKey[:16]
+	install, err := buildXFRMInstallPlan(config)
+	if err != nil {
+		t.Fatalf("buildXFRMInstallPlan(O2) error = %v", err)
+	}
+	if !containsArguments(install[0].arguments, "auth-trunc", "hmac(md5)", "0x"+strings.Repeat("22", 16), "96") {
+		t.Fatalf("O2 state omitted MD5 auth: %v", install[0].arguments)
+	}
+	if !containsArguments(install[0].arguments, "enc", "ecb(cipher_null)", "0x") {
+		t.Fatalf("O2 state omitted null encryption: %v", install[0].arguments)
+	}
+}
+
+func TestNativeXFRMPlanSupportsO2MD5Null(t *testing.T) {
+	config := testIPSecSAConfig()
+	config.AuthAlgorithm = securityAlgorithmMD5
+	config.EncryptionAlgorithm = securityEncryptionNull
+	config.EncryptionKey = nil
+	config.IntegrityKey = config.IntegrityKey[:16]
+	states, policies, err := buildNativeXFRMPlan(config)
+	if err != nil {
+		t.Fatalf("buildNativeXFRMPlan(O2) error = %v", err)
+	}
+	if len(states) != 4 || len(policies) != 6 {
+		t.Fatalf("native XFRM plan sizes = states %d, policies %d", len(states), len(policies))
+	}
+	if states[0].Auth == nil || states[0].Auth.Name != "hmac(md5)" ||
+		states[0].Auth.TruncateLen != 96 || len(states[0].Auth.Key) != 16 {
+		t.Fatalf("native O2 auth state = %#v", states[0].Auth)
+	}
+	if states[0].Crypt == nil || states[0].Crypt.Name != "ecb(cipher_null)" || len(states[0].Crypt.Key) != 0 {
+		t.Fatalf("native O2 encryption state = %#v", states[0].Crypt)
 	}
 }
 
