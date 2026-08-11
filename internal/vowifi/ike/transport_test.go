@@ -186,6 +186,66 @@ func TestSOCKS5InitialExchangeFallsBackAcrossResolvedEPDGAddresses(t *testing.T)
 	}
 }
 
+func TestDirectInitialExchangeFallsBackAcrossResolvedEPDGAddresses(t *testing.T) {
+	first, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	transport, err := newDirectUDP(
+		context.Background(),
+		transportConfig{Dialer: &net.Dialer{}, Timeout: 80 * time.Millisecond},
+		[]*net.UDPAddr{
+			cloneUDPAddr(first.LocalAddr().(*net.UDPAddr)),
+			cloneUDPAddr(second.LocalAddr().(*net.UDPAddr)),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.Close()
+	requestHeader := ikeHeader{
+		InitiatorSPI: [8]byte{1, 2, 3, 4, 5, 6, 7, 8},
+		Exchange:     exchangeIKEInit,
+		Flags:        flagInitiator,
+	}
+	request := requestHeader.marshal([]byte("request"))
+	response := ikeHeader{
+		InitiatorSPI: requestHeader.InitiatorSPI,
+		ResponderSPI: [8]byte{8, 7, 6, 5, 4, 3, 2, 1},
+		Exchange:     exchangeIKEInit,
+		Flags:        flagResponse,
+	}.marshal([]byte("response"))
+	serverDone := make(chan error, 1)
+	go func() {
+		buffer := make([]byte, 2048)
+		_, peer, readErr := second.ReadFromUDP(buffer)
+		if readErr == nil {
+			_, readErr = second.WriteToUDP(response, peer)
+		}
+		serverDone <- readErr
+	}()
+
+	got, err := transport.RoundTrip(context.Background(), request)
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if string(got) != string(response) {
+		t.Fatalf("RoundTrip() response = %x", got)
+	}
+	if !udpAddrsEqual(transport.RemoteAddr(), second.LocalAddr().(*net.UDPAddr)) {
+		t.Fatalf("selected ePDG = %v, want %v", transport.RemoteAddr(), second.LocalAddr())
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("second ePDG: %v", err)
+	}
+}
+
 func TestSOCKS5RoundTripSkipsStaleAndESPDatagrams(t *testing.T) {
 	relay, err := net.ListenUDP(
 		"udp",

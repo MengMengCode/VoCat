@@ -81,7 +81,7 @@ func newDatagramTransport(
 	}
 	switch route.Mode {
 	case "", vowifi.ProxyModeDirect:
-		return newDirectUDP(ctx, config, remotes[0])
+		return newDirectUDP(ctx, config, remotes)
 	case vowifi.ProxyModeSOCKS5:
 		return newSOCKS5UDP(ctx, config, route, remotes)
 	default:
@@ -148,15 +148,29 @@ type directUDP struct {
 	config  transportConfig
 	conn    *net.UDPConn
 	remote  *net.UDPAddr
+	remotes []*net.UDPAddr
 	floated bool
 }
 
-func newDirectUDP(ctx context.Context, config transportConfig, remote *net.UDPAddr) (*directUDP, error) {
-	transport := &directUDP{config: config, remote: cloneUDPAddr(remote)}
-	if err := transport.dial(ctx, false); err != nil {
-		return nil, err
+func newDirectUDP(ctx context.Context, config transportConfig, remotes []*net.UDPAddr) (*directUDP, error) {
+	if len(remotes) == 0 || remotes[0] == nil {
+		return nil, errors.New("ike: direct UDP transport requires an ePDG destination")
 	}
-	return transport, nil
+	transport := &directUDP{
+		config:  config,
+		remote:  cloneUDPAddr(remotes[0]),
+		remotes: cloneUDPAddrs(remotes),
+	}
+	var lastErr error
+	for _, candidate := range transport.remotes {
+		transport.remote = cloneUDPAddr(candidate)
+		if err := transport.dial(ctx, false); err == nil {
+			return transport, nil
+		} else {
+			lastErr = err
+		}
+	}
+	return nil, fmt.Errorf("ike: dial all %d resolved ePDG addresses: %w", len(transport.remotes), lastErr)
 }
 
 func (transport *directUDP) dial(ctx context.Context, bind4500 bool) error {
@@ -231,6 +245,38 @@ func (transport *directUDP) RoundTrip(ctx context.Context, packet []byte) ([]byt
 	if err != nil {
 		return nil, fmt.Errorf("ike: invalid outbound packet: %w", err)
 	}
+	// Carrier ePDG hostnames commonly return several gateways. If the first
+	// gateway silently drops IKE_SA_INIT, reconnect the UDP socket and try the
+	// remaining addresses. Once a gateway answers, keep it pinned for the
+	// lifetime of the IKE SA and its UDP/4500 session.
+	if !transport.floated && requestHeader.Exchange == exchangeIKEInit && requestHeader.MessageID == 0 && len(transport.remotes) > 1 {
+		var lastErr error
+		for index, candidate := range transport.remotes {
+			if index > 0 || !udpAddrsEqual(transport.remote, candidate) {
+				transport.remote = cloneUDPAddr(candidate)
+				if err := transport.dial(ctx, false); err != nil {
+					lastErr = err
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					continue
+				}
+			}
+			response, attemptErr := transport.roundTripLocked(ctx, packet, requestHeader)
+			if attemptErr == nil {
+				return response, nil
+			}
+			lastErr = attemptErr
+			if ctx.Err() != nil || !isNetworkTimeout(attemptErr) {
+				return nil, attemptErr
+			}
+		}
+		return nil, fmt.Errorf("ike: all %d resolved ePDG addresses timed out: %w", len(transport.remotes), lastErr)
+	}
+	return transport.roundTripLocked(ctx, packet, requestHeader)
+}
+
+func (transport *directUDP) roundTripLocked(ctx context.Context, packet []byte, requestHeader ikeHeader) ([]byte, error) {
 	wirePacket := packet
 	if transport.floated {
 		wirePacket = append([]byte{0, 0, 0, 0}, packet...)
@@ -923,6 +969,13 @@ func cloneUDPAddrs(addresses []*net.UDPAddr) []*net.UDPAddr {
 		}
 	}
 	return result
+}
+
+func udpAddrsEqual(left, right *net.UDPAddr) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Port == right.Port && left.Zone == right.Zone && left.IP.Equal(right.IP)
 }
 
 func parsePort(value string) (int, error) {
