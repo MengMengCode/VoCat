@@ -47,7 +47,7 @@ export function lifecycleLabel(phase?: string): string {
   }
 }
 
-// qt: device is online (running + control/healthy) and not recovering.
+// qt: device is online (running + responsive control plane) and not recovering.
 export function isDeviceOnline(device?: { running?: boolean; controlOnline?: boolean; healthy?: boolean; lifecyclePhase?: string } | null): boolean {
   if (!device || isRecoveringPhase(device.lifecyclePhase)) return false;
   return !!device.running && (device.controlOnline ?? device.healthy) === true;

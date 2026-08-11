@@ -85,3 +85,26 @@ func TestDeviceSummaryExposesModemRecoveryWithoutCallingItOffline(t *testing.T) 
 		t.Fatalf("lifecycle phase = %#v, want recovering", got["lifecycle_phase"])
 	}
 }
+
+func TestDeviceSummaryKeepsResponsiveControlOnlineWhenDegraded(t *testing.T) {
+	t.Parallel()
+	entry := device.Device{
+		ID:         "wifi-410",
+		Discovered: true,
+		LastError:  "QMI WMS list messages failed",
+		Snapshot: &device.Snapshot{
+			Responsive: true,
+			ICCID:      "8949000000000000000",
+		},
+	}
+	got := deviceSummary(entry)
+	if got["healthy"] != false {
+		t.Fatalf("healthy = %#v, want false for degraded device", got["healthy"])
+	}
+	if got["control_online"] != true {
+		t.Fatalf("control_online = %#v, want true while modem is responsive", got["control_online"])
+	}
+	if got["lifecycle_phase"] != "degraded" {
+		t.Fatalf("lifecycle phase = %#v, want degraded", got["lifecycle_phase"])
+	}
+}

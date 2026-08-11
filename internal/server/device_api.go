@@ -1529,7 +1529,14 @@ func rawJSONObject(value json.RawMessage) any {
 
 func deviceSummary(entry device.Device) map[string]any {
 	snapshot := entry.Snapshot
-	healthy := entry.Discovered && snapshot != nil && snapshot.Responsive && entry.LastError == ""
+	// A transient operation error (for example an optional QMI/WMS query)
+	// should make the device degraded, not offline.  The UI uses
+	// control_online to decide whether live controls such as eSIM/card policy
+	// switches may be used, so keep that signal tied to the actual responsive
+	// modem/control plane and expose the last error separately through healthy
+	// and lifecycle_reason.
+	controlOnline := entry.Discovered && snapshot != nil && snapshot.Responsive
+	healthy := controlOnline && entry.LastError == ""
 	phone := ""
 	phoneSource := ""
 	if snapshot != nil {
@@ -1556,7 +1563,7 @@ func deviceSummary(entry device.Device) map[string]any {
 		"name":                     deviceName(entry),
 		"running":                  entry.Discovered,
 		"healthy":                  healthy,
-		"control_online":           healthy,
+		"control_online":           controlOnline,
 		"physical_present":         entry.Discovered,
 		"worker_running":           entry.Discovered,
 		"data_connected":           false,
