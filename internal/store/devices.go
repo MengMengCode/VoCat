@@ -142,6 +142,56 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 	if value.ESIMTransport != "at" && value.ESIMTransport != "qmi" {
 		return fmt.Errorf("unsupported eSIM transport %q", value.ESIMTransport)
 	}
+	carrierProfileUnset := strings.TrimSpace(value.IMSAPN) == "" &&
+		strings.TrimSpace(value.IMSPrivateIdentity) == "" &&
+		strings.TrimSpace(value.IMSPublicIdentity) == "" &&
+		strings.TrimSpace(value.IMSSMSCenter) == "" &&
+		strings.TrimSpace(value.IMSTransport) == "" &&
+		strings.TrimSpace(value.VoWiFiEAPMethod) == ""
+	if carrierProfileUnset {
+		value.IMSAllowIMSIDerivedIdentity = true
+	}
+	value.IMSAPN = strings.TrimSpace(value.IMSAPN)
+	if value.IMSAPN == "" {
+		value.IMSAPN = "ims"
+	}
+	if !validIMSAPN(value.IMSAPN) {
+		return errors.New("IMS APN contains invalid characters")
+	}
+	value.IMSPrivateIdentity = strings.TrimSpace(value.IMSPrivateIdentity)
+	value.IMSPublicIdentity = strings.TrimSpace(value.IMSPublicIdentity)
+	if (value.IMSPrivateIdentity == "") != (value.IMSPublicIdentity == "") {
+		return errors.New("IMS private and public identities must be configured together")
+	}
+	if !value.IMSAllowIMSIDerivedIdentity && value.IMSPrivateIdentity == "" {
+		return errors.New("IMS private and public identities are required when IMSI derivation is disabled")
+	}
+	for name, identity := range map[string]string{
+		"private": value.IMSPrivateIdentity,
+		"public":  value.IMSPublicIdentity,
+	} {
+		if len(identity) > 512 || strings.ContainsAny(identity, "\r\n") {
+			return fmt.Errorf("IMS %s identity is invalid", name)
+		}
+	}
+	value.IMSSMSCenter = strings.TrimSpace(value.IMSSMSCenter)
+	if !validIMSSMSCenter(value.IMSSMSCenter) {
+		return errors.New("IMS SMS service-centre address is invalid")
+	}
+	value.IMSTransport = strings.ToLower(strings.TrimSpace(value.IMSTransport))
+	if value.IMSTransport == "" {
+		value.IMSTransport = "tcp"
+	}
+	if value.IMSTransport != "tcp" && value.IMSTransport != "udp" {
+		return fmt.Errorf("unsupported IMS transport %q", value.IMSTransport)
+	}
+	value.VoWiFiEAPMethod = strings.ToLower(strings.TrimSpace(value.VoWiFiEAPMethod))
+	if value.VoWiFiEAPMethod == "" {
+		value.VoWiFiEAPMethod = "aka"
+	}
+	if value.VoWiFiEAPMethod != "aka" && value.VoWiFiEAPMethod != "aka-prime" {
+		return fmt.Errorf("unsupported VoWiFi EAP method %q", value.VoWiFiEAPMethod)
+	}
 	extra, err := normalizeJSONObject(value.Extra)
 	if err != nil {
 		return fmt.Errorf("normalize device extra data: %w", err)
@@ -159,12 +209,15 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 	_, err = executor.ExecContext(ctx, `
 		INSERT INTO devices (
 			id, name, device_type, interface, control_device, at_port, usb_path,
-			audio_device, modem_imei, apn, proxy_port, baud_rate,
+			audio_device, modem_imei, apn, ims_apn, ims_private_identity,
+			ims_public_identity, ims_sms_center, ims_transport,
+			ims_allow_imsi_derived_identity, vowifi_eap_method,
+			vowifi_allow_sha1, vowifi_use_modp1024, proxy_port, baud_rate,
 			data_bits, stop_bits, parity, device_backend, esim_transport,
 			qmi_use_proxy, qmi_proxy_path, qmi_proxy_executable,
 			network_enabled, sms_enabled, vowifi_enabled, extra_json,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			device_type = excluded.device_type,
@@ -175,6 +228,15 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 			audio_device = excluded.audio_device,
 			modem_imei = excluded.modem_imei,
 			apn = excluded.apn,
+			ims_apn = excluded.ims_apn,
+			ims_private_identity = excluded.ims_private_identity,
+			ims_public_identity = excluded.ims_public_identity,
+			ims_sms_center = excluded.ims_sms_center,
+			ims_transport = excluded.ims_transport,
+			ims_allow_imsi_derived_identity = excluded.ims_allow_imsi_derived_identity,
+			vowifi_eap_method = excluded.vowifi_eap_method,
+			vowifi_allow_sha1 = excluded.vowifi_allow_sha1,
+			vowifi_use_modp1024 = excluded.vowifi_use_modp1024,
 			proxy_port = excluded.proxy_port,
 			baud_rate = excluded.baud_rate,
 			data_bits = excluded.data_bits,
@@ -192,7 +254,10 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 			updated_at = excluded.updated_at
 	`,
 		value.ID, value.Name, value.DeviceType, value.Interface, value.ControlDevice, value.ATPort,
-		value.USBPath, value.AudioDevice, value.ModemIMEI, value.APN,
+		value.USBPath, value.AudioDevice, value.ModemIMEI, value.APN, value.IMSAPN,
+		value.IMSPrivateIdentity, value.IMSPublicIdentity, value.IMSSMSCenter, value.IMSTransport,
+		boolInt(value.IMSAllowIMSIDerivedIdentity), value.VoWiFiEAPMethod,
+		boolInt(value.VoWiFiAllowSHA1), boolInt(value.VoWiFiUseMODP1024),
 		value.ProxyPort, value.BaudRate, value.DataBits, value.StopBits,
 		value.Parity, value.DeviceBackend, value.ESIMTransport,
 		boolInt(value.QMIUseProxy), value.QMIProxyPath, value.QMIProxyExecutable,
@@ -282,7 +347,10 @@ func (s *Store) DeleteDevice(ctx context.Context, id string) error {
 
 const deviceSelect = `
 	SELECT id, name, device_type, interface, control_device, at_port, usb_path,
-		audio_device, modem_imei, apn, proxy_port, baud_rate, data_bits,
+		audio_device, modem_imei, apn, ims_apn, ims_private_identity,
+		ims_public_identity, ims_sms_center, ims_transport,
+		ims_allow_imsi_derived_identity, vowifi_eap_method,
+		vowifi_allow_sha1, vowifi_use_modp1024, proxy_port, baud_rate, data_bits,
 		stop_bits, parity, device_backend, esim_transport, qmi_use_proxy,
 		qmi_proxy_path, qmi_proxy_executable, network_enabled, sms_enabled,
 		vowifi_enabled, extra_json, created_at, updated_at
@@ -290,13 +358,16 @@ const deviceSelect = `
 
 func scanDevice(row rowScanner) (Device, error) {
 	var value Device
-	var qmiUseProxy, networkEnabled, smsEnabled, vowifiEnabled int
+	var qmiUseProxy, networkEnabled, smsEnabled, vowifiEnabled, imsAllowDerived, vowifiAllowSHA1, vowifiUseMODP1024 int
 	var extra string
 	var createdAt, updatedAt int64
 	err := row.Scan(
 		&value.ID, &value.Name, &value.DeviceType, &value.Interface, &value.ControlDevice,
 		&value.ATPort, &value.USBPath, &value.AudioDevice, &value.ModemIMEI,
-		&value.APN, &value.ProxyPort, &value.BaudRate, &value.DataBits,
+		&value.APN, &value.IMSAPN, &value.IMSPrivateIdentity, &value.IMSPublicIdentity,
+		&value.IMSSMSCenter, &value.IMSTransport, &imsAllowDerived, &value.VoWiFiEAPMethod,
+		&vowifiAllowSHA1, &vowifiUseMODP1024,
+		&value.ProxyPort, &value.BaudRate, &value.DataBits,
 		&value.StopBits, &value.Parity, &value.DeviceBackend,
 		&value.ESIMTransport, &qmiUseProxy, &value.QMIProxyPath,
 		&value.QMIProxyExecutable, &networkEnabled, &smsEnabled,
@@ -309,6 +380,9 @@ func scanDevice(row rowScanner) (Device, error) {
 		return Device{}, err
 	}
 	value.QMIUseProxy = qmiUseProxy != 0
+	value.IMSAllowIMSIDerivedIdentity = imsAllowDerived != 0
+	value.VoWiFiAllowSHA1 = vowifiAllowSHA1 != 0
+	value.VoWiFiUseMODP1024 = vowifiUseMODP1024 != 0
 	value.NetworkEnabled = networkEnabled != 0
 	value.SMSEnabled = smsEnabled != 0
 	value.VoWiFiEnabled = vowifiEnabled != 0
@@ -317,6 +391,36 @@ func scanDevice(row rowScanner) (Device, error) {
 	value.CreatedAt = time.Unix(createdAt, 0).UTC()
 	value.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return value, nil
+}
+
+func validIMSAPN(value string) bool {
+	if len(value) < 1 || len(value) > 253 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '.' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validIMSSMSCenter(value string) bool {
+	if value == "" {
+		return true
+	}
+	digits := strings.TrimPrefix(value, "+")
+	if len(digits) < 3 || len(digits) > 20 {
+		return false
+	}
+	for _, digit := range digits {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) UpsertDeviceRuntime(ctx context.Context, value DeviceRuntime) error {

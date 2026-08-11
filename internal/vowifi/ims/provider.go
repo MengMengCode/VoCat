@@ -35,19 +35,23 @@ var (
 // LocalAddress is empty, Provider uses the corresponding value proven by the
 // TunnelSession. The default transport is TCP and the default port is 5060.
 type Config struct {
-	PCSCF               string
-	LocalAddress        string
-	Transport           string
-	Port                int
-	RegistrationExpiry  time.Duration
-	TransactionTimeout  time.Duration
-	PrivateIdentity     string
-	PublicIdentity      string
-	UserAgent           string
-	SecurityMode        SecurityMode
-	IPSecInstaller      IPSecSAInstaller
-	ProtectedClientPort int
-	ProtectedServerPort int
+	PCSCF              string
+	LocalAddress       string
+	Transport          string
+	Port               int
+	RegistrationExpiry time.Duration
+	TransactionTimeout time.Duration
+	PrivateIdentity    string
+	PublicIdentity     string
+	// RequireExplicitIdentities disables the standards-based IMSI fallback.
+	// Enable it when the device has no trusted ISIM reader and the carrier
+	// profile must provide both IMPI and IMPU explicitly.
+	RequireExplicitIdentities bool
+	UserAgent                 string
+	SecurityMode              SecurityMode
+	IPSecInstaller            IPSecSAInstaller
+	ProtectedClientPort       int
+	ProtectedServerPort       int
 	// SMSCenter is an operator-provided fallback when the SIM leaves EF_SMSP
 	// and AT+CSCA empty. It must be an international or national digit string.
 	SMSCenter string
@@ -248,21 +252,38 @@ func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, 
 		mnc = "0" + mnc
 	}
 	domain := fmt.Sprintf("ims.mnc%s.mcc%s.3gppnetwork.org", mnc, mcc)
-	privateIdentity := config.PrivateIdentity
+	privateIdentity := strings.TrimSpace(config.PrivateIdentity)
+	publicIdentity := strings.TrimSpace(config.PublicIdentity)
+	if (privateIdentity == "") != (publicIdentity == "") {
+		return identitySet{}, errors.New("ims: private and public identities must be configured together")
+	}
 	if privateIdentity == "" {
+		if config.RequireExplicitIdentities {
+			return identitySet{}, errors.New("ims: explicit private and public identities are required when IMSI derivation is disabled")
+		}
 		privateIdentity = imsi + "@" + domain
-	}
-	publicIdentity := config.PublicIdentity
-	if publicIdentity == "" {
 		publicIdentity = "sip:" + imsi + "@" + domain
+	} else {
+		at := strings.LastIndexByte(privateIdentity, '@')
+		if at <= 0 || at == len(privateIdentity)-1 {
+			return identitySet{}, errors.New("ims: configured private identity is invalid")
+		}
+		domain = privateIdentity[at+1:]
+		if strings.ContainsAny(domain, "<>\" \t;:@/") {
+			return identitySet{}, errors.New("ims: configured private identity realm is invalid")
+		}
 	}
+	publicIdentityLower := strings.ToLower(publicIdentity)
 	if strings.ContainsAny(privateIdentity+publicIdentity, "\r\n") ||
 		!strings.Contains(privateIdentity, "@") ||
-		(!strings.HasPrefix(strings.ToLower(publicIdentity), "sip:") &&
-			!strings.HasPrefix(strings.ToLower(publicIdentity), "sips:")) {
+		(!strings.HasPrefix(publicIdentityLower, "sip:") &&
+			!strings.HasPrefix(publicIdentityLower, "sips:")) {
 		return identitySet{}, errors.New("ims: configured IMS identity is invalid")
 	}
-	user := strings.TrimPrefix(strings.TrimPrefix(publicIdentity, "sip:"), "sips:")
+	user := publicIdentity[4:]
+	if strings.HasPrefix(publicIdentityLower, "sips:") {
+		user = publicIdentity[5:]
+	}
 	if at := strings.IndexByte(user, '@'); at >= 0 {
 		user = user[:at]
 	}
@@ -444,6 +465,11 @@ type Session struct {
 	inboundConnections map[net.Conn]struct{}
 	smsMu              sync.Mutex
 	nextRPReference    byte
+	smsTR1M            time.Duration
+	smsSubmitMu        sync.Mutex
+	smsSubmit          map[byte]*smsSubmitTransaction
+	smsServerMu        sync.Mutex
+	smsServer          map[smsServerTransactionKey]*smsServerTransaction
 	callMu             sync.Mutex
 	calls              map[string]*imsCall
 
@@ -496,6 +522,8 @@ func newSession(
 		failures:           make(chan error, 1),
 		transactions:       make(map[sipTransactionKey]chan *sipResponse),
 		inboundConnections: make(map[net.Conn]struct{}),
+		smsSubmit:          make(map[byte]*smsSubmitTransaction),
+		smsServer:          make(map[smsServerTransactionKey]*smsServerTransaction),
 		calls:              make(map[string]*imsCall),
 		evidence: vowifi.IMSEvidence{
 			RegistrationState: "registering",
@@ -764,7 +792,7 @@ func (session *Session) buildRegister(
 		"Contact: " + contact,
 		fmt.Sprintf("Expires: %d", expires),
 		"Supported: path, gruu",
-		"Allow: REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS",
+		"Allow: REGISTER, MESSAGE, INVITE, ACK, CANCEL, BYE, OPTIONS",
 		"User-Agent: " + session.provider.config.UserAgent,
 	}
 	if session.securityOffered() {
@@ -904,7 +932,7 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 			}
 		}
 	}
-	expiry := registrationExpiry(response, contacts, session.provider.config.RegistrationExpiry)
+	expiry := registrationExpiry(response, registeredContact, session.provider.config.RegistrationExpiry)
 	if expiry <= 0 {
 		session.evidence.Registered = false
 		session.evidence.RegistrationState = "rejected_zero_expiry"
@@ -1027,11 +1055,9 @@ func (session *Session) clearAuthentication() {
 	session.auth = nil
 }
 
-func registrationExpiry(response *sipResponse, contacts []string, fallback time.Duration) time.Duration {
-	for _, contact := range contacts {
-		if seconds, ok := parameterSeconds(contact, "expires"); ok {
-			return boundedExpiry(seconds)
-		}
+func registrationExpiry(response *sipResponse, registeredContact string, fallback time.Duration) time.Duration {
+	if seconds, ok := parameterSeconds(registeredContact, "expires"); ok {
+		return boundedExpiry(seconds)
 	}
 	if seconds, err := strconv.Atoi(strings.TrimSpace(response.value("Expires"))); err == nil {
 		return boundedExpiry(seconds)
@@ -1091,22 +1117,48 @@ func (session *Session) EnableSMS(ctx context.Context) (vowifi.SMSEvidence, erro
 		return vowifi.SMSEvidence{}, err
 	}
 	session.mu.Lock()
-	defer session.mu.Unlock()
-	// This method is deliberately evidence-only. It never sends SIP MESSAGE,
-	// modem CMGS commands, or any dial request. A registrar-confirmed feature
-	// tag on this session's own Contact is the minimum readiness proof.
+	// A registrar-confirmed feature tag proves the SIP capability. Sending also
+	// needs a usable TS-SCA, but probing it must happen outside session.mu because
+	// a SIM/modem reader may block on I/O.
 	switch {
 	case session.closed:
+		session.mu.Unlock()
 		return vowifi.SMSEvidence{}, ErrSessionClosed
 	case !session.evidence.Registered:
+		session.mu.Unlock()
 		return vowifi.SMSEvidence{}, vowifi.ErrIMSNotRegistered
 	case !session.expiresAt.IsZero() && !time.Now().Before(session.expiresAt):
+		session.mu.Unlock()
 		return vowifi.SMSEvidence{}, ErrRegistrationExpired
 	case !session.smsContactConfirmed:
+		session.mu.Unlock()
 		return vowifi.SMSEvidence{Ready: false}, ErrSMSCapabilityNotConfirmed
-	default:
+	}
+	smsc := strings.TrimSpace(session.request.Identity.SMSC)
+	deviceID := session.request.DeviceID
+	session.mu.Unlock()
+	if smsc != "" {
+		if _, err := encodeRPAddress(smsc); err != nil {
+			return vowifi.SMSEvidence{Ready: false}, ErrSMSCUnavailable
+		}
 		return vowifi.SMSEvidence{Ready: true}, nil
 	}
+	var readErr error
+	if reader, ok := session.provider.aka.(smsCenterReader); ok {
+		smsc, readErr = reader.ReadSMSCenter(ctx, deviceID)
+	}
+	if strings.TrimSpace(smsc) == "" {
+		smsc = session.provider.config.SMSCenter
+	}
+	if strings.TrimSpace(smsc) == "" {
+		return vowifi.SMSEvidence{Ready: false}, errors.Join(ErrSMSCUnavailable, readErr)
+	}
+	if _, err := encodeRPAddress(smsc); err != nil {
+		return vowifi.SMSEvidence{Ready: false}, errors.Join(ErrSMSCUnavailable, readErr)
+	}
+	// Do not cache a value read from the modem here: a later SIM swap must be
+	// observed by the next readiness/send probe rather than inheriting stale TS-SCA.
+	return vowifi.SMSEvidence{Ready: true}, nil
 }
 
 func (session *Session) Close(ctx context.Context) error {
@@ -1143,6 +1195,16 @@ func (session *Session) Close(ctx context.Context) error {
 	session.mu.Unlock()
 	session.callMu.Lock()
 	for _, call := range session.calls {
+		if call.reliableCancel != nil {
+			call.reliableCancel()
+			call.reliableCancel = nil
+			call.reliableGeneration++
+		}
+		if call.finalCancel != nil {
+			call.finalCancel()
+			call.finalCancel = nil
+			call.finalGeneration++
+		}
 		if call.media != nil {
 			_ = call.media.Close()
 		}

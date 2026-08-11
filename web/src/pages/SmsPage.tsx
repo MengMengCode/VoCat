@@ -290,11 +290,10 @@ export default function SmsPage() {
     }
     const id = ++threadReqId.current;
     if (!silent) setMessagesLoadingState(true);
-    const query: ThreadQuery = { peer: thread.peer, limit: THREAD_PAGE };
+    const query: ThreadQuery = { peer: thread.peer, imsi: thread.imsi, limit: THREAD_PAGE };
     if (device !== "all") query.deviceId = device;
     else {
       query.modemImei = thread.modemImei;
-      query.imsi = thread.imsi;
     }
     try {
       const list = sortMessages(await getThread(query));
@@ -425,11 +424,16 @@ export default function SmsPage() {
     setLoadingMoreState(true);
     try {
       const oldest = messagesRef.current[0];
-      const query: ThreadQuery = { peer: thread.peer, limit: THREAD_PAGE, beforeTs: oldest.timestamp, beforeId: oldest.id };
+      const query: ThreadQuery = {
+        peer: thread.peer,
+        imsi: thread.imsi,
+        limit: THREAD_PAGE,
+        beforeTs: oldest.timestamp,
+        beforeId: oldest.id,
+      };
       if (device !== "all") query.deviceId = device;
       else {
         query.modemImei = thread.modemImei;
-        query.imsi = thread.imsi;
       }
       const older = sortMessages(await getThread(query));
       setMessagesState([...older, ...messagesRef.current]);
@@ -465,6 +469,18 @@ export default function SmsPage() {
       message.warning(t("暂无可用设备"));
       return;
     }
+    const targetDevice = devices.find((candidate) => candidate.id === deviceId);
+    const threadIMSI = String(thread.imsi || "").trim();
+    const currentIMSI = String(targetDevice?.modem?.imsi || "").trim();
+    if (!threadIMSI || !currentIMSI || currentIMSI !== threadIMSI) {
+      message.warning(
+        lang === "zh"
+          ? "无法确认当前 SIM 与该对话一致，请切回对应 SIM 并刷新设备状态后再发送"
+          : "The current SIM cannot be proven to match this conversation. Switch back to the corresponding SIM and refresh device status before sending.",
+        5000,
+      );
+      return;
+    }
     setSending(true);
     try {
       const result = await sendSms({ deviceId, phone: thread.peer, message: text });
@@ -479,7 +495,7 @@ export default function SmsPage() {
     } finally {
       setSending(false);
     }
-  }, [composer, devices, refreshCurrent, scrollToBottomNow]);
+  }, [composer, devices, lang, refreshCurrent, scrollToBottomNow]);
 
   const openNewSms = useCallback(() => {
     setNewSmsDevice(deviceRef.current !== "all" ? deviceRef.current : devices[0]?.id || "");
@@ -548,7 +564,7 @@ export default function SmsPage() {
       try {
         const q: DeleteThreadQuery =
           deviceRef.current !== "all"
-            ? { deviceId: deviceRef.current, peer: t.peer }
+            ? { deviceId: deviceRef.current, imsi: t.imsi, peer: t.peer }
             : { deviceId: "all", modemImei: t.modemImei, imsi: t.imsi, peer: t.peer };
         await deleteThread(q);
         message.success(tl("已删除对话"));

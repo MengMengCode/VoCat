@@ -5,7 +5,10 @@ import type { DeviceListItem, DevicesResponse, SMSContact, SMSMessage } from "..
 function qs(params: Record<string, string | number | undefined>): string {
   const sp = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
-    if (value === undefined || value === "") continue;
+    // Keep explicit empty values. In particular, `imsi=` means the legacy
+    // empty-subscriber thread, while an omitted IMSI is rejected to prevent a
+    // cross-SIM wildcard query.
+    if (value === undefined) continue;
     sp.set(key, String(value));
   }
   const s = sp.toString();
@@ -28,7 +31,7 @@ export interface ThreadQuery {
   limit: number;
   deviceId?: string;
   modemImei?: string;
-  imsi?: string;
+  imsi: string;
   beforeTs?: string;
   beforeId?: number;
 }
@@ -53,6 +56,21 @@ export interface SendSmsPayload {
 	message: string;
 }
 
+export interface SmsSendPartResult {
+	part: number;
+	total: number;
+	messageReference?: number;
+	referenceKnown?: boolean;
+	acceptedByModem?: boolean;
+	reference?: number;
+	sipCode?: number;
+	accepted?: boolean;
+	submissionStatus?: string;
+	modemFinal?: string;
+	modemEvidence?: string[];
+	submittedAt?: string;
+}
+
 export interface SmsSendResult {
 	id?: number;
 	messageId?: string;
@@ -60,12 +78,17 @@ export interface SmsSendResult {
 	partsAttempted: number;
 	partsAccepted: number;
 	allPartsAccepted: boolean;
+	concatReference?: number;
+	partResults?: SmsSendPartResult[];
+	messageReference?: number;
+	referenceKnown?: boolean;
 	submissionAccepted: boolean;
 	deliveryConfirmed: boolean;
 	outcome: "delivered" | "accepted_unconfirmed" | "partial" | "failed";
 	submissionState?: string;
 	deliveryState?: string;
-	transport?: "ims" | "cellular_at";
+	transport?: "ims" | "cellular_at" | "cellular_qmi";
+	retrySafe?: boolean;
 	warning?: string;
 }
 
@@ -81,7 +104,7 @@ export interface DeleteThreadQuery {
   peer: string;
   deviceId?: string;
   modemImei?: string;
-  imsi?: string;
+  imsi: string;
 }
 
 export function deleteThread(q: DeleteThreadQuery): Promise<unknown> {

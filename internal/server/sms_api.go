@@ -15,10 +15,134 @@ import (
 	"vocat/internal/device"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
+	vowifiruntime "vocat/internal/vowifi/runtime"
 )
 
 type imsSMSController interface {
 	SendSMS(context.Context, string, vowifi.SMSSubmitRequest) (vowifi.SMSSubmitResult, error)
+}
+
+type subscriberBoundSMSSender interface {
+	SendSMSBoundSubscriber(
+		context.Context,
+		string,
+		string,
+		string,
+	) (device.SMSSendResult, device.SMSSubscriberIdentity, error)
+}
+
+type subscriberBoundSMSReader interface {
+	ListSMSBoundSubscriber(
+		context.Context,
+		string,
+	) (device.SMSSubscriberScan, error)
+}
+
+var (
+	_ subscriberBoundSMSSender = (*device.Manager)(nil)
+	_ subscriberBoundSMSReader = (*device.Manager)(nil)
+)
+
+type smsMEProvenance struct {
+	imsi     string
+	baseline bool
+}
+
+const smsPersistenceTimeout = 10 * time.Second
+
+func smsPersistenceContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), smsPersistenceTimeout)
+}
+
+func (s *Server) beginSMSMEBaseline(hardware, imsi string) bool {
+	hardware = strings.TrimSpace(hardware)
+	imsi = strings.TrimSpace(imsi)
+	s.smsMEMu.Lock()
+	defer s.smsMEMu.Unlock()
+	if s.smsMEProvenance == nil {
+		s.smsMEProvenance = make(map[string]smsMEProvenance)
+	}
+	state := s.smsMEProvenance[hardware]
+	if state.imsi != imsi {
+		state = smsMEProvenance{imsi: imsi}
+	}
+	s.smsMEProvenance[hardware] = state
+	return state.baseline
+}
+
+func smsStorageMessageIMSI(storage, imsi string, meBaselineTrusted bool) string {
+	if strings.EqualFold(strings.TrimSpace(storage), "ME") && !meBaselineTrusted {
+		return ""
+	}
+	return strings.TrimSpace(imsi)
+}
+
+func (s *Server) completeSMSMEBaseline(hardware, imsi string) {
+	hardware = strings.TrimSpace(hardware)
+	imsi = strings.TrimSpace(imsi)
+	s.smsMEMu.Lock()
+	defer s.smsMEMu.Unlock()
+	state := s.smsMEProvenance[hardware]
+	if state.imsi != imsi {
+		return
+	}
+	state.baseline = true
+	s.smsMEProvenance[hardware] = state
+}
+
+func smsStorageWasListed(storages []string, wanted string) bool {
+	for _, storage := range storages {
+		if strings.EqualFold(strings.TrimSpace(storage), wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+func smsRawPDUFingerprint(rawPDU string) [sha256.Size]byte {
+	normalized := strings.ToUpper(strings.TrimSpace(rawPDU))
+	return sha256.Sum256([]byte(normalized))
+}
+
+func smsMEConcatSubscriberEpoch(identity device.SMSSubscriberIdentity) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		strings.TrimSpace(identity.ICCID),
+		strings.TrimSpace(identity.IMSI),
+	}, "\x00")))
+	return "me:" + hex.EncodeToString(digest[:])
+}
+
+func smsStorageMessageID(
+	transport string,
+	hardware string,
+	subscriberScope string,
+	storage string,
+	index int,
+	rawDigest [sha256.Size]byte,
+) string {
+	transport = normalizeCellularSMSTransport(transport)
+	storage = strings.ToUpper(strings.TrimSpace(storage))
+	scope := "unattributed"
+	if subscriberScope = strings.TrimSpace(subscriberScope); subscriberScope != "" {
+		scope = "imsi:" + subscriberScope
+	}
+	provenanceDigest := sha256.Sum256([]byte(strings.Join([]string{
+		transport,
+		strings.TrimSpace(hardware),
+		storage,
+		scope,
+	}, "\x00")))
+	return fmt.Sprintf(
+		"modem:%s:%s:%s:%d:%s",
+		transport,
+		hex.EncodeToString(provenanceDigest[:8]),
+		storage,
+		index,
+		hex.EncodeToString(rawDigest[:8]),
+	)
 }
 
 func (s *Server) routeSMSAPI(w http.ResponseWriter, r *http.Request, cleanPath string) bool {
@@ -85,11 +209,19 @@ func (s *Server) handleSMSThread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_peer", "SMS peer is required")
 		return
 	}
+	if !r.URL.Query().Has("imsi") {
+		// An explicit (possibly empty, for legacy rows) subscriber scope is
+		// mandatory. Treating a missing IMSI as a wildcard would merge or delete
+		// same-peer conversations belonging to different SIMs.
+		writeError(w, http.StatusBadRequest, "subscriber_required", "SMS subscriber identity is required")
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.syncModemSMS(r.Context(), deviceID)
 		filter := s.smsStoreFilter(r.Context(), deviceID, modemIMEI)
 		filter.IMSI = imsi
+		filter.IMSIExact = true
 		filter.Peer = peer
 		filter.Limit = queryLimit(r, 100)
 		if beforeID, parseErr := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("before_id")), 10, 64); parseErr == nil && beforeID > 0 {
@@ -102,8 +234,9 @@ func (s *Server) handleSMSThread(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, message := range messages {
 			if !message.Read && (message.Direction == "inbound" || message.Direction == "received") {
-				message.Read = true
-				_, _ = s.store.SaveSMSMessage(r.Context(), message)
+				if err := s.store.MarkSMSRead(r.Context(), message.ID); err == nil {
+					message.Read = true
+				}
 			}
 		}
 		reverseSMS(messages)
@@ -115,25 +248,15 @@ func (s *Server) handleSMSThread(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		filter := s.smsStoreFilter(r.Context(), deviceID, modemIMEI)
 		filter.IMSI = imsi
+		filter.IMSIExact = true
 		filter.Peer = peer
-		filter.Limit = 1000
-		messages, err := s.store.ListSMSMessages(r.Context(), filter)
+		deleted, err := s.store.DeleteSMSThreadByFilter(r.Context(), filter)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
-		if len(messages) == 0 {
-			writeError(w, http.StatusNotFound, "not_found", "SMS thread was not found")
-			return
-		}
-		for _, message := range messages {
-			if err := s.store.DeleteSMSMessage(r.Context(), message.ID); err != nil {
-				s.writeStoreError(w, err)
-				return
-			}
-		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"data": map[string]any{"deleted": len(messages)},
+			"data": map[string]any{"deleted": deleted},
 		})
 	default:
 		w.Header().Set("Allow", "GET, DELETE")
@@ -202,6 +325,10 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
+	// SMS over IMS can wait for the network's RP submit report longer than the
+	// server-wide response deadline. Leave cancellation bound to r.Context, but
+	// do not let the HTTP WriteTimeout truncate an otherwise live transaction.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	if s.devices == nil {
 		writeError(w, http.StatusServiceUnavailable, "device_manager_unavailable", "device manager is unavailable")
 		return
@@ -233,21 +360,52 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePhysicalDevice(w, present) {
 		return
 	}
-	if config.VoWiFiEnabled && s.vowifi != nil {
-		state, stateErr := s.vowifi.State(request.DeviceID)
-		sender, canSendIMS := s.vowifi.(imsSMSController)
-		if stateErr == nil && state.IMSReady && state.SMSReady && canSendIMS {
-			result, sendErr := sender.SendSMS(r.Context(), request.DeviceID, vowifi.SMSSubmitRequest{
-				Recipient: request.Phone,
-				Text:      request.Message,
-			})
-			if sendErr == nil || result.PartsAttempted > 0 || !errors.Is(sendErr, vowifi.ErrSMSNotReady) {
-				s.writeIMSSMSSendResult(w, r, request.DeviceID, request.Message, entry, result, sendErr)
-				return
-			}
+	if config.VoWiFiEnabled {
+		if s.vowifi == nil {
+			s.writeIMSSMSNotReady(w, "VoWiFi SMS runtime is unavailable")
+			return
 		}
+		state, stateErr := s.vowifi.State(request.DeviceID)
+		if stateErr != nil {
+			s.writeIMSSMSNotReady(w, "VoWiFi SMS state is unavailable: "+stateErr.Error())
+			return
+		}
+		if !state.IMSReady || !state.SMSReady {
+			detail := firstNonEmpty(state.LastError, state.LastReason, "IMS SMS is not registered")
+			s.writeIMSSMSNotReady(w, detail)
+			return
+		}
+		if !runtimeSMSIdentityMatchesSnapshot(state, entry.Snapshot) {
+			s.writeIMSSMSNotReady(w, "the live SIM identity no longer matches the active IMS subscriber; reconnect VoWiFi")
+			return
+		}
+		sender, canSendIMS := s.vowifi.(imsSMSController)
+		if !canSendIMS {
+			s.writeIMSSMSNotReady(w, "VoWiFi runtime does not expose IMS SMS submission")
+			return
+		}
+		result, sendErr := sender.SendSMS(r.Context(), request.DeviceID, vowifi.SMSSubmitRequest{
+			Recipient: request.Phone,
+			Text:      request.Message,
+		})
+		if errors.Is(sendErr, vowifi.ErrSMSNotReady) && result.PartsAttempted == 0 {
+			s.writeIMSSMSNotReady(w, "IMS SMS became unavailable before submission; reconnect VoWiFi")
+			return
+		}
+		s.writeIMSSMSSendResult(w, r, request.DeviceID, request.Message, entry, state, result, sendErr)
+		return
 	}
-	result, sendErr := s.devices.SendSMS(
+	sender, canBindSubscriber := s.devices.(subscriberBoundSMSSender)
+	if !canBindSubscriber {
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			"sms_subscriber_identity_unavailable",
+			"cellular SMS cannot safely bind the submission to the active SIM",
+		)
+		return
+	}
+	result, identity, sendErr := sender.SendSMSBoundSubscriber(
 		r.Context(),
 		physicalID,
 		request.Phone,
@@ -257,12 +415,13 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 		s.writeDeviceError(w, sendErr)
 		return
 	}
-	imsi := snapshotString(entry.Snapshot, func(snapshot *device.Snapshot) string { return snapshot.IMSI })
 	modemIMEI := firstNonEmpty(
 		snapshotString(entry.Snapshot, func(snapshot *device.Snapshot) string { return snapshot.IMEI }),
 		config.ModemIMEI,
 	)
+	transport := normalizeCellularSMSTransport(result.Transport)
 	extra, _ := json.Marshal(map[string]any{
+		"transport":            transport,
 		"encoding":             result.Encoding,
 		"message_reference":    result.MessageReference,
 		"reference_known":      result.ReferenceKnown,
@@ -279,29 +438,64 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 		"part_results":         result.PartResults,
 	})
 	messageID := fmt.Sprintf(
-		"at-submit:%s:%d:%d",
+		"%s-submit:%s:%d:%d",
+		transport,
 		firstNonEmpty(modemIMEI, request.DeviceID),
 		result.MessageReference,
 		result.SubmittedAt.UnixNano(),
 	)
-	saved, err := s.store.SaveSMSMessage(r.Context(), store.SMSMessage{
+	persistContext, cancelPersist := smsPersistenceContext(r.Context())
+	saved, err := s.store.SaveSMSMessage(persistContext, store.SMSMessage{
 		MessageID:     messageID,
 		DeviceID:      request.DeviceID,
 		ModemIMEI:     modemIMEI,
-		IMSI:          imsi,
+		IMSI:          identity.IMSI,
 		Peer:          result.To,
 		Direction:     "outbound",
 		Body:          request.Message,
 		Timestamp:     result.SubmittedAt,
 		Status:        result.SubmissionStatus,
-		Source:        "cellular_at",
+		Source:        transport,
 		PartsTotal:    result.PartsTotal,
 		DeliveryState: result.DeliveryStatus,
 		Read:          true,
 		Extra:         extra,
 	})
+	cancelPersist()
 	if err != nil {
-		s.writeStoreError(w, err)
+		// Submission has already interacted with the modem. A persistence error
+		// must not erase that evidence or invite an automatic retry that could
+		// duplicate an accepted part. Keep the evidence inside the nested error
+		// object because the web API exposes that object for non-2xx responses.
+		s.logger.Error(
+			"persist cellular SMS submission failed",
+			"device_id", request.DeviceID,
+			"transport", transport,
+			"parts_attempted", result.PartsAttempted,
+			"parts_accepted", result.PartsAccepted,
+			"error", err,
+		)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]any{
+				"code":                "sms_persistence_failed",
+				"message":             "The modem submission result could not be saved. Do not retry automatically; inspect the acceptance evidence.",
+				"retry_safe":          false,
+				"transport":           transport,
+				"parts_total":         result.PartsTotal,
+				"parts_attempted":     result.PartsAttempted,
+				"parts_accepted":      result.PartsAccepted,
+				"all_parts_accepted":  result.AllPartsAccepted,
+				"accepted_by_modem":   result.AcceptedByModem,
+				"message_reference":   result.MessageReference,
+				"reference_known":     result.ReferenceKnown,
+				"submission_status":   result.SubmissionStatus,
+				"concat_reference":    result.ConcatReference,
+				"part_results":        result.PartResults,
+				"persistence_state":   "failed",
+				"submission_accepted": result.AllPartsAccepted,
+				"outcome":             smsSendOutcome(result.AllPartsAccepted, result.PartsAccepted, result.PartsTotal, result.DeliveryConfirmed),
+			},
+		})
 		return
 	}
 	data := map[string]any{
@@ -320,7 +514,7 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 		"submission_accepted": result.AllPartsAccepted,
 		"delivery_confirmed":  result.DeliveryConfirmed,
 		"outcome":             smsSendOutcome(result.AllPartsAccepted, result.PartsAccepted, result.PartsTotal, result.DeliveryConfirmed),
-		"transport":           "cellular_at",
+		"transport":           transport,
 	}
 	if sendErr != nil {
 		data["retry_safe"] = false
@@ -358,12 +552,29 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"data": data})
 }
 
+func (s *Server) writeIMSSMSNotReady(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusServiceUnavailable, "ims_sms_not_ready", message)
+}
+
+func runtimeSMSIdentityMatchesSnapshot(state vowifi.State, snapshot *device.Snapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	runtimeICCID := strings.TrimSpace(state.ICCID)
+	runtimeIMSI := strings.TrimSpace(state.IMSI)
+	liveICCID := strings.TrimSpace(snapshot.ICCID)
+	liveIMSI := strings.TrimSpace(snapshot.IMSI)
+	return runtimeICCID != "" && runtimeIMSI != "" && liveICCID != "" && liveIMSI != "" &&
+		runtimeICCID == liveICCID && runtimeIMSI == liveIMSI
+}
+
 func (s *Server) writeIMSSMSSendResult(
 	w http.ResponseWriter,
 	r *http.Request,
 	deviceID string,
 	body string,
 	entry device.Device,
+	runtimeState vowifi.State,
 	result vowifi.SMSSubmitResult,
 	sendErr error,
 ) {
@@ -389,12 +600,14 @@ func (s *Server) writeIMSSMSSendResult(
 		"delivery_confirmed": result.DeliveryConfirmed,
 		"submission_status":  result.SubmissionStatus,
 	})
-	imsi := snapshotString(entry.Snapshot, func(snapshot *device.Snapshot) string { return snapshot.IMSI })
+	imsi := strings.TrimSpace(runtimeState.IMSI)
 	modemIMEI := snapshotString(entry.Snapshot, func(snapshot *device.Snapshot) string { return snapshot.IMEI })
-	if config, configErr := s.store.Device(r.Context(), deviceID); configErr == nil {
+	persistContext, cancelPersist := smsPersistenceContext(r.Context())
+	defer cancelPersist()
+	if config, configErr := s.store.Device(persistContext, deviceID); configErr == nil {
 		modemIMEI = firstNonEmpty(modemIMEI, config.ModemIMEI)
 	}
-	saved, err := s.store.SaveSMSMessage(r.Context(), store.SMSMessage{
+	saved, err := s.store.SaveSMSMessage(persistContext, store.SMSMessage{
 		MessageID:     fmt.Sprintf("ims-submit:%s:%d", firstNonEmpty(modemIMEI, deviceID), result.SubmittedAt.UnixNano()),
 		DeviceID:      deviceID,
 		ModemIMEI:     modemIMEI,
@@ -411,7 +624,32 @@ func (s *Server) writeIMSSMSSendResult(
 		Extra:         extra,
 	})
 	if err != nil {
-		s.writeStoreError(w, err)
+		s.logger.Error(
+			"persist IMS SMS submission failed",
+			"device_id", deviceID,
+			"parts_attempted", result.PartsAttempted,
+			"parts_accepted", result.PartsAccepted,
+			"error", err,
+		)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]any{
+				"code":                "sms_persistence_failed",
+				"message":             "The IMS submission result could not be saved. Do not retry automatically; inspect the acceptance evidence.",
+				"retry_safe":          false,
+				"transport":           "ims",
+				"parts_total":         result.PartsTotal,
+				"parts_attempted":     result.PartsAttempted,
+				"parts_accepted":      result.PartsAccepted,
+				"all_parts_accepted":  result.AllPartsAccepted,
+				"concat_reference":    result.ConcatReference,
+				"part_results":        result.PartResults,
+				"submission_status":   result.SubmissionStatus,
+				"persistence_state":   "failed",
+				"submission_accepted": result.AllPartsAccepted,
+				"delivery_confirmed":  result.DeliveryConfirmed,
+				"outcome":             smsSendOutcome(result.AllPartsAccepted, result.PartsAccepted, result.PartsTotal, result.DeliveryConfirmed),
+			},
+		})
 		return
 	}
 	data := map[string]any{
@@ -512,42 +750,85 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 		if onlyDevice != "" && config.ID != onlyDevice {
 			continue
 		}
-		// Do not queue CMGL traffic on the same serial actor while VoWiFi is
-		// reading the SIM or running AKA. Once the session is stable, resume the
-		// SM/ME scan as a catch-up path: an SMS submitted while the card was
-		// offline may be delivered to modem storage when it comes back, even
-		// though subsequent live SMS is delivered by SIP MESSAGE.
-		if s.vowifi != nil {
-			state, stateErr := s.vowifi.State(config.ID)
-			if shouldDeferModemSMSSync(state, stateErr) {
-				continue
-			}
-		}
 		entry, physicalID, present := s.physicalForConfig(config)
 		if !present {
 			continue
 		}
+		// Do not queue modem-storage traffic while VoWiFi is reading the SIM or
+		// running AKA. EC20/EC25 can resume an AT SM/ME catch-up scan once the
+		// session is stable. Native Qualcomm 410 keeps its cellular radio offline
+		// while VoWiFi owns the subscriber, so its QMI WMS catch-up waits until the
+		// radio has been restored instead of competing with live IMS delivery.
+		if s.vowifi != nil {
+			state, stateErr := s.vowifi.State(config.ID)
+			if shouldDeferModemSMSSync(state, stateErr) ||
+				shouldDeferNative410SMSCatchUp(
+					config,
+					firstNonEmpty(entry.Candidate.ID, entry.ID),
+					state,
+					stateErr,
+				) {
+				continue
+			}
+		}
+		reader, canBindSubscriber := s.devices.(subscriberBoundSMSReader)
+		if !canBindSubscriber {
+			s.logger.Debug(
+				"modem SMS synchronization skipped",
+				"device_id", config.ID,
+				"error", "device manager cannot bind SMS storage to the active subscriber",
+			)
+			continue
+		}
 		listContext, cancelList := context.WithTimeout(ctx, 30*time.Second)
-		messages, err := s.devices.ListSMS(listContext, physicalID)
+		scan, err := reader.ListSMSBoundSubscriber(listContext, physicalID)
 		cancelList()
 		if err != nil {
 			s.logger.Debug("modem SMS synchronization skipped", "device_id", config.ID, "error", err)
 			continue
 		}
-		imsi := snapshotString(entry.Snapshot, func(snapshot *device.Snapshot) string { return snapshot.IMSI })
+		transport := normalizeCellularSMSTransport(scan.Transport)
+		messages := scan.Messages
+		imsi := scan.Identity.IMSI
 		modemIMEI := firstNonEmpty(
 			snapshotString(entry.Snapshot, func(snapshot *device.Snapshot) string { return snapshot.IMEI }),
 			config.ModemIMEI,
 		)
+		meScanned := smsStorageWasListed(scan.Storages, "ME")
+		hardwareKey := firstNonEmpty(modemIMEI, "device:"+config.ID)
+		meProvenanceKey := normalizeCellularSMSTransport(transport) + "\x00" + hardwareKey
+		meBaselineTrusted := false
+		if meScanned {
+			// Capture one immutable trust decision for the whole scan. Another
+			// concurrent sync may complete the baseline while this loop runs, but
+			// that must not reattribute the latter half of the same storage image.
+			meBaselineTrusted = s.beginSMSMEBaseline(meProvenanceKey, imsi)
+		}
+		mePersistenceComplete := true
 		for _, message := range messages {
+			isPersistentME := strings.EqualFold(strings.TrimSpace(message.Storage), "ME")
+			if isPersistentME &&
+				(strings.TrimSpace(message.DecodeError) != "" || strings.TrimSpace(message.RawPDU) == "") {
+				// A listed slot is not a complete ME baseline until its raw record
+				// was read and decoded. QMI represents raw-read failures as an ME
+				// message carrying DecodeError and no PDU; AT can expose malformed
+				// records with the same incomplete shape.
+				mePersistenceComplete = false
+			}
 			if message.Direction == device.SMSDirectionStatusReport &&
 				message.MessageReference != nil && message.StatusCode != nil {
+				reportDigest := smsRawPDUFingerprint(message.RawPDU)
 				_, applyErr := s.store.ApplySMSDeliveryReport(ctx, store.SMSDeliveryReport{
-					DeviceID:          config.ID,
-					ModemIMEI:         modemIMEI,
-					IMSI:              imsi,
+					ReportID:  transport + ":" + hex.EncodeToString(reportDigest[:]),
+					DeviceID:  config.ID,
+					ModemIMEI: modemIMEI,
+					// Modem storage can retain a status report across a SIM swap. Do
+					// not manufacture its subscriber identity from today's snapshot;
+					// the store will use the stable report fingerprint and SMSC time,
+					// or leave an ambiguous reusable TP-MR unmatched.
+					IMSI:              "",
 					Peer:              message.To,
-					Source:            "cellular_at",
+					Source:            transport,
 					MessageReference:  *message.MessageReference,
 					StatusCode:        *message.StatusCode,
 					DeliveryState:     message.DeliveryStatus,
@@ -555,15 +836,24 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 					DischargeTime:     message.DischargeTimestamp,
 					ReceivedAt:        time.Now().UTC(),
 				})
-				if applyErr != nil && !errors.Is(applyErr, store.ErrNotFound) {
+				if applyErr != nil &&
+					!errors.Is(applyErr, store.ErrNotFound) &&
+					!errors.Is(applyErr, store.ErrSMSDeliveryReportAmbiguous) {
 					s.logger.Warn("apply modem SMS delivery report failed", "device_id", config.ID, "error", applyErr)
 				}
 				continue
 			}
 			peer := firstNonEmpty(message.From, message.To)
 			if peer == "" {
+				if isPersistentME {
+					// SaveSMSMessage requires a peer. Do not certify a baseline that
+					// contained a record the server could not persist.
+					mePersistenceComplete = false
+				}
 				continue
 			}
+			messageIMSI := smsStorageMessageIMSI(message.Storage, imsi, meBaselineTrusted)
+			digest := smsRawPDUFingerprint(message.RawPDU)
 			timestamp := time.Now().UTC()
 			if message.ServiceCenterTimestamp != nil {
 				timestamp = message.ServiceCenterTimestamp.UTC()
@@ -574,72 +864,169 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 			if message.Direction == device.SMSDirectionSubmitted {
 				direction = "outbound"
 			}
-			digest := sha256.Sum256([]byte(message.RawPDU))
-			messageID := fmt.Sprintf(
-				"modem:%s:%d:%s",
+			messageIDScope := messageIMSI
+			if isPersistentME {
+				// ME is modem-owned. Its durable occurrence ID must survive a
+				// process restart, whose first scan is intentionally untrusted, so
+				// subscriber attribution is not part of the ID. Store upsert keeps
+				// the IMSI assigned when this occurrence was first inserted.
+				messageIDScope = ""
+			}
+			segmentOccurrenceID := smsStorageMessageID(
+				transport,
+				hardwareKey,
+				messageIDScope,
 				message.Storage,
 				message.Index,
-				hex.EncodeToString(digest[:8]),
+				digest,
 			)
+			messageID := segmentOccurrenceID
 			if message.Concat != nil && message.Concat.Total > 1 {
 				// A segment of a carrier-split long SMS. Address the whole message
 				// with a stable id so SaveSMSMessage folds every segment into one
 				// progressively merged row instead of one row per segment.
+				concatMessageIDScope := messageIDScope
+				if isPersistentME {
+					// Unlike one-slot ME records, an incomplete concatenated message
+					// can collide with another SIM reusing the same peer/reference.
+					// Bind reassembly to a privacy-preserving live subscriber epoch;
+					// this remains stable across restart even when the first scan is
+					// untrusted for displayed IMSI attribution.
+					concatMessageIDScope = smsMEConcatSubscriberEpoch(scan.Identity)
+				}
 				messageID = store.StableConcatMessageID(
-					"cellular_at", modemIMEI, config.ID, peer,
+					transport, modemIMEI, config.ID, concatMessageIDScope, peer,
 					message.Concat.Reference, message.Concat.Total,
 				)
 			}
 			extra, _ := json.Marshal(map[string]any{
-				"modem_index":        message.Index,
-				"storage":            message.Storage,
-				"storage_status":     message.StorageStatus,
-				"encoding":           message.Encoding,
-				"concat":             message.Concat,
-				"decode_error":       message.DecodeError,
-				"status_code":        message.StatusCode,
-				"message_reference":  message.MessageReference,
-				"delivery_status":    message.DeliveryStatus,
-				"data_coding_scheme": message.DataCodingScheme,
+				"transport": transport,
+				// A storage copy is not proof that this API process submitted or
+				// accepted the message. In particular, a QMI MO copy can carry a
+				// reusable TP-MR and must not compete with an API submission when a
+				// later status report is matched.
+				"reference_known":       false,
+				"accepted_by_modem":     false,
+				"modem_index":           message.Index,
+				"storage":               message.Storage,
+				"storage_status":        message.StorageStatus,
+				"encoding":              message.Encoding,
+				"concat":                message.Concat,
+				"decode_error":          message.DecodeError,
+				"status_code":           message.StatusCode,
+				"message_reference":     message.MessageReference,
+				"delivery_status":       message.DeliveryStatus,
+				"data_coding_scheme":    message.DataCodingScheme,
+				"raw_pdu":               message.RawPDU,
+				"segment_occurrence_id": segmentOccurrenceID,
+				"segment_fingerprint":   "sha256:" + hex.EncodeToString(digest[:]),
 			})
 			_, saveErr := s.store.SaveSMSMessage(ctx, store.SMSMessage{
 				MessageID:     messageID,
 				DeviceID:      config.ID,
 				ModemIMEI:     modemIMEI,
-				IMSI:          imsi,
+				IMSI:          messageIMSI,
 				Peer:          peer,
 				Direction:     direction,
 				Body:          message.Text,
 				Timestamp:     timestamp,
 				Status:        string(message.StorageStatus),
-				Source:        "cellular_at",
+				Source:        transport,
 				PartsTotal:    concatTotal(message.Concat),
 				DeliveryState: message.DeliveryStatus,
 				Read:          message.StorageStatus == device.SMSStatusReceivedRead,
 				Extra:         extra,
 			})
 			if saveErr != nil {
+				if isPersistentME {
+					mePersistenceComplete = false
+				}
 				s.logger.Warn("persist modem SMS failed", "device_id", config.ID, "error", saveErr)
 			}
+		}
+		if meScanned && mePersistenceComplete {
+			s.completeSMSMEBaseline(meProvenanceKey, imsi)
 		}
 	}
 }
 
+func normalizeCellularSMSTransport(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "cellular_qmi":
+		return "cellular_qmi"
+	default:
+		return "cellular_at"
+	}
+}
+
 func shouldDeferModemSMSSync(state vowifi.State, stateErr error) bool {
-	if stateErr != nil || !state.Enabled {
+	if errors.Is(stateErr, vowifiruntime.ErrSubscriberChangeInProgress) {
+		return true
+	}
+	if stateErr != nil {
 		return false
 	}
-	// SMSReady is a quiescent runtime state: SIM/AKA setup has finished and
-	// reading stored messages cannot race the eSIM/VoWiFi startup sequence.
-	// Failed is also safe because the orchestrator has restored cellular radio
-	// operation before publishing the terminal failure state.
-	return state.Phase != vowifi.PhaseSMSReady && state.Phase != vowifi.PhaseFailed
+	// Stopping publishes Enabled=false before cleanup finishes. Do not race a
+	// storage scan against IMS/tunnel teardown or radio restoration.
+	if state.Phase == vowifi.PhaseStopping {
+		return true
+	}
+	if (state.Phase == vowifi.PhaseIdle || state.Phase == vowifi.PhaseFailed) &&
+		hasRadioRestoreCleanupError(state.CleanupErrors) {
+		// Idle/Failed is normally safe only after radio restoration. A recorded
+		// restore failure means the modem may still be RF-off or transitioning.
+		return true
+	}
+	if !state.Enabled {
+		return false
+	}
+	// PhaseIMSReady is normally a transient point immediately before EnableSMS;
+	// only the explicit AllowIMSWithoutSMS terminal reason makes it quiescent.
+	// Failed is also safe because radio restoration completed before publication.
+	settledIMSWithoutSMS := state.Phase == vowifi.PhaseIMSReady &&
+		state.LastReason == "ims_registered_sms_unavailable"
+	return !settledIMSWithoutSMS && state.Phase != vowifi.PhaseSMSReady &&
+		state.Phase != vowifi.PhaseFailed
+}
+
+func hasRadioRestoreCleanupError(cleanupErrors []string) bool {
+	for _, cleanupErr := range cleanupErrors {
+		if strings.HasPrefix(strings.TrimSpace(cleanupErr), "restore radio:") {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldDeferNative410SMSCatchUp(
+	config store.Device,
+	liveDeviceID string,
+	state vowifi.State,
+	stateErr error,
+) bool {
+	if stateErr != nil || !state.Enabled ||
+		!isNativeQualcomm410SMSDevice(config, liveDeviceID) {
+		return false
+	}
+	settledIMSWithoutSMS := state.Phase == vowifi.PhaseIMSReady &&
+		state.LastReason == "ims_registered_sms_unavailable"
+	return state.Phase == vowifi.PhaseSMSReady || settledIMSWithoutSMS
+}
+
+func isNativeQualcomm410SMSDevice(config store.Device, liveDeviceID string) bool {
+	if liveDeviceID = strings.TrimSpace(liveDeviceID); liveDeviceID != "" {
+		// Native MSM8916 discovery is rooted in /sys/class/wwan and uses wwan*
+		// candidate IDs. Prefer that live backend evidence over a stale database
+		// device type so RF-off VoWiFi sessions never race a QMI WMS scan.
+		return strings.HasPrefix(liveDeviceID, "wwan")
+	}
+	return store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeWiFi410
 }
 
 // StartSMSSyncLoop periodically persists inbound cellular SMS even when no
 // client has the SMS page open. The first tick is delayed so startup SIM/AKA
-// work gets exclusive use of the modem. Stable VoWiFi sessions still scan SM
-// and ME as a catch-up path for messages delivered while the card was offline.
+// work gets exclusive use of the modem. Stable EC20/EC25 VoWiFi sessions still
+// scan SM/ME as a catch-up path; native Qualcomm 410 waits for RF restoration.
 func (s *Server) StartSMSSyncLoop(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 15 * time.Second

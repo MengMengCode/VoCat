@@ -18,6 +18,47 @@ type evidenceTunnel struct {
 	evidence vowifi.TunnelEvidence
 }
 
+func TestIMSIdentitiesFailClosedWithoutISIMOverrides(t *testing.T) {
+	identity := vowifi.SIMIdentity{IMSI: "001010123456789", HomeMCC: "001", HomeMNC: "01"}
+	if _, err := deriveIdentities(identity, Config{RequireExplicitIdentities: true}); err == nil || !strings.Contains(err.Error(), "explicit") {
+		t.Fatalf("deriveIdentities() error = %v, want explicit identity requirement", err)
+	}
+	if _, err := deriveIdentities(identity, Config{PrivateIdentity: "impi@example.net", RequireExplicitIdentities: true}); err == nil {
+		t.Fatal("deriveIdentities() accepted only one explicit IMS identity")
+	}
+
+	explicit, err := deriveIdentities(identity, Config{
+		PrivateIdentity:           "impi@example.net",
+		PublicIdentity:            "sip:+12025550123@example.net",
+		RequireExplicitIdentities: true,
+	})
+	if err != nil {
+		t.Fatalf("deriveIdentities(explicit) error = %v", err)
+	}
+	if explicit.private != "impi@example.net" || explicit.public != "sip:+12025550123@example.net" {
+		t.Fatalf("explicit identities = %#v", explicit)
+	}
+	uppercase, err := deriveIdentities(identity, Config{
+		PrivateIdentity: "impi@example.net",
+		PublicIdentity:  "SIP:+12025550123@example.net",
+	})
+	if err != nil {
+		t.Fatalf("deriveIdentities(uppercase SIP scheme) error = %v", err)
+	}
+	if uppercase.user != "+12025550123" {
+		t.Fatalf("uppercase SIP public user = %q", uppercase.user)
+	}
+
+	derived, err := deriveIdentities(identity, Config{})
+	if err != nil {
+		t.Fatalf("deriveIdentities(explicit opt-in) error = %v", err)
+	}
+	if derived.private != "001010123456789@ims.mnc001.mcc001.3gppnetwork.org" ||
+		derived.public != "sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org" {
+		t.Fatalf("opt-in derived identities = %#v", derived)
+	}
+}
+
 func (tunnel evidenceTunnel) Evidence() vowifi.TunnelEvidence {
 	return tunnel.evidence
 }
@@ -75,6 +116,7 @@ func TestProviderRegisterAKAParseEvidenceAndClose(t *testing.T) {
 					IMSI:    "001010123456789",
 					HomeMCC: "001",
 					HomeMNC: "01",
+					SMSC:    "+12025550100",
 				},
 				Tunnel: evidenceTunnel{evidence: vowifi.TunnelEvidence{
 					Established: true,

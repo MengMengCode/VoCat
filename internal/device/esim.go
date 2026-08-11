@@ -338,7 +338,7 @@ func (manager *Manager) openEuiccOnceAID(ctx context.Context, id, aidHex string)
 	if controlDevice, ok, err := manager.nativeQMIControl(id); err != nil {
 		return nil, err
 	} else if ok {
-		return manager.openQMIEuiccOnceAID(ctx, controlDevice, aidHex)
+		return manager.openQMIEuiccOnceAID(ctx, id, controlDevice, aidHex)
 	}
 	return manager.openATEuiccOnceAID(ctx, id, aidHex)
 }

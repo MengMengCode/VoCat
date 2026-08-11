@@ -27,9 +27,12 @@ type qmiEUICCSession interface {
 type qmiEUICCSessionOpener func(context.Context, string) (qmiEUICCSession, error)
 
 type qmiEUICCChannelBackend struct {
-	session qmiEUICCSession
-	slot    uint8
-	channel byte
+	manager       *Manager
+	deviceID      string
+	controlDevice string
+	session       qmiEUICCSession
+	slot          uint8
+	channel       byte
 }
 
 // nativeQMIControl selects QMI-UIM only for Linux WWAN-class devices such as
@@ -53,6 +56,7 @@ func (manager *Manager) nativeQMIControl(id string) (string, bool, error) {
 
 func (manager *Manager) openQMIEuiccOnceAID(
 	ctx context.Context,
+	deviceID string,
 	controlDevice string,
 	aidHex string,
 ) (*euiccChannel, error) {
@@ -77,9 +81,12 @@ func (manager *Manager) openQMIEuiccOnceAID(
 		return nil, fmt.Errorf("esim: open QMI-UIM ISD-R channel: %w", err)
 	}
 	return &euiccChannel{backend: &qmiEUICCChannelBackend{
-		session: session,
-		slot:    qmiEUICCSlot,
-		channel: channel,
+		manager:       manager,
+		deviceID:      strings.TrimSpace(deviceID),
+		controlDevice: strings.TrimSpace(controlDevice),
+		session:       session,
+		slot:          qmiEUICCSlot,
+		channel:       channel,
 	}}, nil
 }
 
@@ -87,8 +94,21 @@ func (backend *qmiEUICCChannelBackend) exchange(
 	ctx context.Context,
 	apdu []byte,
 ) ([]byte, int, error) {
-	if backend == nil || backend.session == nil || backend.channel == 0 || len(apdu) == 0 {
+	if backend == nil || backend.manager == nil || backend.session == nil ||
+		backend.deviceID == "" || backend.channel == 0 || len(apdu) == 0 {
 		return nil, 0, errors.New("esim: invalid QMI-UIM eUICC channel")
+	}
+	state, err := backend.manager.lookup(backend.deviceID)
+	if err != nil {
+		return nil, 0, err
+	}
+	state.opMu.Lock()
+	defer state.opMu.Unlock()
+	if err := backend.manager.validateActive(backend.deviceID, state); err != nil {
+		return nil, 0, err
+	}
+	if current := strings.TrimSpace(backend.manager.candidateFor(state).QMIControl); current != backend.controlDevice {
+		return nil, 0, errors.New("esim: QMI-UIM control device changed while the channel was open")
 	}
 	response, err := backend.session.SendAPDU(
 		ctx,

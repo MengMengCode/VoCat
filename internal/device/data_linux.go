@@ -24,6 +24,22 @@ func setQMINetwork(
 	apn string,
 	ipVersion string,
 ) (NetworkResult, error) {
+	effectiveIPVersion := ipVersion
+	downgradeDetail := ""
+	switch ipVersion {
+	case "IP":
+	case "IPV4V6":
+		// qmi-network accepts one IP family per session and the current host
+		// configuration path uses IPv4 DHCP and IPv4 policy routes. Keep the
+		// default dual-stack API request working, but report the actual family.
+		effectiveIPVersion = "IP"
+		downgradeDetail = "requested IPV4V6; QMI data backend is IPv4 only, using IPv4"
+	case "IPV6":
+		return NetworkResult{}, errors.New("QMI data backend is IPv4 only; IPv6 is not supported")
+	default:
+		return NetworkResult{}, fmt.Errorf("unsupported QMI IP version %q", ipVersion)
+	}
+
 	qmiNetwork, err := exec.LookPath("qmi-network")
 	if err != nil {
 		return NetworkResult{}, fmt.Errorf("%w: install libqmi-utils to control %s", ErrDataBackendUnavailable, candidate.QMIControl)
@@ -34,8 +50,7 @@ func setQMINetwork(
 	}
 	profilePath := profile.Name()
 	defer os.Remove(profilePath)
-	ipType := map[string]string{"IP": "4", "IPV6": "6", "IPV4V6": "4"}[ipVersion]
-	profileText := fmt.Sprintf("IP_TYPE=%s\nPROXY=yes\n", ipType)
+	profileText := "IP_TYPE=4\nPROXY=yes\n"
 	if apn != "" {
 		profileText = "APN=" + apn + "\n" + profileText
 	}
@@ -67,6 +82,9 @@ func setQMINetwork(
 		if !idempotentStop && !idempotentStart {
 			return NetworkResult{}, fmt.Errorf("qmi-network %s failed: %w: %s", action, err, detail)
 		}
+	}
+	if downgradeDetail != "" {
+		detail = strings.TrimSpace(downgradeDetail + "\n" + detail)
 	}
 	ipCommand, lookErr := exec.LookPath("ip")
 	if lookErr != nil {
@@ -105,7 +123,7 @@ func setQMINetwork(
 		Interface:     candidate.NetworkInterface,
 		ControlDevice: candidate.QMIControl,
 		APN:           apn,
-		IPVersion:     ipVersion,
+		IPVersion:     effectiveIPVersion,
 		Detail:        detail,
 	}, nil
 }

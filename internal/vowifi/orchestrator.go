@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -195,12 +196,13 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 	if !akaEvidence.Ready {
 		return fail(PhaseSIMReady, errors.New("AKA application is not ready"))
 	}
-	if reader, ok := orchestrator.deps.SIM.(SMSCenterReader); ok {
-		if smsc, smscErr := reader.ReadSMSCenter(setupContext, orchestrator.options.DeviceID); smscErr == nil {
-			identity.SMSC = strings.TrimSpace(smsc)
-		} else {
-			orchestrator.addWarning("SIM SMS service-centre address is unavailable; IMS receive remains available: " + smscErr.Error())
-		}
+	if smsc, smscErrs := orchestrator.readSMSCenter(setupContext); smsc != "" {
+		identity.SMSC = smsc
+	} else if len(smscErrs) > 0 {
+		orchestrator.addWarning(
+			"SIM SMS service-centre address is unavailable; IMS receive remains available: " +
+				errors.Join(smscErrs...).Error(),
+		)
 	}
 	orchestrator.mutate(func(state *State) {
 		state.Phase = PhaseSIMReady
@@ -326,6 +328,7 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 		state.IMSRegistration = strings.TrimSpace(imsEvidence.RegistrationState)
 		state.LastReason = "ims_registered"
 	})
+	orchestrator.watchRuntimeIdentity(runtimeContext, resources, identity)
 
 	if number, source, ok := ExtractAssociatedMSISDN(imsEvidence); ok {
 		record := PhoneRecord{
@@ -382,6 +385,51 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 		state.CleanupErrors = nil
 	})
 	return orchestrator.State(), nil
+}
+
+// readSMSCenter resolves the TS-Service-Centre address used to submit SMS over
+// IMS. AT+CSCA? through the SIM reader is the standard source; native Qualcomm
+// 410 firmware implements only part of TS 27.007, so the AKA provider is
+// consulted second because on exactly those devices it reads the same value
+// over QMI. Only the failure of every available source leaves submission
+// without an address, and IMS receive never depends on one.
+func (orchestrator *Orchestrator) readSMSCenter(ctx context.Context) (string, []error) {
+	var failures []error
+	var attempted []SMSCenterReader
+	for _, dependency := range []any{orchestrator.deps.SIM, orchestrator.deps.AKA} {
+		reader, ok := dependency.(SMSCenterReader)
+		if !ok || containsSMSCenterReader(attempted, reader) {
+			continue
+		}
+		attempted = append(attempted, reader)
+		smsc, err := reader.ReadSMSCenter(ctx, orchestrator.options.DeviceID)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if smsc = strings.TrimSpace(smsc); smsc != "" {
+			return smsc, nil
+		}
+	}
+	return "", failures
+}
+
+// containsSMSCenterReader keeps one provider from being probed twice when a
+// backend fills both roles, as EC20/EC25 does. Only pointer identity is
+// compared: probing a value-typed provider again is cheap, while comparing
+// arbitrary dynamic types could panic.
+func containsSMSCenterReader(readers []SMSCenterReader, candidate SMSCenterReader) bool {
+	value := reflect.ValueOf(candidate)
+	if value.Kind() != reflect.Pointer {
+		return false
+	}
+	for _, reader := range readers {
+		existing := reflect.ValueOf(reader)
+		if existing.Kind() == reflect.Pointer && existing.Pointer() == value.Pointer() {
+			return true
+		}
+	}
+	return false
 }
 
 // Disable is idempotent. It interrupts setup when necessary and closes IMS,
@@ -511,16 +559,43 @@ func (orchestrator *Orchestrator) SendSMS(
 	defer orchestrator.unlockOperation()
 	orchestrator.mu.Lock()
 	resources := orchestrator.resources
-	ready := orchestrator.state.IMSReady && orchestrator.state.SMSReady
+	state := orchestrator.state.clone()
+	ready := state.IMSReady && state.SMSReady
 	orchestrator.mu.Unlock()
 	if resources == nil || resources.ims == nil || !ready {
 		return SMSSubmitResult{}, ErrSMSNotReady
+	}
+	// The device manager snapshot used by the HTTP layer is refreshed
+	// periodically and can still describe the previous SIM for several seconds
+	// after a hot swap. Re-read the physical identity while holding the same
+	// operation lock that serializes IMS submission and teardown. This closes the
+	// check/use gap with controlled profile switches and prevents a message from
+	// being submitted on the previous subscriber's still-registered IMS session.
+	liveIdentity, err := orchestrator.deps.SIM.ReadIdentity(ctx, orchestrator.options.DeviceID)
+	if err != nil {
+		return SMSSubmitResult{}, fmt.Errorf("%w: verify live SIM identity before submission: %v", ErrSMSNotReady, err)
+	}
+	if !sameSMSSubscriber(state.ICCID, state.IMSI, liveIdentity.ICCID, liveIdentity.IMSI) {
+		if resources.cancel != nil {
+			resources.cancel()
+		}
+		orchestrator.revokeChangedIdentityRuntimeLocked(resources)
+		return SMSSubmitResult{}, errors.Join(ErrSMSNotReady, ErrSIMIdentityChanged)
 	}
 	sender, ok := resources.ims.(SMSSender)
 	if !ok {
 		return SMSSubmitResult{}, ErrSMSNotReady
 	}
 	return sender.SendSMS(ctx, request)
+}
+
+func sameSMSSubscriber(expectedICCID, expectedIMSI, liveICCID, liveIMSI string) bool {
+	expectedICCID = strings.TrimSpace(expectedICCID)
+	expectedIMSI = strings.TrimSpace(expectedIMSI)
+	liveICCID = strings.TrimSpace(liveICCID)
+	liveIMSI = strings.TrimSpace(liveIMSI)
+	return expectedICCID != "" && expectedIMSI != "" && liveICCID != "" && liveIMSI != "" &&
+		strings.EqualFold(expectedICCID, liveICCID) && expectedIMSI == liveIMSI
 }
 
 func (orchestrator *Orchestrator) Calls() ([]Call, error) {
@@ -555,6 +630,26 @@ func (orchestrator *Orchestrator) HangupCall(ctx context.Context, id string) err
 		return Call{}, controller.HangupCall(ctx, id)
 	})
 	return err
+}
+
+func (orchestrator *Orchestrator) SendDTMF(
+	ctx context.Context,
+	id string,
+	digit byte,
+	duration time.Duration,
+) error {
+	orchestrator.mu.Lock()
+	resources := orchestrator.resources
+	ready := orchestrator.state.IMSReady
+	orchestrator.mu.Unlock()
+	if resources == nil || resources.ims == nil || !ready {
+		return ErrNotRunning
+	}
+	controller, ok := resources.ims.(CallDTMFController)
+	if !ok {
+		return ErrNotRunning
+	}
+	return controller.SendDTMF(ctx, id, digit, duration)
 }
 
 func (orchestrator *Orchestrator) CallMedia(ctx context.Context, id string) (CallMedia, error) {
@@ -766,6 +861,95 @@ func (orchestrator *Orchestrator) watchRuntimeIMS(
 		"ims_runtime",
 		"runtime_ims_failed",
 	)
+}
+
+func (orchestrator *Orchestrator) watchRuntimeIdentity(
+	runtimeContext context.Context,
+	resources *runtimeResources,
+	identity SIMIdentity,
+) {
+	interval := orchestrator.options.IdentityCheckInterval
+	if interval <= 0 {
+		return
+	}
+	wantICCID := strings.TrimSpace(identity.ICCID)
+	wantIMSI := strings.TrimSpace(identity.IMSI)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runtimeContext.Done():
+				return
+			case <-ticker.C:
+			}
+			checkContext, cancel := context.WithTimeout(runtimeContext, interval)
+			current, err := orchestrator.deps.SIM.ReadIdentity(
+				checkContext,
+				orchestrator.options.DeviceID,
+			)
+			cancel()
+			if err != nil {
+				// A transient read failure is not proof that the subscriber changed.
+				// Existing tunnel/IMS failure monitors remain authoritative.
+				continue
+			}
+			gotICCID := strings.TrimSpace(current.ICCID)
+			gotIMSI := strings.TrimSpace(current.IMSI)
+			if (wantICCID != "" && gotICCID != "" && !strings.EqualFold(wantICCID, gotICCID)) ||
+				(wantIMSI != "" && gotIMSI != "" && wantIMSI != gotIMSI) {
+				orchestrator.revokeChangedIdentityRuntime(resources)
+				return
+			}
+		}
+	}()
+}
+
+func (orchestrator *Orchestrator) revokeChangedIdentityRuntime(resources *runtimeResources) {
+	if resources == nil {
+		return
+	}
+	if resources.cancel != nil {
+		resources.cancel()
+	}
+	if err := orchestrator.lockOperation(context.Background()); err != nil {
+		return
+	}
+	defer orchestrator.unlockOperation()
+	orchestrator.revokeChangedIdentityRuntimeLocked(resources)
+}
+
+// revokeChangedIdentityRuntimeLocked tears down resources for the previous
+// subscriber. The caller must own orchestrator.operation.
+func (orchestrator *Orchestrator) revokeChangedIdentityRuntimeLocked(resources *runtimeResources) {
+	orchestrator.mu.Lock()
+	current := orchestrator.resources == resources
+	orchestrator.mu.Unlock()
+	if !current {
+		return
+	}
+	cleanupErrors := orchestrator.cleanup(resources)
+	orchestrator.mu.Lock()
+	if orchestrator.resources == resources {
+		orchestrator.resources = nil
+	}
+	orchestrator.mu.Unlock()
+	orchestrator.mutate(func(state *State) {
+		state.Phase = PhaseIdle
+		state.Enabled = false
+		state.Active = false
+		state.SIMReady = false
+		state.AccessReady = false
+		state.TunnelReady = false
+		state.IMSReady = false
+		state.SMSReady = false
+		state.IMSRegistration = ""
+		state.LastErrorClass = "sim_identity_changed"
+		state.LastError = ErrSIMIdentityChanged.Error()
+		state.LastReason = "runtime_sim_identity_changed"
+		state.CleanupErrors = append([]string(nil), cleanupErrors...)
+		state.StartedAt = nil
+	})
 }
 
 func (orchestrator *Orchestrator) watchRuntimeFailure(

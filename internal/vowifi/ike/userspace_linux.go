@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,8 +22,9 @@ import (
 )
 
 const (
-	userspaceTunnelMTU  = 1380
-	tunReadPollInterval = 100 * time.Millisecond
+	userspaceTunnelMTU         = 1380
+	maxUserspaceSelectorRoutes = 2048
+	tunReadPollInterval        = 100 * time.Millisecond
 )
 
 type linuxUserspaceInstaller struct {
@@ -40,18 +43,31 @@ type linuxUserspaceHandle struct {
 	wait       sync.WaitGroup
 	cancelOnce sync.Once
 	closeOnce  sync.Once
+	closeMu    sync.Mutex
 
 	mu          sync.Mutex
 	closed      bool
 	terminalErr error
 	failures    chan error
 	cleanup     []ipCleanupCommand
+
+	cleanupExecutor func(context.Context, ...string) ([]byte, error)
 }
 
 type ipCleanupCommand struct {
 	operation string
 	arguments []string
+	phase     int
 }
+
+const (
+	cleanupSelectorRule  = 10
+	cleanupLinkDown      = 20
+	cleanupAddress       = 30
+	cleanupSelectorRoute = 40
+	cleanupFailRule      = 50
+	cleanupFailRoute     = 60
+)
 
 func (*linuxUserspaceHandle) DataplaneMode() string { return "userspace" }
 
@@ -189,34 +205,12 @@ func ipAllowedBySelectors(ip net.IP, selectors []trafficSelector) bool {
 
 func (handle *linuxUserspaceHandle) configure(ctx context.Context) error {
 	name := handle.config.Name
-	if handle.config.InnerLocalIPv4 != nil {
-		if err := handle.run(
-			ctx,
-			"assign TUN IPv4 address",
-			"-4", "address", "add",
-			handle.config.InnerLocalIPv4.String()+"/32",
-			"dev", name,
-			"noprefixroute",
-		); err != nil {
-			return err
-		}
-	}
-	if handle.config.InnerLocalIPv6 != nil {
-		prefix := handle.config.InnerIPv6Prefix
-		if prefix == 0 || prefix > 128 {
-			prefix = 128
-		}
-		if err := handle.run(
-			ctx,
-			"assign TUN IPv6 address",
-			"-6", "address", "add",
-			fmt.Sprintf("%s/%d", handle.config.InnerLocalIPv6.String(), prefix),
-			"dev", name,
-			"noprefixroute",
-		); err != nil {
-			return err
-		}
-	}
+	// The link comes up before any route names it as an output device. The
+	// 410's 5.15 kernel rejects "route add <prefix> dev <tun>" with "Device for
+	// nexthop is not up" while the TUN is down, so staging selector routes
+	// first is not portable. Bringing the link up carries no leak risk on its
+	// own: the interface has no address and nothing routes to it until the
+	// policy tables and both fail-closed rules below are in place.
 	if err := handle.run(
 		ctx,
 		"enable TUN interface",
@@ -226,33 +220,61 @@ func (handle *linuxUserspaceHandle) configure(ctx context.Context) error {
 	); err != nil {
 		return err
 	}
+	handle.recordCleanupAt(cleanupLinkDown, "disable TUN interface", "link", "set", "dev", name, "down")
 
 	table, priority := userspaceRoutingIdentifiers(handle.config.InboundSPI)
 	if handle.config.InnerLocalIPv4 != nil {
-		if err := handle.configureFamily(
-			ctx,
-			"-4",
-			handle.config.InnerLocalIPv4,
-			handle.ipv4PCSCF(),
-			32,
-			table,
-			priority,
-		); err != nil {
+		prefixes, err := selectorRoutePrefixes(handle.config.ResponderSelectors, false)
+		if err != nil {
+			return err
+		}
+		if err := handle.configureFamily(ctx, "-4", handle.config.InnerLocalIPv4, prefixes, 32, table, priority); err != nil {
 			return err
 		}
 	}
 	if handle.config.InnerLocalIPv6 != nil {
-		if err := handle.configureFamily(
+		prefixes, err := selectorRoutePrefixes(handle.config.ResponderSelectors, true)
+		if err != nil {
+			return err
+		}
+		if err := handle.configureFamily(ctx, "-6", handle.config.InnerLocalIPv6, prefixes, 128, table, priority); err != nil {
+			return err
+		}
+	}
+
+	// Policy tables and both fail-closed rules are complete before an inner
+	// address becomes usable, preventing a setup-time fall-through to main.
+	if handle.config.InnerLocalIPv4 != nil {
+		address := handle.config.InnerLocalIPv4.String() + "/32"
+		if err := handle.run(
 			ctx,
-			"-6",
-			handle.config.InnerLocalIPv6,
-			handle.ipv6PCSCF(),
-			128,
-			table,
-			priority,
+			"assign TUN IPv4 address",
+			"-4", "address", "add",
+			address,
+			"dev", name,
+			"noprefixroute",
 		); err != nil {
 			return err
 		}
+		handle.recordCleanupAt(cleanupAddress, "remove TUN IPv4 address", "-4", "address", "delete", address, "dev", name)
+	}
+	if handle.config.InnerLocalIPv6 != nil {
+		prefix := handle.config.InnerIPv6Prefix
+		if prefix == 0 || prefix > 128 {
+			prefix = 128
+		}
+		address := fmt.Sprintf("%s/%d", handle.config.InnerLocalIPv6.String(), prefix)
+		if err := handle.run(
+			ctx,
+			"assign TUN IPv6 address",
+			"-6", "address", "add",
+			address,
+			"dev", name,
+			"noprefixroute",
+		); err != nil {
+			return err
+		}
+		handle.recordCleanupAt(cleanupAddress, "remove TUN IPv6 address", "-6", "address", "delete", address, "dev", name)
 	}
 	return nil
 }
@@ -261,16 +283,16 @@ func (handle *linuxUserspaceHandle) configureFamily(
 	ctx context.Context,
 	family string,
 	local net.IP,
-	pcscf []net.IP,
+	selectorPrefixes []string,
 	bits int,
 	table uint32,
 	priority uint32,
 ) error {
-	if len(pcscf) == 0 {
-		return nil
-	}
 	tableValue := strconv.FormatUint(uint64(table), 10)
 	priorityValue := strconv.FormatUint(uint64(priority), 10)
+	failClosedTable, failClosedPriority := userspaceFailClosedRoutingIdentifiers(table, priority)
+	failClosedTableValue := strconv.FormatUint(uint64(failClosedTable), 10)
+	failClosedPriorityValue := strconv.FormatUint(uint64(failClosedPriority), 10)
 	localPrefix := fmt.Sprintf("%s/%d", local.String(), bits)
 	if err := handle.requireUnusedRoutingSlot(
 		ctx,
@@ -280,60 +302,165 @@ func (handle *linuxUserspaceHandle) configureFamily(
 	); err != nil {
 		return err
 	}
+	if err := handle.requireUnusedRoutingSlot(
+		ctx,
+		family,
+		failClosedTableValue,
+		failClosedPriorityValue,
+	); err != nil {
+		return err
+	}
+	unreachableArguments := []string{
+		family, "route", "add",
+		"table", failClosedTableValue,
+		"unreachable", "default",
+	}
+	if err := handle.run(ctx, "install fail-closed route", unreachableArguments...); err != nil {
+		return err
+	}
+	handle.recordCleanupAt(
+		cleanupFailRoute,
+		"remove fail-closed route",
+		family, "route", "delete",
+		"table", failClosedTableValue,
+		"unreachable", "default",
+	)
+
+	// Selector routes are staged before either rule becomes reachable. They do
+	// not carry a preferred source so they can be installed while the TUN is
+	// still down and before the inner address exists.
+	for _, prefix := range selectorPrefixes {
+		routeArguments := []string{
+			family, "route", "add",
+			"table", tableValue,
+			prefix,
+			"dev", handle.config.Name,
+		}
+		if err := handle.run(ctx, "install negotiated selector route", routeArguments...); err != nil {
+			return err
+		}
+		handle.recordCleanupAt(
+			cleanupSelectorRoute,
+			"remove negotiated selector route",
+			family, "route", "delete",
+			"table", tableValue,
+			prefix,
+			"dev", handle.config.Name,
+		)
+	}
+
+	failClosedRuleArguments := []string{
+		family, "rule", "add",
+		"priority", failClosedPriorityValue,
+		"from", localPrefix,
+		"lookup", failClosedTableValue,
+	}
+	if err := handle.run(ctx, "install fail-closed fallback rule", failClosedRuleArguments...); err != nil {
+		return err
+	}
+	handle.recordCleanupAt(
+		cleanupFailRule,
+		"remove fail-closed fallback rule",
+		family, "rule", "delete",
+		"priority", failClosedPriorityValue,
+		"from", localPrefix,
+		"lookup", failClosedTableValue,
+	)
+
+	// The lower-priority-number selector rule is committed last. From this
+	// instant a selector miss continues directly into the already-live
+	// fail-closed rule, never into the host main table.
 	ruleArguments := []string{
 		family, "rule", "add",
 		"priority", priorityValue,
 		"from", localPrefix,
 		"lookup", tableValue,
 	}
-	if err := handle.run(ctx, "install fail-closed source rule", ruleArguments...); err != nil {
+	if err := handle.run(ctx, "install selector source rule", ruleArguments...); err != nil {
 		return err
 	}
-	handle.recordCleanup(
-		"remove fail-closed source rule",
+	handle.recordCleanupAt(
+		cleanupSelectorRule,
+		"remove selector source rule",
 		family, "rule", "delete",
 		"priority", priorityValue,
 		"from", localPrefix,
 		"lookup", tableValue,
 	)
-
-	unreachableArguments := []string{
-		family, "route", "add",
-		"table", tableValue,
-		"unreachable", "default",
-	}
-	if err := handle.run(ctx, "install fail-closed route", unreachableArguments...); err != nil {
-		return err
-	}
-	handle.recordCleanup(
-		"remove fail-closed route",
-		family, "route", "delete",
-		"table", tableValue,
-		"unreachable", "default",
-	)
-
-	for _, address := range pcscf {
-		hostPrefix := fmt.Sprintf("%s/%d", address.String(), bits)
-		routeArguments := []string{
-			family, "route", "add",
-			"table", tableValue,
-			hostPrefix,
-			"dev", handle.config.Name,
-			"src", local.String(),
-		}
-		if err := handle.run(ctx, "install P-CSCF host route", routeArguments...); err != nil {
-			return err
-		}
-		handle.recordCleanup(
-			"remove P-CSCF host route",
-			family, "route", "delete",
-			"table", tableValue,
-			hostPrefix,
-			"dev", handle.config.Name,
-			"src", local.String(),
-		)
-	}
 	return nil
+}
+
+// selectorRoutePrefixes turns each negotiated responder IP range into the
+// smallest set of CIDR routes Linux can install. Routing is deliberately
+// based only on the IP portion of the selectors: protocol and port limits are
+// enforced again by espTunnel.seal before a packet can leave through NAT-T.
+// Addresses outside these prefixes miss the selector table and are stopped by
+// the next policy rule's dedicated unreachable table, so the inner source can
+// never fall through to the host's main routing table. If TSr is /0, its TUN
+// default lives in the selector table while the unreachable default remains in
+// the separate fallback table, avoiding a same-prefix route conflict.
+func selectorRoutePrefixes(selectors []trafficSelector, ipv6 bool) ([]string, error) {
+	bits := 32
+	if ipv6 {
+		bits = 128
+	}
+	seen := make(map[string]struct{})
+	result := make([]string, 0, len(selectors))
+	for _, selector := range selectors {
+		start, ok := selectorRouteAddress(selector.StartIP, ipv6)
+		if !ok {
+			continue
+		}
+		end, ok := selectorRouteAddress(selector.EndIP, ipv6)
+		if !ok {
+			return nil, errors.New("ike: responder traffic selector mixes address families")
+		}
+		startValue := new(big.Int).SetBytes(start)
+		endValue := new(big.Int).SetBytes(end)
+		if startValue.Cmp(endValue) > 0 {
+			return nil, errors.New("ike: responder traffic selector IP range is invalid")
+		}
+		for startValue.Cmp(endValue) <= 0 {
+			alignedHostBits := bits
+			if startValue.Sign() != 0 {
+				alignedHostBits = int(startValue.TrailingZeroBits())
+				if alignedHostBits > bits {
+					alignedHostBits = bits
+				}
+			}
+			remaining := new(big.Int).Sub(endValue, startValue)
+			remaining.Add(remaining, big.NewInt(1))
+			remainingHostBits := remaining.BitLen() - 1
+			hostBits := alignedHostBits
+			if remainingHostBits < hostBits {
+				hostBits = remainingHostBits
+			}
+			prefixLength := bits - hostBits
+			addressBytes := startValue.FillBytes(make([]byte, bits/8))
+			prefix := net.IP(addressBytes).String() + "/" + strconv.Itoa(prefixLength)
+			if _, duplicate := seen[prefix]; !duplicate {
+				if len(result) >= maxUserspaceSelectorRoutes {
+					return nil, errors.New("ike: responder traffic selectors require too many Linux routes")
+				}
+				seen[prefix] = struct{}{}
+				result = append(result, prefix)
+			}
+			startValue.Add(startValue, new(big.Int).Lsh(big.NewInt(1), uint(hostBits)))
+		}
+	}
+	return result, nil
+}
+
+func selectorRouteAddress(address net.IP, ipv6 bool) ([]byte, bool) {
+	if ipv6 {
+		if address == nil || address.To4() != nil {
+			return nil, false
+		}
+		value := address.To16()
+		return append([]byte(nil), value...), value != nil
+	}
+	value := address.To4()
+	return append([]byte(nil), value...), value != nil
 }
 
 func userspaceRoutingIdentifiers(spi uint32) (table uint32, priority uint32) {
@@ -346,8 +473,19 @@ func userspaceRoutingIdentifiers(spi uint32) (table uint32, priority uint32) {
 	// used directly as the priority would usually run too late and leak the
 	// inner source through the host's default route. Keep a SPI-derived slot
 	// strictly ahead of main; requireUnusedRoutingSlot rejects collisions.
-	priority = 10000 + spi%20000
+	// Reserve adjacent even/odd priorities for selector lookup followed by a
+	// fail-closed fallback lookup. The latter prevents RPDB from continuing to
+	// the main table if the TUN (and its routes) disappears unexpectedly.
+	priority = 10000 + (spi%10000)*2
 	return table, priority
+}
+
+func userspaceFailClosedRoutingIdentifiers(table, priority uint32) (uint32, uint32) {
+	failClosedTable := table ^ 0x40000000
+	if failClosedTable <= 255 {
+		failClosedTable |= 0xc0000000
+	}
+	return failClosedTable, priority + 1
 }
 
 func (handle *linuxUserspaceHandle) requireUnusedRoutingSlot(
@@ -471,10 +609,11 @@ func (handle *linuxUserspaceHandle) run(
 	return nil
 }
 
-func (handle *linuxUserspaceHandle) recordCleanup(operation string, arguments ...string) {
+func (handle *linuxUserspaceHandle) recordCleanupAt(phase int, operation string, arguments ...string) {
 	handle.cleanup = append(handle.cleanup, ipCleanupCommand{
 		operation: operation,
 		arguments: append([]string(nil), arguments...),
+		phase:     phase,
 	})
 }
 
@@ -615,9 +754,23 @@ func (handle *linuxUserspaceHandle) closeTUN() {
 }
 
 func (handle *linuxUserspaceHandle) Close(ctx context.Context) error {
+	// Serialize the complete shutdown sequence, not only cleanupNetwork. A
+	// caller that observes closed must wait for the active Close to finish
+	// waiting for the data-plane loops and updating the retained cleanup set
+	// before it can decide whether a retry is required.
+	handle.closeMu.Lock()
+	defer handle.closeMu.Unlock()
+
 	handle.mu.Lock()
 	if handle.closed {
+		hasCleanup := len(handle.cleanup) > 0
 		handle.mu.Unlock()
+		if hasCleanup {
+			if err := handle.cleanupNetwork(ctx); err != nil {
+				return err
+			}
+			handle.closeTUN()
+		}
 		return nil
 	}
 	handle.closed = true
@@ -630,7 +783,12 @@ func (handle *linuxUserspaceHandle) Close(ctx context.Context) error {
 	// available to the next reconnect.
 	handle.wait.Wait()
 	cleanupErr := handle.cleanupNetwork(ctx)
-	handle.closeTUN()
+	// If a safety-critical cleanup command failed, keep the descriptor and
+	// fail-closed rules alive. A subsequent Close retries the retained command
+	// set; only a successful teardown releases the non-persistent TUN.
+	if cleanupErr == nil {
+		handle.closeTUN()
+	}
 	// A terminal data-plane error is delivered exactly once through Failures.
 	// Close reports only teardown errors so the orchestrator does not record
 	// the same runtime cause again as a cleanup failure.
@@ -644,19 +802,42 @@ func (handle *linuxUserspaceHandle) cleanupNetwork(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var errs []error
-	for index := len(handle.cleanup) - 1; index >= 0; index-- {
-		item := handle.cleanup[index]
-		command := exec.CommandContext(ctx, handle.ipCommand, item.arguments...)
-		if output, err := command.CombinedOutput(); err != nil {
+	guardRemovalAllowed := true
+	remaining := make([]ipCleanupCommand, 0)
+	// Teardown is safety ordered rather than merely reverse construction:
+	// selector rules disappear first, then the link/address, while the
+	// fail-closed rule and unreachable table remain until no inner-source
+	// packet can be emitted. Stable ordering preserves IPv4/IPv6 determinism.
+	sort.SliceStable(handle.cleanup, func(left, right int) bool {
+		return handle.cleanup[left].phase < handle.cleanup[right].phase
+	})
+	for _, item := range handle.cleanup {
+		if item.phase >= cleanupFailRule && !guardRemovalAllowed {
+			remaining = append(remaining, item)
+			continue
+		}
+		output, err := handle.executeCleanup(ctx, item.arguments...)
+		if err != nil {
 			message := strings.TrimSpace(string(output))
 			if message == "" {
 				message = err.Error()
 			}
 			errs = append(errs, fmt.Errorf("ike: %s: %s", item.operation, message))
+			remaining = append(remaining, item)
+			if item.phase == cleanupLinkDown || item.phase == cleanupAddress || item.phase == cleanupFailRule {
+				guardRemovalAllowed = false
+			}
 		}
 	}
-	handle.cleanup = nil
+	handle.cleanup = remaining
 	return errors.Join(errs...)
+}
+
+func (handle *linuxUserspaceHandle) executeCleanup(ctx context.Context, arguments ...string) ([]byte, error) {
+	if handle.cleanupExecutor != nil {
+		return handle.cleanupExecutor(ctx, arguments...)
+	}
+	return exec.CommandContext(ctx, handle.ipCommand, arguments...).CombinedOutput()
 }
 
 var _ ChildSAInstaller = linuxUserspaceInstaller{}

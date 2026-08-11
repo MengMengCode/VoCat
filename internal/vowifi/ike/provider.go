@@ -31,6 +31,14 @@ type Config struct {
 	Installer          ChildSAInstaller
 	IdentityType       uint8
 	APN                string
+	// EAPMethod is an explicit anti-downgrade policy: "aka" (type 23) or
+	// "aka-prime" (type 50). Automatic fallback is intentionally unsupported.
+	EAPMethod string
+	// AllowSHA1 advertises SHA-1 only as a lower-priority compatibility
+	// alternative; SHA-256 remains preferred.
+	AllowSHA1 bool
+	// UseMODP1024 explicitly selects DH group 2 instead of the group 14 default.
+	UseMODP1024 bool
 }
 
 type Provider struct {
@@ -70,6 +78,13 @@ func NewProvider(config Config) (*Provider, error) {
 	if len(config.APN) > 253 || strings.ContainsAny(config.APN, " \t\r\n/:@") {
 		return nil, errors.New("ike: APN is invalid")
 	}
+	config.EAPMethod = strings.ToLower(strings.TrimSpace(config.EAPMethod))
+	if config.EAPMethod == "" {
+		config.EAPMethod = "aka"
+	}
+	if config.EAPMethod != "aka" && config.EAPMethod != "aka-prime" {
+		return nil, fmt.Errorf("ike: unsupported EAP method %q", config.EAPMethod)
+	}
 	if config.Installer == nil {
 		config.Installer = defaultChildSAInstaller()
 	}
@@ -90,7 +105,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if epdg == "" || strings.ContainsAny(epdg, " \t\r\n/:") {
 		return nil, errors.New("ike: ePDG must be a hostname")
 	}
-	aka, err := newAKAClient(request.Identity, request.AKA)
+	aka, err := newAKAClientWithMethod(request.Identity, request.AKA, provider.config.EAPMethod)
 	if err != nil {
 		return nil, err
 	}
@@ -110,8 +125,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	}()
 
 	group := uint16(dhMODP2048)
-	legacyFirst := request.Identity.HomeMCC == "234" && request.Identity.HomeMNC == "15"
-	if legacyFirst {
+	if provider.config.UseMODP1024 {
 		group = dhMODP1024
 	}
 	dh, err := newDHExchange(group, provider.config.Random)
@@ -126,7 +140,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if _, err := io.ReadFull(provider.config.Random, initiatorNonce); err != nil {
 		return nil, fmt.Errorf("ike: generate initiator nonce: %w", err)
 	}
-	ikeProposalBody, err := marshalProposals([]proposal{ikeOffer(group, legacyFirst)})
+	ikeProposalBody, err := marshalProposals([]proposal{ikeOffer(group, provider.config.AllowSHA1)})
 	if err != nil {
 		return nil, err
 	}
@@ -197,6 +211,10 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if ikeSuite.DHID != group {
 		return nil, fmt.Errorf("ike: responder selected DH group %d but KE used group %d", ikeSuite.DHID, group)
 	}
+	if !provider.config.AllowSHA1 &&
+		(ikeSuite.PRFID != prfHMACSHA256 || ikeSuite.IntegrityID != integrityHMACSHA256_128) {
+		return nil, errors.New("ike: responder selected legacy IKE crypto while legacy compatibility is disabled")
+	}
 	responderKE, err := onePayload(initResponsePayloads, payloadKE)
 	if err != nil {
 		return nil, err
@@ -251,7 +269,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 		return nil, err
 	}
 	childInboundSPI := binary.BigEndian.Uint32(childInboundSPIBytes[:])
-	childOfferBody, err := marshalProposals([]proposal{espOffer(childInboundSPIBytes[:], legacyFirst)})
+	childOfferBody, err := marshalProposals([]proposal{espOffer(childInboundSPIBytes[:], provider.config.AllowSHA1)})
 	if err != nil {
 		return nil, err
 	}
@@ -422,6 +440,9 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if err != nil {
 		return nil, err
 	}
+	if !provider.config.AllowSHA1 && childSuite.IntegrityID != integrityHMACSHA256_128 {
+		return nil, errors.New("ike: responder selected legacy ESP integrity while legacy compatibility is disabled")
+	}
 	childOutboundSPI := binary.BigEndian.Uint32(childProposals[0].SPI)
 	finalTSi, err := onePayload(finalPayloads, payloadTSi)
 	if err != nil {
@@ -562,34 +583,42 @@ func buildInitialEAPOnlyAuth(
 	}
 }
 
-func ikeOffer(group uint16, legacyFirst bool) proposal {
+func ikeOffer(group uint16, allowSHA1 bool) proposal {
 	transforms := []transform{
 		{Type: transformEncryption, ID: encryptionAESCBC, KeyLength: 128},
 		{Type: transformEncryption, ID: encryptionAESCBC, KeyLength: 256},
-		{Type: transformPRF, ID: prfHMACSHA1},
-		{Type: transformPRF, ID: prfHMACSHA256},
-		{Type: transformIntegrity, ID: integrityHMACSHA1_96},
-		{Type: transformIntegrity, ID: integrityHMACSHA256_128},
-		{Type: transformDH, ID: group},
 	}
-	if !legacyFirst {
-		transforms[2], transforms[3] = transforms[3], transforms[2]
-		transforms[4], transforms[5] = transforms[5], transforms[4]
+	if allowSHA1 {
+		transforms = append(transforms,
+			transform{Type: transformPRF, ID: prfHMACSHA256},
+			transform{Type: transformPRF, ID: prfHMACSHA1},
+			transform{Type: transformIntegrity, ID: integrityHMACSHA256_128},
+			transform{Type: transformIntegrity, ID: integrityHMACSHA1_96},
+		)
+	} else {
+		transforms = append(transforms,
+			transform{Type: transformPRF, ID: prfHMACSHA256},
+			transform{Type: transformIntegrity, ID: integrityHMACSHA256_128},
+		)
 	}
+	transforms = append(transforms, transform{Type: transformDH, ID: group})
 	return proposal{Number: 1, Protocol: protocolIKE, Transforms: transforms}
 }
 
-func espOffer(spi []byte, legacyFirst bool) proposal {
+func espOffer(spi []byte, allowSHA1 bool) proposal {
 	transforms := []transform{
 		{Type: transformEncryption, ID: encryptionAESCBC, KeyLength: 128},
 		{Type: transformEncryption, ID: encryptionAESCBC, KeyLength: 256},
-		{Type: transformIntegrity, ID: integrityHMACSHA1_96},
-		{Type: transformIntegrity, ID: integrityHMACSHA256_128},
-		{Type: transformESN, ID: 0},
 	}
-	if !legacyFirst {
-		transforms[2], transforms[3] = transforms[3], transforms[2]
+	if allowSHA1 {
+		transforms = append(transforms,
+			transform{Type: transformIntegrity, ID: integrityHMACSHA256_128},
+			transform{Type: transformIntegrity, ID: integrityHMACSHA1_96},
+		)
+	} else {
+		transforms = append(transforms, transform{Type: transformIntegrity, ID: integrityHMACSHA256_128})
 	}
+	transforms = append(transforms, transform{Type: transformESN, ID: 0})
 	return proposal{Number: 1, Protocol: protocolESP, SPI: append([]byte(nil), spi...), Transforms: transforms}
 }
 

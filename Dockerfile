@@ -34,9 +34,23 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
     -o /out/vocat \
     ./cmd/vocat
 
-# ---- Stage 3: minimal runtime ----
+# ---- Stage 3: runtime -------------------------------------------------------
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata && \
+# Hardware access is opt-in at container launch, but the official image carries
+# the userspace tools required by that mode.  Keep the checks here so an Alpine
+# package-layout change fails the image build instead of failing on a modem.
+RUN apk add --no-cache \
+        busybox \
+        ca-certificates \
+        iproute2 \
+        qmi-utils \
+        tzdata && \
+    command -v ip >/dev/null && \
+    command -v busybox >/dev/null && \
+    busybox udhcpc --help >/dev/null 2>&1 && \
+    command -v qmi-network >/dev/null && \
+    command -v qmicli >/dev/null && \
+    test -x /usr/libexec/qmi-proxy && \
     addgroup -S -g 1000 vocat && \
     adduser -S -D -H -u 1000 -G vocat vocat
 

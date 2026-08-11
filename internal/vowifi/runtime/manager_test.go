@@ -307,6 +307,289 @@ func TestManagerCreatesRuntimeOnDemand(t *testing.T) {
 	}
 }
 
+func TestManagerInvalidateRebuildsQuiescedRuntimeOnDemand(t *testing.T) {
+	created := 0
+	manager := New(Options{
+		Factory: func(_ context.Context, deviceID string) (*vowifi.Orchestrator, error) {
+			created++
+			return testOrchestrator(t, deviceID), nil
+		},
+	})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+
+	if _, err := manager.State("ec20"); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	first := manager.entries["ec20"].orchestrator
+	manager.mu.Unlock()
+	if err := manager.Invalidate(context.Background(), "ec20"); err != nil {
+		t.Fatalf("Invalidate: %v", err)
+	}
+	manager.mu.Lock()
+	remaining := manager.entries["ec20"]
+	manager.mu.Unlock()
+	if remaining != nil {
+		t.Fatal("invalidated runtime remained cached")
+	}
+
+	if _, err := manager.State("ec20"); err != nil {
+		t.Fatalf("rebuild State: %v", err)
+	}
+	manager.mu.Lock()
+	second := manager.entries["ec20"].orchestrator
+	manager.mu.Unlock()
+	if created != 2 || second == first {
+		t.Fatalf("factory calls = %d, first=%p second=%p", created, first, second)
+	}
+}
+
+func TestManagerInvalidateRejectsRuntimeThatIsNotQuiesced(t *testing.T) {
+	manager := New(Options{OperationTimeout: time.Second})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.Register(testOrchestrator(t, "ec20")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RequestEnabled("ec20", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Invalidate(context.Background(), "ec20"); !errors.Is(err, ErrNotQuiesced) {
+		t.Fatalf("Invalidate error = %v, want ErrNotQuiesced", err)
+	}
+	manager.mu.Lock()
+	remaining := manager.entries["ec20"]
+	manager.mu.Unlock()
+	if remaining == nil {
+		t.Fatal("active runtime was removed")
+	}
+}
+
+func TestManagerSubscriberChangeBlocksEveryRuntimeEntryPointUntilRelease(t *testing.T) {
+	created := 0
+	manager := New(Options{
+		Factory: func(_ context.Context, deviceID string) (*vowifi.Orchestrator, error) {
+			created++
+			return testOrchestrator(t, deviceID), nil
+		},
+	})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+
+	if _, err := manager.State("ec20"); err != nil {
+		t.Fatal(err)
+	}
+	release, err := manager.BeginSubscriberChange(context.Background(), "ec20")
+	if err != nil {
+		t.Fatalf("BeginSubscriberChange: %v", err)
+	}
+	assertBlocked := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrSubscriberChangeInProgress) {
+			t.Fatalf("%s error = %v, want ErrSubscriberChangeInProgress", name, err)
+		}
+	}
+
+	assertBlocked("Ensure", manager.Ensure(context.Background(), "ec20"))
+	_, err = manager.State("ec20")
+	assertBlocked("State", err)
+	_, err = manager.RequestEnabled("ec20", true)
+	assertBlocked("RequestEnabled", err)
+	_, err = manager.RequestReconnect("ec20")
+	assertBlocked("RequestReconnect", err)
+	_, err = manager.SendSMS(context.Background(), "ec20", vowifi.SMSSubmitRequest{})
+	assertBlocked("SendSMS", err)
+	_, err = manager.Calls("ec20")
+	assertBlocked("Calls", err)
+	_, err = manager.DialCall(context.Background(), "ec20", "+447700900123")
+	assertBlocked("DialCall", err)
+	_, err = manager.AnswerCall(context.Background(), "ec20", "call-1")
+	assertBlocked("AnswerCall", err)
+	assertBlocked("HangupCall", manager.HangupCall(context.Background(), "ec20", "call-1"))
+	assertBlocked("SendDTMF", manager.SendDTMF(context.Background(), "ec20", "call-1", '1', 100*time.Millisecond))
+	_, err = manager.CallMedia(context.Background(), "ec20", "call-1")
+	assertBlocked("CallMedia", err)
+	candidate := testOrchestrator(t, "ec20")
+	assertBlocked("Register", manager.Register(candidate))
+	_ = candidate.Close(context.Background())
+
+	if created != 1 {
+		t.Fatalf("factory calls while guarded = %d, want 1", created)
+	}
+	release()
+	release()
+	if _, err := manager.State("ec20"); err != nil {
+		t.Fatalf("State after release: %v", err)
+	}
+	if created != 2 {
+		t.Fatalf("factory calls after release = %d, want 2", created)
+	}
+
+	// A stale/idempotent release must not clear a later guard for the device.
+	releaseAgain, err := manager.BeginSubscriberChange(context.Background(), "ec20")
+	if err != nil {
+		t.Fatalf("second BeginSubscriberChange: %v", err)
+	}
+	release()
+	_, err = manager.State("ec20")
+	assertBlocked("State under second guard", err)
+	releaseAgain()
+}
+
+func TestManagerStateRacesSubscriberChangeWithoutReturningRemovedEntry(t *testing.T) {
+	manager := New(Options{
+		Factory: func(_ context.Context, deviceID string) (*vowifi.Orchestrator, error) {
+			return testOrchestrator(t, deviceID), nil
+		},
+	})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if _, err := manager.State("ec20"); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 200; attempt++ {
+		start := make(chan struct{})
+		stateResult := make(chan error, 1)
+		type beginResult struct {
+			release func()
+			err     error
+		}
+		beginResultChannel := make(chan beginResult, 1)
+		go func() {
+			<-start
+			_, err := manager.State("ec20")
+			stateResult <- err
+		}()
+		go func() {
+			<-start
+			release, err := manager.BeginSubscriberChange(context.Background(), "ec20")
+			beginResultChannel <- beginResult{release: release, err: err}
+		}()
+		close(start)
+
+		begin := <-beginResultChannel
+		if begin.err != nil {
+			t.Fatalf("attempt %d BeginSubscriberChange: %v", attempt, begin.err)
+		}
+		stateErr := <-stateResult
+		if stateErr != nil && !errors.Is(stateErr, ErrSubscriberChangeInProgress) {
+			t.Fatalf("attempt %d State error = %v", attempt, stateErr)
+		}
+		begin.release()
+		if _, err := manager.State("ec20"); err != nil {
+			t.Fatalf("attempt %d rebuild State: %v", attempt, err)
+		}
+	}
+}
+
+func TestManagerSubscriberChangeWaitsForOldWatcherToExit(t *testing.T) {
+	persistStarted := make(chan struct{})
+	allowPersistReturn := make(chan struct{})
+	persisted := make(chan struct{})
+	manager := New(Options{
+		OnState: func(context.Context, vowifi.State) error {
+			close(persistStarted)
+			<-allowPersistReturn
+			close(persisted)
+			return nil
+		},
+	})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.Register(testOrchestrator(t, "ec20")); err != nil {
+		t.Fatal(err)
+	}
+	<-persistStarted
+
+	type beginResult struct {
+		release func()
+		err     error
+	}
+	result := make(chan beginResult, 1)
+	go func() {
+		release, err := manager.BeginSubscriberChange(context.Background(), "ec20")
+		result <- beginResult{release: release, err: err}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		manager.mu.Lock()
+		blocked := manager.subscriberChangeLocked("ec20")
+		manager.mu.Unlock()
+		if blocked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("subscriber-change barrier was not installed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case got := <-result:
+		t.Fatalf("BeginSubscriberChange returned before watcher joined: %v", got.err)
+	default:
+	}
+	if _, err := manager.State("ec20"); !errors.Is(err, ErrSubscriberChangeInProgress) {
+		t.Fatalf("State while watcher drains = %v, want barrier error", err)
+	}
+
+	close(allowPersistReturn)
+	got := <-result
+	if got.err != nil {
+		t.Fatalf("BeginSubscriberChange: %v", got.err)
+	}
+	select {
+	case <-persisted:
+	default:
+		t.Fatal("subscriber change returned before old persistence completed")
+	}
+	got.release()
+}
+
+func TestManagerSubscriberChangeClearsStaleDesiredPolicyAndRetry(t *testing.T) {
+	manager := New(Options{})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.Register(testOrchestrator(t, "ec20")); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	item := manager.entries["ec20"]
+	item.desiredEnabled = true
+	item.reconnectPending = true
+	item.autoRetryPending = true
+	item.retryFailures = 4
+	manager.mu.Unlock()
+
+	release, err := manager.BeginSubscriberChange(context.Background(), "ec20")
+	if err != nil {
+		t.Fatalf("BeginSubscriberChange on idle runtime with stale policy: %v", err)
+	}
+	if item.desiredEnabled || item.reconnectPending || item.autoRetryPending || item.retryFailures != 0 {
+		t.Fatalf("stale runtime policy was not cleared: %+v", item)
+	}
+	release()
+}
+
+func TestManagerSubscriberChangeRejectsActiveRuntimeWithoutLeavingBarrier(t *testing.T) {
+	manager := New(Options{OperationTimeout: time.Second})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.Register(testOrchestrator(t, "ec20")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RequestEnabled("ec20", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BeginSubscriberChange(context.Background(), "ec20"); !errors.Is(err, ErrNotQuiesced) {
+		t.Fatalf("BeginSubscriberChange error = %v, want ErrNotQuiesced", err)
+	}
+	manager.mu.Lock()
+	blocked := manager.subscriberChangeLocked("ec20")
+	manager.mu.Unlock()
+	if blocked {
+		t.Fatal("failed subscriber change left the runtime blocked")
+	}
+	if _, err := manager.State("ec20"); err != nil {
+		t.Fatalf("State after rejected subscriber change: %v", err)
+	}
+}
+
 func TestManagerCoalescesReconnectWhileLifecycleOperationIsBusy(t *testing.T) {
 	manager := New(Options{OperationTimeout: time.Second})
 	t.Cleanup(func() { _ = manager.Close(context.Background()) })

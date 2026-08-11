@@ -174,6 +174,43 @@ func TestTelegramExecutesInteractiveUSSDForConfiguredDevice(t *testing.T) {
 	}
 }
 
+func TestTelegramESIMSwitchQuiescesAndInvalidatesVoWiFiFirst(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.UpsertDevice(context.Background(), store.Device{
+		ID: "EC20", Name: "410", VoWiFiEnabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events := []string{}
+	controller := &recordingVoWiFiInvalidator{state: vowifi.State{
+		DeviceID: "EC20", Enabled: true, Active: true, Phase: vowifi.PhaseSMSReady,
+	}, events: &events}
+	devices := &recordingESIMDeviceController{
+		fakeDeviceController: fakeDeviceController{entry: device.Device{ID: "EC20", Discovered: true}},
+		events:               &events,
+		guard:                controller,
+	}
+	bot := &telegramBot{server: &Server{
+		store: database, devices: devices, vowifi: controller, logger: regionTestLogger(),
+	}}
+	result, err := bot.executeESIMSwitch(context.Background(), telegramPendingAction{
+		DeviceID: "EC20", TargetICCID: "8900000000000000001", TargetAID: "A0",
+	})
+	if err != nil {
+		t.Fatalf("executeESIMSwitch: %v", err)
+	}
+	if !strings.Contains(result, "8900000000000000001") {
+		t.Fatalf("switch result = %q", result)
+	}
+	if got := strings.Join(events, ","); got != "quiesce,begin,switch,release" {
+		t.Fatalf("Telegram profile switch order = %q", got)
+	}
+}
+
 func TestTelegramErrorsRedactBotTokens(t *testing.T) {
 	token := "1234567890:abcdefghijklmnopqrstuvwxyzABCDE"
 	err := errors.New(`Post "https://api.telegram.org/bot` + token + `/getUpdates": context canceled`)
@@ -215,6 +252,34 @@ func TestTelegramCallTransportDoesNotFallBackFromUnreadyVoWiFi(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "SIP 403") {
 		t.Fatalf("unready VoWiFi route error = %v", err)
+	}
+}
+
+func TestTelegramExecuteTimedCallRejectsEmergencyBeforeTransport(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.UpsertDevice(context.Background(), store.Device{ID: "EC20", Name: "EC20", VoWiFiEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	controller := &telegramTestCallController{state: vowifi.State{IMSReady: true}}
+	bot := &telegramBot{server: &Server{
+		store:  database,
+		vowifi: controller,
+		devices: fakeDeviceController{entry: device.Device{
+			ID: "EC20", Discovered: true, Snapshot: &device.Snapshot{},
+		}},
+	}}
+	_, err = bot.executeTimedCall(context.Background(), telegramRuntimeConfig{}, telegramPendingAction{
+		DeviceID: "EC20", Argument: "112", Duration: 20 * time.Millisecond,
+	})
+	if err == nil || !strings.Contains(err.Error(), "紧急") {
+		t.Fatalf("emergency Telegram dial error = %v", err)
+	}
+	if controller.dialed != "" {
+		t.Fatalf("emergency number reached Telegram VoWiFi transport: %q", controller.dialed)
 	}
 }
 

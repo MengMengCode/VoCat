@@ -21,6 +21,118 @@ func (manager *Manager) SendSMS(
 	if err != nil {
 		return SMSSendResult{}, err
 	}
+	result := newSMSSendResult(parts)
+	state, err := manager.lookup(id)
+	if err != nil {
+		return result, err
+	}
+	state.opMu.Lock()
+	defer state.opMu.Unlock()
+	if err := manager.validateActive(id, state); err != nil {
+		return result, err
+	}
+	controlDevice, nativeQMI, err := manager.smsQMIControlForState(state)
+	if nativeQMI {
+		result.Transport = SMSTransportCellularQMI
+		if err != nil {
+			result.SubmissionStatus = "transport_unavailable"
+			manager.setResult(id, state, nil, err)
+			return result, err
+		}
+		result, _, err = manager.sendSMSQMILocked(
+			ctx,
+			id,
+			state,
+			controlDevice,
+			parts,
+			result,
+		)
+		return result, err
+	}
+	if err != nil {
+		return result, err
+	}
+	result.Transport = SMSTransportCellularAT
+	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
+	if err != nil {
+		manager.setResult(id, state, nil, err)
+		return result, err
+	}
+	if err := manager.regionBlockError(state); err != nil {
+		result.SubmissionStatus = "region_blocked"
+		manager.setResult(id, state, nil, err)
+		return result, err
+	}
+	return manager.sendSMSLocked(ctx, id, state, client, parts, result)
+}
+
+// SendSMSBoundSubscriber atomically reads the active SIM identity and submits
+// an SMS while holding the device operation lock. This prevents a profile
+// switch or another control operation from changing the SIM between identity
+// attribution and any AT+CMGS command.
+func (manager *Manager) SendSMSBoundSubscriber(
+	ctx context.Context,
+	id string,
+	recipient string,
+	text string,
+) (SMSSendResult, SMSSubscriberIdentity, error) {
+	parts, err := prepareSMSParts(recipient, text)
+	if err != nil {
+		return SMSSendResult{}, SMSSubscriberIdentity{}, err
+	}
+	result := newSMSSendResult(parts)
+	state, err := manager.lookup(id)
+	if err != nil {
+		return result, SMSSubscriberIdentity{}, err
+	}
+	state.opMu.Lock()
+	defer state.opMu.Unlock()
+	if err := manager.validateActive(id, state); err != nil {
+		return result, SMSSubscriberIdentity{}, err
+	}
+	controlDevice, nativeQMI, err := manager.smsQMIControlForState(state)
+	if nativeQMI {
+		result.Transport = SMSTransportCellularQMI
+		if err != nil {
+			result.SubmissionStatus = "transport_unavailable"
+			manager.setResult(id, state, nil, err)
+			return result, SMSSubscriberIdentity{}, err
+		}
+		return manager.sendSMSQMILocked(
+			ctx,
+			id,
+			state,
+			controlDevice,
+			parts,
+			result,
+		)
+	}
+	if err != nil {
+		return result, SMSSubscriberIdentity{}, err
+	}
+	result.Transport = SMSTransportCellularAT
+	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
+	if err != nil {
+		manager.setResult(id, state, nil, err)
+		return result, SMSSubscriberIdentity{}, err
+	}
+	identity, err := manager.readSMSSubscriberIdentityLocked(ctx, client)
+	if err != nil {
+		result.SubmissionStatus = "identity_failed"
+		manager.setResult(id, state, nil, err)
+		return result, identity, err
+	}
+	if reason := RegionBlockReason(identity.IMSI); reason != "" {
+		err = fmt.Errorf("%w: %s", ErrRegionBlocked, reason)
+		result.SubmissionStatus = "region_blocked"
+		manager.setResult(id, state, nil, err)
+		return result, identity, err
+	}
+	result, err = manager.sendSMSLocked(ctx, id, state, client, parts, result)
+	return result, identity, err
+}
+
+func newSMSSendResult(parts []preparedSMS) SMSSendResult {
 	result := SMSSendResult{
 		To:                parts[0].to,
 		Encoding:          parts[0].encoding,
@@ -35,24 +147,62 @@ func (manager *Manager) SendSMS(
 		reference := *parts[0].concatReference
 		result.ConcatReference = &reference
 	}
-	state, err := manager.lookup(id)
+	return result
+}
+
+func (manager *Manager) readSMSSubscriberIdentityLocked(
+	ctx context.Context,
+	client modem.Client,
+) (SMSSubscriberIdentity, error) {
+	identity := SMSSubscriberIdentity{}
+	var lastICCIDErr error
+	for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+ICCID"} {
+		response, err := manager.command(ctx, client, command)
+		if err != nil {
+			lastICCIDErr = err
+			continue
+		}
+		identity.ICCID = parseICCIDIdentifier(
+			response,
+			[]string{"+CCID:", "+QCCID:", "+ICCID:", "ICCID:"},
+			18,
+			22,
+		)
+		if identity.ICCID != "" {
+			break
+		}
+		lastICCIDErr = errors.New("modem response contained no valid ICCID")
+	}
+	if identity.ICCID == "" {
+		if lastICCIDErr == nil {
+			lastICCIDErr = errors.New("modem returned no ICCID")
+		}
+		return identity, fmt.Errorf("%w: read ICCID: %w", ErrSMSSubscriberIdentity, lastICCIDErr)
+	}
+
+	response, err := manager.command(ctx, client, "AT+CIMI")
 	if err != nil {
-		return result, err
+		return identity, fmt.Errorf("%w: read IMSI: %w", ErrSMSSubscriberIdentity, err)
 	}
-	state.opMu.Lock()
-	defer state.opMu.Unlock()
-	if err := manager.validateActive(id, state); err != nil {
-		return result, err
+	identity.IMSI = parseIdentifier(response, []string{"+CIMI:"}, 10, 18)
+	if identity.IMSI == "" {
+		return identity, fmt.Errorf("%w: modem response contained no valid IMSI", ErrSMSSubscriberIdentity)
 	}
-	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
-	if err != nil {
-		manager.setResult(id, state, nil, err)
-		return result, err
-	}
-	if err := manager.regionBlockError(state); err != nil {
-		result.SubmissionStatus = "region_blocked"
-		manager.setResult(id, state, nil, err)
-		return result, err
+	return identity, nil
+}
+
+// sendSMSLocked performs setup and every CMGS part. The caller must hold
+// state.opMu and must complete any subscriber identity checks beforehand.
+func (manager *Manager) sendSMSLocked(
+	ctx context.Context,
+	id string,
+	state *managedDevice,
+	client modem.Client,
+	parts []preparedSMS,
+	result SMSSendResult,
+) (SMSSendResult, error) {
+	if result.Transport == "" {
+		result.Transport = SMSTransportCellularAT
 	}
 	for _, command := range parts[0].setup {
 		if _, err := manager.command(ctx, client, command); err != nil {
@@ -178,16 +328,93 @@ func (manager *Manager) ListSMS(
 	if err := manager.validateActive(id, state); err != nil {
 		return nil, err
 	}
+	controlDevice, nativeQMI, err := manager.smsQMIControlForState(state)
+	if nativeQMI {
+		if err != nil {
+			manager.setResult(id, state, nil, err)
+			return nil, err
+		}
+		scan, scanErr := manager.listSMSQMILocked(ctx, state, controlDevice)
+		manager.setResult(id, state, nil, scanErr)
+		return scan.Messages, scanErr
+	}
+	if err != nil {
+		return nil, err
+	}
 	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
 	if err != nil {
 		manager.setResult(id, state, nil, err)
 		return nil, err
 	}
-	if _, err := manager.command(ctx, client, "AT+CMGF=0"); err != nil {
+	messages, _, err := manager.listSMSLocked(ctx, client)
+	manager.setResult(id, state, nil, err)
+	return messages, err
+}
+
+// ListSMSBoundSubscriber atomically reads the active SIM identity and scans
+// modem SMS storage while holding the same device operation lock. This keeps
+// messages found during a profile switch from being attributed using a stale
+// snapshot belonging to a different subscriber.
+func (manager *Manager) ListSMSBoundSubscriber(
+	ctx context.Context,
+	id string,
+) (SMSSubscriberScan, error) {
+	state, err := manager.lookup(id)
+	if err != nil {
+		return SMSSubscriberScan{}, err
+	}
+	state.opMu.Lock()
+	defer state.opMu.Unlock()
+	if err := manager.validateActive(id, state); err != nil {
+		return SMSSubscriberScan{}, err
+	}
+	controlDevice, nativeQMI, err := manager.smsQMIControlForState(state)
+	if nativeQMI {
+		if err != nil {
+			manager.setResult(id, state, nil, err)
+			return SMSSubscriberScan{Transport: SMSTransportCellularQMI}, err
+		}
+		scan, scanErr := manager.listSMSQMILocked(ctx, state, controlDevice)
+		manager.setResult(id, state, nil, scanErr)
+		return scan, scanErr
+	}
+	if err != nil {
+		return SMSSubscriberScan{}, err
+	}
+	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
+	if err != nil {
 		manager.setResult(id, state, nil, err)
-		return nil, err
+		return SMSSubscriberScan{Transport: SMSTransportCellularAT}, err
+	}
+	identity, err := manager.readSMSSubscriberIdentityLocked(ctx, client)
+	if err != nil {
+		manager.setResult(id, state, nil, err)
+		return SMSSubscriberScan{
+			Identity:  identity,
+			Transport: SMSTransportCellularAT,
+		}, err
+	}
+	messages, storages, err := manager.listSMSLocked(ctx, client)
+	manager.setResult(id, state, nil, err)
+	return SMSSubscriberScan{
+		Messages:  messages,
+		Identity:  identity,
+		Storages:  storages,
+		Transport: SMSTransportCellularAT,
+	}, err
+}
+
+// listSMSLocked scans every supported receive storage. The caller owns the
+// device operation lock and the AT client for the whole scan.
+func (manager *Manager) listSMSLocked(
+	ctx context.Context,
+	client modem.Client,
+) ([]SMSMessage, []string, error) {
+	if _, err := manager.command(ctx, client, "AT+CMGF=0"); err != nil {
+		return nil, nil, err
 	}
 	var messages []SMSMessage
+	var listedStorages []string
 	var lastErr error
 	listed := false
 	for _, storage := range smsListStorages {
@@ -208,17 +435,17 @@ func (manager *Manager) ListSMS(
 			continue
 		}
 		listed = true
+		listedStorages = append(listedStorages, storage)
 		for _, message := range parseCMGL(response) {
 			message.Storage = storage
+			message.Transport = SMSTransportCellularAT
 			messages = append(messages, message)
 		}
 	}
 	if !listed && lastErr != nil {
-		manager.setResult(id, state, nil, lastErr)
-		return nil, lastErr
+		return nil, nil, lastErr
 	}
-	manager.setResult(id, state, nil, nil)
-	return messages, nil
+	return messages, listedStorages, nil
 }
 
 func (manager *Manager) ReadSMS(
@@ -257,6 +484,7 @@ func (manager *Manager) ReadSMS(
 		return SMSMessage{}, err
 	}
 	message, err := parseCMGR(index, response)
+	message.Transport = SMSTransportCellularAT
 	manager.setResult(id, state, nil, err)
 	return message, err
 }

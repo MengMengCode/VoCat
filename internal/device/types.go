@@ -8,19 +8,21 @@ import (
 )
 
 var (
-	ErrNotStarted             = errors.New("device manager is not started")
-	ErrNotFound               = errors.New("device not found")
-	ErrNoATPort               = errors.New("device has no usable AT port")
-	ErrSMSPromptUnsupported   = errors.New("device AT client does not support SMS prompt mode")
-	ErrSMSInvalidRecipient    = errors.New("invalid SMS recipient")
-	ErrSMSEmpty               = errors.New("SMS text is empty")
-	ErrSMSTooLong             = errors.New("SMS exceeds one-message encoding limit")
-	ErrSMSReferenceMissing    = errors.New("modem completed SMS command without a message reference")
-	ErrSMSInvalidMessageIndex = errors.New("invalid SMS message index")
-	ErrDataBackendUnavailable = errors.New("cellular data backend is unavailable")
-	ErrInvalidNetworkAPN      = errors.New("invalid cellular APN")
-	ErrRegionBlocked          = errors.New("sim card home region is not served")
-	ErrUSSDSessionNotFound    = errors.New("ussd session not found or already closed")
+	ErrNotStarted              = errors.New("device manager is not started")
+	ErrNotFound                = errors.New("device not found")
+	ErrNoATPort                = errors.New("device has no usable AT port")
+	ErrSMSPromptUnsupported    = errors.New("device AT client does not support SMS prompt mode")
+	ErrSMSInvalidRecipient     = errors.New("invalid SMS recipient")
+	ErrSMSEmpty                = errors.New("SMS text is empty")
+	ErrSMSTooLong              = errors.New("SMS exceeds one-message encoding limit")
+	ErrSMSReferenceMissing     = errors.New("modem completed SMS command without a message reference")
+	ErrSMSInvalidMessageIndex  = errors.New("invalid SMS message index")
+	ErrSMSSubscriberIdentity   = errors.New("live SMS subscriber identity is unavailable")
+	ErrSMSTransportUnavailable = errors.New("SMS transport is unavailable")
+	ErrDataBackendUnavailable  = errors.New("cellular data backend is unavailable")
+	ErrInvalidNetworkAPN       = errors.New("invalid cellular APN")
+	ErrRegionBlocked           = errors.New("sim card home region is not served")
+	ErrUSSDSessionNotFound     = errors.New("ussd session not found or already closed")
 )
 
 type NetworkRequest struct {
@@ -139,6 +141,14 @@ const (
 	SMSEncodingUnknown  SMSEncoding = "unknown"
 )
 
+const (
+	// Cellular SMS transports name VoCAT's host-side modem backend. In
+	// particular, cellular_qmi does not assert the modem's internal WMS bearer;
+	// existing modem routes may still carry the message over CS or IMS.
+	SMSTransportCellularAT  = "cellular_at"
+	SMSTransportCellularQMI = "cellular_qmi"
+)
+
 type SMSStorageStatus string
 
 const (
@@ -179,6 +189,7 @@ type SMSSubmitTPDU struct {
 type SMSMessage struct {
 	Index                  int              `json:"index"`
 	Storage                string           `json:"storage,omitempty"`
+	Transport              string           `json:"transport,omitempty"`
 	StorageStatus          SMSStorageStatus `json:"storageStatus"`
 	Direction              SMSDirection     `json:"direction"`
 	From                   string           `json:"from,omitempty"`
@@ -212,10 +223,30 @@ type SMSPartResult struct {
 	SubmittedAt      time.Time `json:"submittedAt"`
 }
 
+// SMSSubscriberIdentity identifies the SIM that was active for an atomic
+// cellular SMS submission. Both values are read directly from the modem while
+// the device operation lock is held.
+type SMSSubscriberIdentity struct {
+	ICCID string `json:"iccid"`
+	IMSI  string `json:"imsi"`
+}
+
+// SMSSubscriberScan binds one modem-storage snapshot to the SIM identity that
+// was active for the entire scan. Storages records every successfully listed
+// and fully read area, including empty ones, so callers can establish a safe
+// storage baseline.
+type SMSSubscriberScan struct {
+	Messages  []SMSMessage          `json:"messages"`
+	Identity  SMSSubscriberIdentity `json:"identity"`
+	Storages  []string              `json:"storages"`
+	Transport string                `json:"transport,omitempty"`
+}
+
 // SMSSendResult proves only that the modem accepted the submit request. A
 // +CMGS message reference is not a network delivery receipt.
 type SMSSendResult struct {
 	To                string          `json:"to"`
+	Transport         string          `json:"transport,omitempty"`
 	Encoding          SMSEncoding     `json:"encoding"`
 	MessageReference  int             `json:"messageReference"`
 	ReferenceKnown    bool            `json:"referenceKnown"`

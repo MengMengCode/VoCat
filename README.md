@@ -41,7 +41,7 @@ The backend is written in Go, the interface is built with React and TypeScript, 
 | Radio and network | Registration status, operator, signal metrics, RSRP/RSRQ/SINR, network mode, band, channel, operator scanning, and automatic or manual network selection. |
 | AT and USSD | Interactive AT terminal, command history, raw modem responses, USSD start/continue/cancel flows, and clear modem error reporting. |
 | SMS | Direct cellular and IMS SMS transmission, inbound synchronization, multipart handling, delivery reports, conversation history, unread state, timestamps, and per-message delivery status. |
-| WiFi Calling | IKEv2/ePDG tunnel setup, EAP-AKA authentication, IMS registration, IMS SMS, reconnect controls, status diagnostics, and per-device routing. |
+| WiFi Calling | Engineering implementation of IKEv2/ePDG tunnel setup, EAP-AKA/EAP-AKA' authentication, IMS registration, IMS SMS/calls, reconnect controls, status diagnostics, and per-device routing. Carrier interoperability must be verified separately. |
 | eSIM and eUICC | eUICC discovery, EID and production information, certificate metadata, multi-eUICC inventory, installed profile listing, enable/disable/switch operations, download, rename, and delete operations when supported by the card. |
 | Card policy | ICCID-based WiFi Calling and flight-mode behavior with immediate policy application. |
 | Proxy routing | Upstream SOCKS routing, device bindings, country rules, TCP reachability checks, and UDP Associate checks for WiFi Calling data paths. |
@@ -60,6 +60,65 @@ Vocat targets Qualcomm-based Quectel modules that expose compatible AT, QMI, ser
 - Compatible EG600 and related modules
 
 Available features depend on the module firmware, USB composition, SIM/eSIM capabilities, host drivers, radio network, and carrier configuration.
+
+Snapdragon 410/MSM8916 or an OpenStick form factor alone is not a supported
+configuration claim. That path additionally requires a matching baseband,
+working UIM/QMI control ports, host WWAN drivers, and carrier IMS/VoWiFi
+entitlement. It must be accepted on the exact hardware and SIM combination.
+
+## Capability and acceptance boundaries
+
+Vocat does **not** implement a complete Qualcomm cellular IMS/VoLTE stack. Its
+cellular side establishes packet-data sessions through QMI and sends call-control
+commands such as dial, answer, hang up, and call-list queries to the module over
+AT. Whether such a call uses VoLTE, circuit-switched fallback, or fails is decided
+by the modem firmware, SIM, radio network, and carrier provisioning. Vocat does
+not currently provide its own cellular IMS PDN/registration, dedicated voice
+bearer, QMI IMSA/VOICE control, SRVCC, or LTE-to-WiFi call continuity.
+
+The VoWiFi code is an engineering implementation, not carrier certification or
+proof that an arbitrary Snapdragon 410 device supports WiFi Calling. Do not use
+UI state alone as acceptance evidence. Validate each stage below in order and
+retain modem, packet-capture, and call/media evidence from the target device:
+
+| Stage | Required evidence | Current responsibility |
+| --- | --- | --- |
+| 0. Platform | MSM8916/baseband version, UIM access, QMI/AT ports, host drivers | Hardware image and device integration; verify per unit |
+| 1. LTE data | LTE registration, default data session, address, DNS and routed traffic | Vocat QMI data control plus modem/network |
+| 2. Cellular IMS | Separate IMS connectivity and P-CSCF discovery | Modem/carrier; not implemented as a Vocat cellular IMS stack |
+| 3. VoLTE | IMS registered, MO/MT call, two-way media and emergency-policy checks | Modem/carrier; AT call success alone is insufficient |
+| 4. ePDG discovery | Correct operator ePDG FQDN and reachable DNS result | Vocat plus carrier DNS/provisioning |
+| 5. IKE | Agreed algorithms and validated ePDG certificate/AUTH | Vocat; confirm with an outer-tunnel capture |
+| 6. EAP | The configured EAP-AKA or EAP-AKA' method succeeds using the target UICC | Vocat/UICC/carrier; a challenge alone is not success |
+| 7. CHILD_SA | Inner IP, traffic selectors and reachable P-CSCF | Vocat; verify routes and encrypted traffic |
+| 8. VoWiFi IMS | Registered IMS, MO/MT SMS and calls, two-way media | Vocat/carrier interop; test on every target profile |
+| 9. Continuity | Successful LTE-to-WiFi and WiFi-to-LTE call handover | Not currently implemented |
+
+Emergency calling and carrier-registered emergency-address workflows require
+operator integration and jurisdiction-specific acceptance; Vocat must not be
+treated as a certified emergency-calling solution. Vocat therefore rejects
+emergency-number calls and does not claim to provision an emergency address.
+
+Current implementation limits that matter during acceptance:
+
+- The QMI packet-data backend is IPv4-only. An `IPV4V6` request is explicitly
+  reported as an IPv4 downgrade; an IPv6-only request fails before starting the
+  data session.
+- VoWiFi media supports G.711 PCMA/PCMU, RTCP, and negotiated RFC 4733 DTMF.
+  It does not transcode AMR-NB or AMR-WB, so an AMR-only carrier offer is
+  rejected instead of advertising media that Vocat cannot carry.
+- IMS APN, private/public identities, transport, SMSC, and EAP method are
+  configured per device and are separate from the cellular data APN. Saving
+  these settings requires a Vocat process restart before the in-memory VoWiFi
+  runtime is rebuilt.
+- IKE defaults to MODP2048 with SHA-256. SHA-1 compatibility and MODP1024 are
+  separate per-device switches, both disabled by default; enable only the exact
+  legacy capability required by a verified carrier profile. No PLMN silently
+  enables weak algorithms during an upgrade.
+- If the IMS SMSC field is blank, Vocat first uses the SIM/modem `AT+CSCA?`
+  value. There is no operator-specific global SMSC default; upgrades
+  intentionally do not preserve the former Vodafone-only fallback, so configure
+  the carrier SMSC explicitly when the SIM returns an empty value.
 
 ## Installation
 
@@ -86,6 +145,13 @@ The installer:
 - stores runtime configuration in `/etc/vocat/env`;
 - generates a random initial administrator password on first installation.
 
+It also installs and verifies the external networking tools used at runtime:
+`iproute2`, BusyBox with the `udhcpc` applet, and libqmi's `qmi-network`,
+`qmicli`, and `qmi-proxy`. Debian/Ubuntu installations use the `iproute2`,
+`busybox`, and `libqmi-utils` packages; Alpine installations use `iproute2`,
+`busybox`, and `qmi-utils`. On other distributions, install equivalent packages
+before running the installer.
+
 After installation, open:
 
 ```text
@@ -103,6 +169,15 @@ Download the matching binary and `SHA256SUMS` from GitHub Releases:
 | Linux ARM64 | `vocat-linux-arm64` |
 | Linux AArch64 | `vocat-linux-aarch64` |
 | Linux ARMv7 | `vocat-linux-armv7` |
+
+Install the runtime packages listed above, then confirm the host exposes the
+required helpers before starting Vocat:
+
+```bash
+command -v ip busybox qmi-network qmicli
+busybox udhcpc --help >/dev/null
+command -v qmi-proxy >/dev/null 2>&1 || test -x /usr/libexec/qmi-proxy
+```
 
 Verify and install it:
 
@@ -123,8 +198,38 @@ installer when a managed systemd service and automatic restart are required.
 
 ### Docker
 
-For a Linux host that must discover every attached supported Quectel modem and
-continue seeing USB hot-plug events, run Vocat in hardware-access mode:
+The default Compose file intentionally starts a normal bridged container with
+no host device access. It is suitable for inspecting the UI and configuration,
+but it cannot discover/control modems and is **not** a Snapdragon 410 test or
+deployment:
+
+```bash
+cp .env.example .env
+# Set VOCAT_ADMIN_PASSWORD in .env.
+docker compose up -d
+```
+
+For a trusted Linux modem host, apply the explicit hardware override:
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.hardware.yml \
+  up -d
+```
+
+The hardware override uses the Compose `!reset` tag and requires Docker Compose
+2.24 or newer.
+
+The override switches to host networking, runs as privileged root, and mounts
+the host's `/dev` and `/sys`. This is required for QMI-created
+WWAN interfaces, serial/QMI hot-plug, TUN/XFRM and policy routing. It gives the
+container broad control of the host and should only be used after reviewing
+`docker-compose.hardware.yml`.
+
+The official image contains `iproute2`, BusyBox `udhcpc`, `qmi-network`,
+`qmicli`, and `qmi-proxy`, and verifies them while the image is built. For an
+image-only hardware deployment, the equivalent explicit command is:
 
 ```bash
 docker pull ghcr.io/mengmengcode/vocat:latest
@@ -142,12 +247,9 @@ docker run -d \
   ghcr.io/mengmengcode/vocat:latest
 ```
 
-Open `http://<server-address>:7575` after the container starts. Host networking
-is required so QMI network interfaces remain visible to Vocat, while privileged
-device access is required for serial ports, QMI control nodes, TUN interfaces,
-network configuration, and devices added after the container starts. The
-`/dev` bind mount makes new `ttyUSB*`, `ttyACM*`, and `cdc-wdm*` nodes visible
-without recreating the container.
+Open `http://<server-address>:7575` after the container starts. The `/dev` bind
+mount makes new `ttyUSB*`, `ttyACM*`, and `cdc-wdm*` nodes visible without
+recreating the container.
 
 This mode intentionally gives Vocat broad access to the host's devices and
 network stack. Use it only on a trusted Linux host. The automatic discovery
@@ -277,7 +379,7 @@ internal/modem/             AT session and response handling
 internal/server/            HTTP API, notifications, and embedded web server
 internal/store/             SQLite persistence
 internal/update/            GitHub Release self-updater
-internal/vowifi/            IKE, EAP-AKA, IMS, and WiFi Calling runtime
+internal/vowifi/            IKE, EAP-AKA/EAP-AKA', IMS, and WiFi Calling runtime
 scripts/install.sh          Linux installer and updater
 web/src/                    React and TypeScript frontend
 .github/workflows/          Binary and Docker release automation

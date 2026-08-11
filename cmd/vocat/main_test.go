@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"testing"
 	"time"
 
@@ -253,5 +254,165 @@ func TestVoWiFiRFOffModeForDeviceType(t *testing.T) {
 	}
 	if got := voWiFiRFOffModeForDeviceType(store.DeviceTypePCIeEC20EC25); got != 4 {
 		t.Fatalf("EC20 RF-off mode = %d, want 4", got)
+	}
+}
+
+type fakeStartupRadioManager struct {
+	entry          device.Device
+	refreshResults []startupRefreshResult
+	refreshCalls   int
+	flightCalls    []bool
+}
+
+type startupRefreshResult struct {
+	snapshot device.Snapshot
+	err      error
+}
+
+func (fake *fakeStartupRadioManager) Get(string) (device.Device, error) {
+	return fake.entry, nil
+}
+
+func (fake *fakeStartupRadioManager) List() []device.Device {
+	return []device.Device{fake.entry}
+}
+
+func (fake *fakeStartupRadioManager) ExecuteAT(
+	context.Context,
+	string,
+	string,
+) (modem.Response, error) {
+	return modem.Response{}, errors.New("unexpected AT command")
+}
+
+func (fake *fakeStartupRadioManager) ExecuteSensitiveAT(
+	context.Context,
+	string,
+	string,
+) (modem.Response, error) {
+	return modem.Response{}, errors.New("unexpected sensitive AT command")
+}
+
+func (fake *fakeStartupRadioManager) Refresh(
+	context.Context,
+	string,
+) (device.Snapshot, error) {
+	fake.refreshCalls++
+	if len(fake.refreshResults) == 0 {
+		return device.Snapshot{}, errors.New("unexpected refresh")
+	}
+	result := fake.refreshResults[0]
+	fake.refreshResults = fake.refreshResults[1:]
+	return result.snapshot, result.err
+}
+
+func (fake *fakeStartupRadioManager) SetFlight(
+	_ context.Context,
+	_ string,
+	enabled bool,
+) (device.FlightResult, error) {
+	fake.flightCalls = append(fake.flightCalls, enabled)
+	return device.FlightResult{CurrentMode: 1}, nil
+}
+
+func TestRefreshStartupRadioSnapshotRetries(t *testing.T) {
+	want := device.Snapshot{
+		DeviceID:      "wwan0",
+		OperatingMode: 7,
+		ModeKnown:     true,
+		FlightMode:    true,
+		RadioOff:      true,
+	}
+	fake := &fakeStartupRadioManager{refreshResults: []startupRefreshResult{
+		{err: errors.New("modem is still booting")},
+		{snapshot: want},
+	}}
+
+	got, err := refreshStartupRadioSnapshot(
+		context.Background(), fake, "wwan0", 3, 0,
+	)
+	if err != nil {
+		t.Fatalf("refreshStartupRadioSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("snapshot = %#v, want %#v", got, want)
+	}
+	if fake.refreshCalls != 2 {
+		t.Fatalf("refresh calls = %d, want 2", fake.refreshCalls)
+	}
+}
+
+func TestRestoreDefaultCellularRadiosRefreshesMissingSnapshot(t *testing.T) {
+	database := newRegionTestStore(t)
+	if err := database.UpsertDevice(context.Background(), store.Device{
+		ID:             "wwan0",
+		Name:           "Snapdragon 410",
+		DeviceType:     store.DeviceTypeWiFi410,
+		ControlDevice:  "/dev/wwan0qmi0",
+		VoWiFiEnabled:  false,
+		NetworkEnabled: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeStartupRadioManager{
+		entry: device.Device{ID: "wwan0", Discovered: true},
+		refreshResults: []startupRefreshResult{{snapshot: device.Snapshot{
+			DeviceID:      "wwan0",
+			ICCID:         "89012601234567890123",
+			OperatingMode: 7,
+			ModeKnown:     true,
+			FlightMode:    true,
+			RadioOff:      true,
+		}}},
+	}
+
+	restoreDefaultCellularRadios(
+		context.Background(), regionTestLogger(), database, fake,
+	)
+	if fake.refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", fake.refreshCalls)
+	}
+	if !reflect.DeepEqual(fake.flightCalls, []bool{false}) {
+		t.Fatalf("flight calls = %#v, want disable flight", fake.flightCalls)
+	}
+}
+
+func TestVoWiFiCarrierConfigsKeepCellularAndIMSProfilesIndependent(t *testing.T) {
+	deviceConfig := store.Device{
+		APN:                         "internet",
+		IMSAPN:                      "ims.operator.example",
+		IMSPrivateIdentity:          "impi@ims.operator.example",
+		IMSPublicIdentity:           "sip:+12025550123@ims.operator.example",
+		IMSSMSCenter:                "+12025550100",
+		IMSTransport:                "udp",
+		IMSAllowIMSIDerivedIdentity: false,
+		VoWiFiEAPMethod:             "aka-prime",
+		VoWiFiAllowSHA1:             true,
+		VoWiFiUseMODP1024:           true,
+	}
+	tunnel, sip := voWiFiCarrierConfigs(deviceConfig)
+	if tunnel.APN != "ims.operator.example" || tunnel.EAPMethod != "aka-prime" ||
+		!tunnel.AllowSHA1 || !tunnel.UseMODP1024 {
+		t.Fatalf("IKE config = %#v", tunnel)
+	}
+	if sip.Transport != "udp" || sip.PrivateIdentity != deviceConfig.IMSPrivateIdentity ||
+		sip.PublicIdentity != deviceConfig.IMSPublicIdentity || sip.SMSCenter != deviceConfig.IMSSMSCenter ||
+		!sip.RequireExplicitIdentities {
+		t.Fatalf("IMS config = %#v", sip)
+	}
+	if deviceConfig.APN != "internet" {
+		t.Fatalf("cellular APN was mutated to %q", deviceConfig.APN)
+	}
+}
+
+func TestVoWiFiCarrierConfigsUseCompatibleDefaults(t *testing.T) {
+	tunnel, sip := voWiFiCarrierConfigs(store.Device{
+		IMSAllowIMSIDerivedIdentity: true,
+	})
+	if tunnel.APN != "ims" || tunnel.EAPMethod != "aka" || tunnel.AllowSHA1 || tunnel.UseMODP1024 {
+		t.Fatalf("default IKE config = %#v", tunnel)
+	}
+	if sip.Transport != "tcp" || sip.SMSCenter != "" || sip.RequireExplicitIdentities {
+		t.Fatalf("default IMS config = %#v", sip)
 	}
 }

@@ -572,6 +572,44 @@ func TestEC20AdapterNeverStartsCellularDataByDefault(t *testing.T) {
 	transcript.assertDone()
 }
 
+func TestEC20AdapterReadSMSCenterPreservesInternationalTON(t *testing.T) {
+	t.Parallel()
+	transcript := &ec20Transcript{t: t, steps: []ec20TranscriptStep{
+		{command: "AT+CSCA?", lines: []string{`+CSCA: "447785016005",145`}},
+	}}
+	adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := adapter.ReadSMSCenter(context.Background(), "wifi-410")
+	if err != nil {
+		t.Fatalf("ReadSMSCenter: %v", err)
+	}
+	if got != "+447785016005" {
+		t.Fatalf("SMSC = %q, want international +447785016005", got)
+	}
+	transcript.assertDone()
+}
+
+func TestEC20AdapterReadSMSCenterKeepsNationalTON(t *testing.T) {
+	t.Parallel()
+	transcript := &ec20Transcript{t: t, steps: []ec20TranscriptStep{
+		{command: "AT+CSCA?", lines: []string{`+CSCA: "12345",129`}},
+	}}
+	adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := adapter.ReadSMSCenter(context.Background(), "ec20")
+	if err != nil {
+		t.Fatalf("ReadSMSCenter: %v", err)
+	}
+	if got != "12345" {
+		t.Fatalf("SMSC = %q, want national 12345", got)
+	}
+	transcript.assertDone()
+}
+
 func identityTranscriptSteps(imsi string) []ec20TranscriptStep {
 	return append(
 		identityTranscriptStepsWithoutEFAD(imsi),

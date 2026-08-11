@@ -55,13 +55,60 @@ func TestShouldDeferModemSMSSync(t *testing.T) {
 			state: vowifi.State{Phase: vowifi.PhaseIdle},
 		},
 		{
+			name:  "stopping while disabled",
+			state: vowifi.State{Enabled: false, Phase: vowifi.PhaseStopping},
+			want:  true,
+		},
+		{
+			name:  "unknown stopping state",
+			state: vowifi.State{Enabled: false, Phase: vowifi.PhaseStopping},
+			err:   context.Canceled,
+		},
+		{
+			name: "idle after radio restore failure",
+			state: vowifi.State{
+				Enabled: false, Phase: vowifi.PhaseIdle,
+				CleanupErrors: []string{"close IMS: timeout", "restore radio: operation failed"},
+			},
+			want: true,
+		},
+		{
+			name: "failed after radio restore failure",
+			state: vowifi.State{
+				Enabled: true, Phase: vowifi.PhaseFailed,
+				CleanupErrors: []string{"restore radio: modem rejected request"},
+			},
+			want: true,
+		},
+		{
+			name: "idle after non-radio cleanup failure",
+			state: vowifi.State{
+				Enabled: false, Phase: vowifi.PhaseIdle,
+				CleanupErrors: []string{"close IMS: timeout", "close tunnel: timeout"},
+			},
+		},
+		{
+			name: "failed after non-radio cleanup failure",
+			state: vowifi.State{
+				Enabled: true, Phase: vowifi.PhaseFailed,
+				CleanupErrors: []string{"close IMS: timeout"},
+			},
+		},
+		{
 			name:  "vowifi SIM setup",
 			state: vowifi.State{Enabled: true, Phase: vowifi.PhaseSIMReady},
 			want:  true,
 		},
 		{
-			name:  "vowifi IMS registration",
-			state: vowifi.State{Enabled: true, Phase: vowifi.PhaseIMSReady},
+			name: "stable IMS without optional SMS capability",
+			state: vowifi.State{
+				Enabled: true, Phase: vowifi.PhaseIMSReady, IMSReady: true,
+				LastReason: "ims_registered_sms_unavailable",
+			},
+		},
+		{
+			name:  "transient IMS before SMS negotiation",
+			state: vowifi.State{Enabled: true, Phase: vowifi.PhaseIMSReady, IMSReady: true},
 			want:  true,
 		},
 		{
@@ -77,11 +124,91 @@ func TestShouldDeferModemSMSSync(t *testing.T) {
 			state: vowifi.State{Enabled: true, Phase: vowifi.PhaseSIMReady},
 			err:   context.Canceled,
 		},
+		{
+			name: "subscriber change barrier",
+			err:  vowifiruntime.ErrSubscriberChangeInProgress,
+			want: true,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if got := shouldDeferModemSMSSync(test.state, test.err); got != test.want {
 				t.Fatalf("shouldDeferModemSMSSync() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestShouldDeferNative410SMSCatchUp(t *testing.T) {
+	tests := []struct {
+		name       string
+		deviceType string
+		liveID     string
+		state      vowifi.State
+		err        error
+		want       bool
+	}{
+		{
+			name:       "native 410 live IMS SMS owns delivery",
+			deviceType: store.DeviceTypeWiFi410,
+			liveID:     "wwan0",
+			state:      vowifi.State{Enabled: true, Phase: vowifi.PhaseSMSReady, SMSReady: true},
+			want:       true,
+		},
+		{
+			name:       "native 410 stable IMS without SMS keeps RF off",
+			deviceType: store.DeviceTypeWiFi410,
+			liveID:     "wwan0",
+			state: vowifi.State{
+				Enabled: true, Phase: vowifi.PhaseIMSReady,
+				LastReason: "ims_registered_sms_unavailable",
+			},
+			want: true,
+		},
+		{
+			name:       "native 410 failure restored radio",
+			deviceType: store.DeviceTypeWiFi410,
+			liveID:     "wwan0",
+			state:      vowifi.State{Enabled: true, Phase: vowifi.PhaseFailed},
+		},
+		{
+			name:       "EC20 keeps stable AT catch-up",
+			deviceType: store.DeviceTypePCIeEC20EC25,
+			liveID:     "0125:ec20",
+			state:      vowifi.State{Enabled: true, Phase: vowifi.PhaseSMSReady, SMSReady: true},
+		},
+		{
+			name:       "disabled native 410 uses cellular WMS",
+			deviceType: store.DeviceTypeWiFi410,
+			liveID:     "wwan0",
+			state:      vowifi.State{Phase: vowifi.PhaseIdle},
+		},
+		{
+			name:       "unknown runtime does not assume RF ownership",
+			deviceType: store.DeviceTypeWiFi410,
+			liveID:     "wwan0",
+			state:      vowifi.State{Enabled: true, Phase: vowifi.PhaseSMSReady},
+			err:        context.Canceled,
+		},
+		{
+			name:       "live native WWAN overrides stale USB type",
+			deviceType: store.DeviceTypePCIeEC20EC25,
+			liveID:     "wwan0",
+			state:      vowifi.State{Enabled: true, Phase: vowifi.PhaseSMSReady, SMSReady: true},
+			want:       true,
+		},
+		{
+			name:       "live USB backend overrides stale 410 type",
+			deviceType: store.DeviceTypeWiFi410,
+			liveID:     "0125:ec20",
+			state:      vowifi.State{Enabled: true, Phase: vowifi.PhaseSMSReady, SMSReady: true},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := store.Device{DeviceType: test.deviceType}
+			if got := shouldDeferNative410SMSCatchUp(config, test.liveID, test.state, test.err); got != test.want {
+				t.Fatalf("shouldDeferNative410SMSCatchUp() = %v, want %v", got, test.want)
 			}
 		})
 	}

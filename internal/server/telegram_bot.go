@@ -534,6 +534,10 @@ func (bot *telegramBot) confirmSMS(ctx context.Context, config telegramRuntimeCo
 }
 
 func (bot *telegramBot) confirmCall(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID, number string, duration time.Duration) {
+	if isEmergencyDialNumber(number) {
+		bot.sendText(ctx, config, chatID, "无法拨号：VoCat 不支持运营商紧急注册、定位与紧急承载；请直接使用已开通紧急呼叫能力的手机联系当地紧急服务。", nil)
+		return
+	}
 	if !validTelegramDialNumber(number) {
 		bot.sendText(ctx, config, chatID, "拨号号码无效，只允许一个可选的前导 + 和 3–20 位数字。", nil)
 		return
@@ -632,6 +636,14 @@ func (bot *telegramBot) executeESIMSwitch(ctx context.Context, action telegramPe
 	}
 	operationContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	if err := bot.server.quiesceVoWiFiForESIM(operationContext, action.DeviceID); err != nil {
+		return "", err
+	}
+	releaseSubscriberChange, err := bot.server.beginVoWiFiSubscriberChange(operationContext, action.DeviceID)
+	if err != nil {
+		return "", err
+	}
+	defer releaseSubscriberChange()
 	if err := bot.server.devices.ESIMSwitchProfile(operationContext, physicalID, action.TargetICCID, action.TargetAID); err != nil {
 		return "", err
 	}
@@ -639,6 +651,11 @@ func (bot *telegramBot) executeESIMSwitch(ctx context.Context, action telegramPe
 }
 
 func (bot *telegramBot) executeTimedCall(ctx context.Context, config telegramRuntimeConfig, action telegramPendingAction) (string, error) {
+	// Recheck at execution time so confirmations created by an older process or
+	// injected internally cannot bypass the command-entry guard.
+	if isEmergencyDialNumber(action.Argument) {
+		return "", errors.New("紧急号码不能通过 VoCat 的普通蜂窝或 VoWiFi 拨号路径呼叫")
+	}
 	stored, entry, physicalID, err := bot.device(action.DeviceID)
 	if err != nil {
 		return "", err

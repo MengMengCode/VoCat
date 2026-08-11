@@ -50,6 +50,7 @@ var (
 	ErrNotRunning                = errors.New("vowifi: not running")
 	ErrRetryRequiresFailure      = errors.New("vowifi: retry requires failed state")
 	ErrInvalidIdentity           = errors.New("vowifi: invalid SIM identity")
+	ErrSIMIdentityChanged        = errors.New("vowifi: SIM identity changed while the session was active")
 	ErrTunnelNotEstablished      = errors.New("vowifi: tunnel is not established")
 	ErrIMSNotRegistered          = errors.New("vowifi: IMS is not registered")
 	ErrSMSNotReady               = errors.New("vowifi: SMS over IMS is not ready")
@@ -391,6 +392,12 @@ type CallController interface {
 	HangupCall(context.Context, string) error
 }
 
+// CallDTMFController is an optional RFC 4733 capability. It stays separate
+// from CallController so signalling-only providers do not advertise DTMF.
+type CallDTMFController interface {
+	SendDTMF(context.Context, string, byte, time.Duration) error
+}
+
 // CallMedia is a narrow, codec-independent bridge between an IMS RTP stream
 // and a trusted local extension. Samples are signed 16-bit mono PCM at 8 kHz.
 type CallMedia interface {
@@ -425,6 +432,10 @@ type Options struct {
 	AllowMissingResponderAUTH bool
 	AllowIMSWithoutSMS        bool
 	CleanupTimeout            time.Duration
+	// IdentityCheckInterval enables a read-only live ICCID/IMSI check while an
+	// IMS session is active. A detected SIM/profile change tears down the old
+	// subscriber session and revokes SMS readiness instead of auto-retrying it.
+	IdentityCheckInterval time.Duration
 }
 
 func (options Options) validate() error {
@@ -433,6 +444,9 @@ func (options Options) validate() error {
 	}
 	if options.CleanupTimeout < 0 {
 		return errors.New("vowifi: cleanup timeout must not be negative")
+	}
+	if options.IdentityCheckInterval < 0 {
+		return errors.New("vowifi: identity check interval must not be negative")
 	}
 	return nil
 }

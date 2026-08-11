@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,109 @@ func decodeData(t *testing.T, recorder *httptest.ResponseRecorder) map[string]an
 		t.Fatalf("decode response: %v (body=%s)", err, recorder.Body.String())
 	}
 	return envelope.Data
+}
+
+type recordingVoWiFiInvalidator struct {
+	mu            sync.Mutex
+	state         vowifi.State
+	stateErr      error
+	enabled       []bool
+	invalidated   []string
+	invalidateErr error
+	events        *[]string
+	guardHeld     bool
+}
+
+func (controller *recordingVoWiFiInvalidator) State(string) (vowifi.State, error) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	return controller.state, controller.stateErr
+}
+
+func (controller *recordingVoWiFiInvalidator) RequestEnabled(_ string, enabled bool) (vowifi.State, error) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.enabled = append(controller.enabled, enabled)
+	if controller.events != nil {
+		*controller.events = append(*controller.events, "quiesce")
+	}
+	if !enabled && controller.stateErr == nil {
+		controller.state.Enabled = false
+		controller.state.Active = false
+		controller.state.Phase = vowifi.PhaseIdle
+	}
+	return controller.state, controller.stateErr
+}
+
+func (controller *recordingVoWiFiInvalidator) RequestReconnect(string) (vowifi.State, error) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	return controller.state, controller.stateErr
+}
+
+func (controller *recordingVoWiFiInvalidator) BeginSubscriberChange(
+	_ context.Context,
+	deviceID string,
+) (func(), error) {
+	controller.mu.Lock()
+	controller.invalidated = append(controller.invalidated, deviceID)
+	if controller.events != nil {
+		*controller.events = append(*controller.events, "begin")
+	}
+	if controller.invalidateErr != nil {
+		err := controller.invalidateErr
+		controller.mu.Unlock()
+		return nil, err
+	}
+	controller.guardHeld = true
+	controller.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			controller.mu.Lock()
+			controller.guardHeld = false
+			if controller.events != nil {
+				*controller.events = append(*controller.events, "release")
+			}
+			controller.mu.Unlock()
+		})
+	}, nil
+}
+
+type recordingESIMDeviceController struct {
+	fakeDeviceController
+	events *[]string
+	guard  *recordingVoWiFiInvalidator
+}
+
+func (controller *recordingESIMDeviceController) ESIMSwitchProfile(context.Context, string, string, string) error {
+	if controller.guard != nil {
+		controller.guard.mu.Lock()
+		held := controller.guard.guardHeld
+		controller.guard.mu.Unlock()
+		if !held {
+			return errors.New("subscriber-change guard was not held during switch")
+		}
+	}
+	if controller.events != nil {
+		*controller.events = append(*controller.events, "switch")
+	}
+	return nil
+}
+
+func (controller *recordingESIMDeviceController) ESIMDisableProfile(context.Context, string, string, string) error {
+	if controller.guard != nil {
+		controller.guard.mu.Lock()
+		held := controller.guard.guardHeld
+		controller.guard.mu.Unlock()
+		if !held {
+			return errors.New("subscriber-change guard was not held during disable")
+		}
+	}
+	if controller.events != nil {
+		*controller.events = append(*controller.events, "disable")
+	}
+	return nil
 }
 
 func TestAttachSingleEUICCIdentityFillsProfileGroupMetadataKey(t *testing.T) {
@@ -311,17 +415,18 @@ func TestEsimSwitchStopsVoWiFiAndPersistsDisabledPolicy(t *testing.T) {
 	if err := database.UpsertDevice(context.Background(), config); err != nil {
 		t.Fatal(err)
 	}
-	controller := &fakeVoWiFiController{state: vowifi.State{
+	events := []string{}
+	controller := &recordingVoWiFiInvalidator{state: vowifi.State{
 		DeviceID: "dev1",
 		Enabled:  true,
 		Active:   true,
 		Phase:    vowifi.PhaseAccessReady,
-	}}
+	}, events: &events}
 	server := &Server{
 		store:               database,
 		logger:              regionTestLogger(),
 		maxRequestBodyBytes: 4096,
-		devices:             fakeDeviceController{},
+		devices:             &recordingESIMDeviceController{events: &events, guard: controller},
 		vowifi:              controller,
 	}
 	request := httptest.NewRequest(
@@ -338,12 +443,145 @@ func TestEsimSwitchStopsVoWiFiAndPersistsDisabledPolicy(t *testing.T) {
 	if len(controller.enabled) != 1 || controller.enabled[0] {
 		t.Fatalf("VoWiFi requests = %v, want one disable", controller.enabled)
 	}
+	if len(controller.invalidated) != 1 || controller.invalidated[0] != "dev1" {
+		t.Fatalf("invalidated runtimes = %v", controller.invalidated)
+	}
+	if got := strings.Join(events, ","); got != "quiesce,begin,switch,release" {
+		t.Fatalf("profile switch order = %q", got)
+	}
 	stored, err := database.Device(context.Background(), "dev1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stored.VoWiFiEnabled {
 		t.Fatal("VoWiFi device policy remained enabled after profile switch")
+	}
+}
+
+func TestEsimSwitchFailsClosedWithoutSubscriberGuardCapability(t *testing.T) {
+	events := []string{}
+	server := &Server{
+		logger:              regionTestLogger(),
+		maxRequestBodyBytes: 4096,
+		devices:             &recordingESIMDeviceController{events: &events},
+		vowifi: &fakeVoWiFiController{state: vowifi.State{
+			DeviceID: "dev1", Phase: vowifi.PhaseIdle,
+		}},
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/esim/actions/switch",
+		strings.NewReader(`{"iccid":"8900000000000000001"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handleESIM(response, request, []string{"actions", "switch"}, "dev1", "dev1", true)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if len(events) != 0 {
+		t.Fatalf("physical switch ran without subscriber guard: %v", events)
+	}
+}
+
+func TestEsimDisableHoldsSubscriberGuardAndClearsWriteDeadline(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.UpsertDevice(context.Background(), store.Device{
+		ID: "dev1", Name: "410", VoWiFiEnabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events := []string{}
+	controller := &recordingVoWiFiInvalidator{state: vowifi.State{
+		DeviceID: "dev1", Enabled: true, Active: true, Phase: vowifi.PhaseSMSReady,
+	}, events: &events}
+	server := &Server{
+		store: database, logger: regionTestLogger(), maxRequestBodyBytes: 4096,
+		devices: &recordingESIMDeviceController{events: &events, guard: controller}, vowifi: controller,
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/esim/actions/disable",
+		strings.NewReader(`{"iccid":"8900000000000000001","aid_hex":"A0"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := &recordingDeadlineWriter{ResponseRecorder: httptest.NewRecorder()}
+	server.handleESIM(response, request, []string{"actions", "disable"}, "dev1", "dev1", true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if got := strings.Join(events, ","); got != "quiesce,begin,disable,release" {
+		t.Fatalf("profile disable order = %q", got)
+	}
+	if len(response.deadlines) != 1 || !response.deadlines[0].IsZero() {
+		t.Fatalf("write deadlines = %#v, want one cleared deadline", response.deadlines)
+	}
+}
+
+func TestDeleteDeviceKeepsConfigWhenSubscriberGuardFailsAndClearsWriteDeadline(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.UpsertDevice(context.Background(), store.Device{
+		ID: "dev1", Name: "410", VoWiFiEnabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller := &recordingVoWiFiInvalidator{
+		state:         vowifi.State{DeviceID: "dev1", Enabled: true, Active: true, Phase: vowifi.PhaseSMSReady},
+		invalidateErr: errors.New("close failed"),
+	}
+	server := &Server{store: database, logger: regionTestLogger(), vowifi: controller}
+	request := httptest.NewRequest(http.MethodDelete, "/api/devices/dev1", nil)
+	response := &recordingDeadlineWriter{ResponseRecorder: httptest.NewRecorder()}
+	server.handleDevicePath(response, request, "dev1", nil)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if _, err := database.Device(context.Background(), "dev1"); err != nil {
+		t.Fatalf("device config was deleted after invalidation failure: %v", err)
+	}
+	if len(response.deadlines) != 1 || !response.deadlines[0].IsZero() {
+		t.Fatalf("write deadlines = %#v, want one cleared deadline", response.deadlines)
+	}
+}
+
+func TestDeleteDeviceHoldsSubscriberGuardThroughDeletion(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.UpsertDevice(context.Background(), store.Device{
+		ID: "dev1", Name: "410", VoWiFiEnabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events := []string{}
+	controller := &recordingVoWiFiInvalidator{
+		state: vowifi.State{
+			DeviceID: "dev1", Enabled: true, Active: true, Phase: vowifi.PhaseSMSReady,
+		},
+		events: &events,
+	}
+	server := &Server{store: database, logger: regionTestLogger(), vowifi: controller}
+	request := httptest.NewRequest(http.MethodDelete, "/api/devices/dev1", nil)
+	response := httptest.NewRecorder()
+	server.handleDevicePath(response, request, "dev1", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if got := strings.Join(events, ","); got != "quiesce,begin,release" {
+		t.Fatalf("device deletion guard order = %q", got)
+	}
+	if _, err := database.Device(context.Background(), "dev1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("Device after DELETE error = %v, want store.ErrNotFound", err)
 	}
 }
 
@@ -454,7 +692,7 @@ func TestHandleUpdateApplyInstallsFromTrustedRepository(t *testing.T) {
 	}
 }
 
-func TestE911WebsheetFlow(t *testing.T) {
+func TestE911WebsheetProvisioningFailsClosed(t *testing.T) {
 	database, err := store.Open(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -467,54 +705,29 @@ func TestE911WebsheetFlow(t *testing.T) {
 		maxRequestBodyBytes: 4096,
 	}
 
-	// 1. Create the websheet.
 	createRec := httptest.NewRecorder()
 	server.handleE911Websheet(createRec, httptest.NewRequest(http.MethodPost, "/e911", nil), store.Device{ID: "dev1"})
-	if createRec.Code != http.StatusOK {
-		t.Fatalf("create status = %d, body=%s", createRec.Code, createRec.Body.String())
+	if createRec.Code != http.StatusNotImplemented {
+		t.Fatalf("create status = %d, want 501; body=%s", createRec.Code, createRec.Body.String())
 	}
-	createData := decodeData(t, createRec)
-	embedURL, _ := createData["embed_url"].(string)
-	if embedURL == "" || !strings.HasPrefix(embedURL, "/websheets/") {
-		t.Fatalf("embed_url = %v", createData["embed_url"])
+	var response errorEnvelope
+	if err := json.NewDecoder(createRec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode unsupported response: %v", err)
 	}
-
-	// 2. The form is served for a valid token.
-	formRec := httptest.NewRecorder()
-	server.handleWebsheet(formRec, httptest.NewRequest(http.MethodGet, embedURL, nil))
-	if formRec.Code != http.StatusOK || !strings.Contains(formRec.Body.String(), "E911") {
-		t.Fatalf("form status = %d", formRec.Code)
+	if response.Error.Code != "e911_provisioning_unavailable" {
+		t.Fatalf("error code = %q", response.Error.Code)
 	}
-
-	// 3. The callback stores the address, and done completes the session.
-	callbackURL := strings.Replace(embedURL, "?", "/callback?", 1)
-	callbackReq := httptest.NewRequest(http.MethodPost, callbackURL, strings.NewReader(`{"street":"1 Main St","city":"Springfield","country":"US"}`))
-	callbackReq.Header.Set("Content-Type", "application/json")
-	callbackRec := httptest.NewRecorder()
-	server.handleWebsheet(callbackRec, callbackReq)
-	if callbackRec.Code != http.StatusOK {
-		t.Fatalf("callback status = %d, body=%s", callbackRec.Code, callbackRec.Body.String())
-	}
-	stored, err := database.AppSetting(context.Background(), "e911_address:dev1")
-	if err != nil || !strings.Contains(string(stored.Value), "Springfield") {
-		t.Fatalf("e911 address not persisted: %v %v", stored, err)
-	}
-
-	doneURL := strings.Replace(embedURL, "?", "/done?", 1)
-	doneRec := httptest.NewRecorder()
-	server.handleWebsheet(doneRec, httptest.NewRequest(http.MethodPost, doneURL, nil))
-	if doneRec.Code != http.StatusOK {
-		t.Fatalf("done status = %d", doneRec.Code)
+	if _, err := database.AppSetting(context.Background(), "e911_address:dev1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unsupported provisioning must not persist an address, got %v", err)
 	}
 }
 
-func TestE911WebsheetRejectsBadToken(t *testing.T) {
+func TestLegacyE911WebsheetPathsFailClosed(t *testing.T) {
 	server := &Server{logger: regionTestLogger(), websheets: newWebsheetManager()}
-	session := server.websheets.create("dev1")
 	recorder := httptest.NewRecorder()
-	server.handleWebsheet(recorder, httptest.NewRequest(http.MethodGet, "/websheets/"+session.id+"?token=wrong", nil))
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("bad token status = %d, want 403", recorder.Code)
+	server.handleWebsheet(recorder, httptest.NewRequest(http.MethodGet, "/websheets/legacy?token=old", nil))
+	if recorder.Code != http.StatusNotImplemented {
+		t.Fatalf("legacy websheet status = %d, want 501", recorder.Code)
 	}
 }
 

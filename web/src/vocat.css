@@ -489,8 +489,3 @@ html.dark .glass-modal {
   font-size: 1.15rem; font-weight: 700; box-shadow: 0 10px 22px rgba(14, 165, 233, 0.2);
 }
 .device-header-brand-svg { width: 60%; height: 60%; fill: currentColor; }
-
-.websheet-frame-shell { height: min(680px, 78vh); }
-@media (max-width: 640px) {
-  .websheet-frame-shell { height: min(620px, calc(100vh - 140px)); }
-}

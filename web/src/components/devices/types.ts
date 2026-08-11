@@ -26,7 +26,6 @@ export interface DeviceDetail extends Omit<DeviceOverview, "modem" | "traffic"> 
   modem: DeviceModem;
   localPhone?: string;
   publicIpv6?: string;
-  e911SetupAvailable?: boolean;
   activeEsimProfileName?: string;
   usbPath?: string;
   traffic?: Record<string, string>;

@@ -302,6 +302,56 @@ func (session *productionQMIUIMSession) SendAPDU(
 	return session.uim.SendAPDU(ctx, slot, channel, apdu)
 }
 
+// GetSMSCAddress reads the modem's stored service-centre address over QMI WMS.
+// The WMS service is allocated only when SMS over IMS asks for the address, so
+// an AKA session never claims a second QMI client ID on the 410's control node.
+func (session *productionQMIUIMSession) GetSMSCAddress(
+	ctx context.Context,
+) (string, error) {
+	if session == nil || session.client == nil {
+		return "", ErrQMISMSCUnsupported
+	}
+	wms, err := qmi.NewWMSServiceWithContext(ctx, session.client)
+	if err != nil {
+		return "", err
+	}
+	defer wms.Close()
+	return wms.GetSMSCAddress(ctx)
+}
+
+// ReadTransparent reads a transparent elementary file from the provisioned
+// USIM. It is read-only and answers on the 410 in the RF-off state that a
+// VoWiFi session imposes.
+func (session *productionQMIUIMSession) ReadTransparent(
+	ctx context.Context,
+	fileID uint16,
+	path []byte,
+) ([]byte, error) {
+	if session == nil || session.uim == nil {
+		return nil, ErrQMIUIMFileUnsupported
+	}
+	return session.uim.ReadTransparent(ctx, fileID, path)
+}
+
+// ReadSMSParameterRecord returns the first EF_SMSP record. EF_SMSP is a linear
+// fixed file: only record 1 is read because the SIM's first parameter set is
+// the one the modem itself uses for submission.
+func (session *productionQMIUIMSession) ReadSMSParameterRecord(
+	ctx context.Context,
+) ([]byte, error) {
+	if session == nil || session.uim == nil {
+		return nil, ErrQMIUIMFileUnsupported
+	}
+	record, err := session.uim.ReadRecord(ctx, efSMSPFileID, adfUSIMPath, 1, 0)
+	if err != nil {
+		return nil, err
+	}
+	if record == nil {
+		return nil, errors.New("vocat: QMI-UIM returned no EF_SMSP record")
+	}
+	return record.Data, nil
+}
+
 func (session *productionQMIUIMSession) Close() error {
 	if session == nil {
 		return nil

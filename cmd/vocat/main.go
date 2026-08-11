@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -342,16 +343,65 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	return nil
 }
 
-// restoreDefaultCellularRadios repairs an interrupted VoWiFi teardown. CFUN=4
+type startupRadioManager interface {
+	integration.ATDeviceController
+	Refresh(context.Context, string) (device.Snapshot, error)
+	SetFlight(context.Context, string, bool) (device.FlightResult, error)
+}
+
+func refreshStartupRadioSnapshot(
+	ctx context.Context,
+	manager interface {
+		Refresh(context.Context, string) (device.Snapshot, error)
+	},
+	deviceID string,
+	attempts int,
+	retryDelay time.Duration,
+) (device.Snapshot, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		snapshot, err := manager.Refresh(ctx, deviceID)
+		if err == nil {
+			return snapshot, nil
+		}
+		lastErr = err
+		if attempt+1 == attempts {
+			break
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return device.Snapshot{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return device.Snapshot{}, fmt.Errorf(
+		"refresh startup radio snapshot after %d attempt(s): %w",
+		attempts,
+		lastErr,
+	)
+}
+
+// restoreDefaultCellularRadios repairs an interrupted VoWiFi teardown. RF-off
 // survives process restarts, while the in-memory radio checkpoint does not. If
 // VoWiFi is disabled and the current SIM has no explicit airplane policy, the
-// automatic/default policy is cellular service and the modem must return to
-// CFUN=1.
+// automatic/default policy is cellular service and the modem must return
+// online. Native 410 devices reach that state through Manager.SetFlight's QMI
+// DMS path rather than unsupported AT+CFUN=1.
 func restoreDefaultCellularRadios(
 	ctx context.Context,
 	logger *slog.Logger,
 	database *store.Store,
-	manager *device.Manager,
+	manager startupRadioManager,
 ) {
 	configs, err := database.ListDevices(ctx)
 	if err != nil {
@@ -364,10 +414,27 @@ func restoreDefaultCellularRadios(
 			continue
 		}
 		entry, err := mapper.Get(config.ID)
-		if err != nil || entry.Snapshot == nil || !entry.Snapshot.FlightMode {
+		if err != nil {
+			logger.Warn("startup cellular recovery: resolve device", "device_id", config.ID, "error", err)
 			continue
 		}
-		iccid := strings.TrimSpace(entry.Snapshot.ICCID)
+		snapshot := entry.Snapshot
+		if snapshot == nil || !snapshot.ModeKnown {
+			refreshContext, cancel := context.WithTimeout(ctx, 45*time.Second)
+			refreshed, refreshErr := refreshStartupRadioSnapshot(
+				refreshContext, manager, entry.ID, 3, 250*time.Millisecond,
+			)
+			cancel()
+			if refreshErr != nil {
+				logger.Warn("startup cellular recovery: refresh device", "device_id", config.ID, "error", refreshErr)
+				continue
+			}
+			snapshot = &refreshed
+		}
+		if !snapshot.FlightMode {
+			continue
+		}
+		iccid := strings.TrimSpace(snapshot.ICCID)
 		if iccid != "" {
 			policy, policyErr := database.CardPolicy(ctx, iccid)
 			switch {
@@ -494,6 +561,7 @@ func configureVoWiFiRuntime(
 		Store:   database,
 		Devices: deviceManager,
 	}
+	homePLMN := vowifi.NewQMIUIMHomePLMNReader()
 	adapter, err := vowifi.NewEC20Adapter(mapper, vowifi.EC20AdapterOptions{
 		RFOffMode: func(callbackContext context.Context, deviceID string) (int, error) {
 			deviceConfig, err := database.Device(callbackContext, deviceID)
@@ -502,9 +570,60 @@ func configureVoWiFiRuntime(
 			}
 			return voWiFiRFOffModeForDeviceType(deviceConfig.DeviceType), nil
 		},
+		// Native Qualcomm 410 firmware rejects AT+CRSM with 0x6A82, so EF_AD —
+		// and with it the MCC/MNC split that the ePDG FQDN and Root NAI are
+		// built from — is unreadable over AT. QMI-UIM answers the same file, so
+		// only 410 devices take this path; EC20/EC25 keep their working AT read.
+		HomePLMN: func(deviceID, iccid, imsi string) (string, string, bool) {
+			callbackContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			deviceConfig, err := database.Device(callbackContext, deviceID)
+			if err != nil {
+				logger.Warn("load device home PLMN configuration", "device_id", deviceID, "error", err)
+				return "", "", false
+			}
+			if store.NormalizeDeviceType(deviceConfig.DeviceType) != store.DeviceTypeWiFi410 {
+				return "", "", false
+			}
+			mcc, mnc, err := homePLMN.Read(
+				callbackContext,
+				deviceConfig.ControlDevice,
+				iccid,
+				imsi,
+			)
+			if err != nil {
+				logger.Warn("read native 410 home PLMN over QMI-UIM", "device_id", deviceID, "error", err)
+				return "", "", false
+			}
+			return mcc, mnc, true
+		},
 		// The test deployment is deliberately non-cellular. VoWiFi teardown
 		// may restore CFUN, but it must never reactivate a PDP context.
 		RestoreCellularData: false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	qmiRadio, err := vowifi.NewQMIManagerRadio(deviceManager, vowifi.QMIManagerRadioOptions{
+		ResolveDeviceID: func(_ context.Context, configuredID string) (string, error) {
+			entry, resolveErr := mapper.Get(configuredID)
+			if resolveErr != nil {
+				return "", resolveErr
+			}
+			return entry.ID, nil
+		},
+		PureAirplanePolicy: func(configuredID string) bool {
+			entry, resolveErr := mapper.Get(configuredID)
+			if resolveErr != nil || entry.Snapshot == nil {
+				return false
+			}
+			iccid := strings.TrimSpace(entry.Snapshot.ICCID)
+			if iccid == "" {
+				return false
+			}
+			policy, policyErr := database.CardPolicy(context.Background(), iccid)
+			return policyErr == nil && policy.AirplaneEnabled
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -521,7 +640,7 @@ func configureVoWiFiRuntime(
 			if err != nil {
 				return nil, fmt.Errorf("load device %q VoWiFi config: %w", deviceID, err)
 			}
-			return newVoWiFiOrchestrator(deviceConfig, database, adapter)
+			return newVoWiFiOrchestrator(deviceConfig, database, mapper, adapter, qmiRadio)
 		},
 	})
 
@@ -552,108 +671,191 @@ func voWiFiRFOffModeForDeviceType(deviceType string) int {
 	return 4
 }
 
+func voWiFiCarrierConfigs(deviceConfig store.Device) (ike.Config, ims.Config) {
+	imsAPN := strings.TrimSpace(deviceConfig.IMSAPN)
+	if imsAPN == "" {
+		imsAPN = "ims"
+	}
+	eapMethod := strings.ToLower(strings.TrimSpace(deviceConfig.VoWiFiEAPMethod))
+	if eapMethod == "" {
+		eapMethod = "aka"
+	}
+	transport := strings.ToLower(strings.TrimSpace(deviceConfig.IMSTransport))
+	if transport == "" {
+		transport = "tcp"
+	}
+	return ike.Config{
+			APN:         imsAPN,
+			EAPMethod:   eapMethod,
+			AllowSHA1:   deviceConfig.VoWiFiAllowSHA1,
+			UseMODP1024: deviceConfig.VoWiFiUseMODP1024,
+		}, ims.Config{
+			Transport:                 transport,
+			PrivateIdentity:           strings.TrimSpace(deviceConfig.IMSPrivateIdentity),
+			PublicIdentity:            strings.TrimSpace(deviceConfig.IMSPublicIdentity),
+			RequireExplicitIdentities: !deviceConfig.IMSAllowIMSIDerivedIdentity,
+			SMSCenter:                 strings.TrimSpace(deviceConfig.IMSSMSCenter),
+	}
+}
+
+// resolveVoWiFiModemIMEI resolves hardware identity at callback time. Device
+// configuration can be created before the first modem snapshot, so the copy
+// captured when the orchestrator starts may legitimately have no IMEI. Prefer
+// the live mapped device identity and fall back to the latest stored config.
+func resolveVoWiFiModemIMEI(
+	ctx context.Context,
+	database *store.Store,
+	mapper integration.ATMapper,
+	deviceConfig store.Device,
+) string {
+	modemIMEI := strings.TrimSpace(deviceConfig.ModemIMEI)
+	if current, err := database.Device(ctx, deviceConfig.ID); err == nil {
+		modemIMEI = strings.TrimSpace(current.ModemIMEI)
+	}
+	if entry, err := mapper.Get(deviceConfig.ID); err == nil && entry.Snapshot != nil {
+		if liveIMEI := strings.TrimSpace(entry.Snapshot.IMEI); liveIMEI != "" {
+			return liveIMEI
+		}
+	}
+	return modemIMEI
+}
+
+func persistVoWiFiReceivedSMS(
+	ctx context.Context,
+	database *store.Store,
+	mapper integration.ATMapper,
+	deviceConfig store.Device,
+	message ims.ReceivedSMS,
+) error {
+	modemIMEI := resolveVoWiFiModemIMEI(ctx, database, mapper, deviceConfig)
+	segmentDigest := sha256.Sum256([]byte(message.RawTPDU))
+	extra, _ := json.Marshal(map[string]any{
+		"transport":                "ims",
+		"encoding":                 message.Encoding,
+		"concat":                   message.Concat,
+		"rp_reference":             message.RPReference,
+		"call_id":                  message.CallID,
+		"received_at":              message.Timestamp,
+		"service_center_timestamp": message.ServiceCenterTimestamp,
+		"raw_rpdu":                 message.RawRPDU,
+		"raw_tpdu":                 message.RawTPDU,
+		"segment_fingerprint":      fmt.Sprintf("sha256:%x", segmentDigest),
+	})
+	partsTotal := 1
+	if message.Concat != nil && message.Concat.Total > 0 {
+		partsTotal = message.Concat.Total
+	}
+	messageID := message.MessageID
+	if message.Concat != nil && message.Concat.Total > 1 {
+		// A segment of a carrier-split long SMS over IMS. Address the whole
+		// message with a stable id so SaveSMSMessage folds every segment into
+		// one progressively merged row instead of one row per segment.
+		messageID = store.StableConcatMessageID(
+			"ims", modemIMEI, message.DeviceID, message.IMSI, message.From,
+			message.Concat.Reference, message.Concat.Total,
+		)
+	}
+	_, err := database.SaveSMSMessage(ctx, store.SMSMessage{
+		MessageID:  messageID,
+		DeviceID:   message.DeviceID,
+		ModemIMEI:  modemIMEI,
+		IMSI:       message.IMSI,
+		Peer:       message.From,
+		Direction:  "inbound",
+		Body:       message.Text,
+		Timestamp:  message.Timestamp,
+		Status:     "received",
+		Source:     "ims",
+		PartsTotal: partsTotal,
+		Read:       false,
+		Extra:      extra,
+	})
+	return err
+}
+
+func persistVoWiFiSMSStatus(
+	ctx context.Context,
+	database *store.Store,
+	mapper integration.ATMapper,
+	deviceConfig store.Device,
+	report ims.ReceivedSMSStatus,
+) error {
+	reportDigest := sha256.Sum256([]byte(report.RawTPDU))
+	deliveryReport := store.SMSDeliveryReport{
+		ReportID:          fmt.Sprintf("ims:%x", reportDigest),
+		DeviceID:          report.DeviceID,
+		ModemIMEI:         resolveVoWiFiModemIMEI(ctx, database, mapper, deviceConfig),
+		IMSI:              report.IMSI,
+		Peer:              report.To,
+		Source:            "ims",
+		MessageReference:  report.MessageReference,
+		StatusCode:        report.StatusCode,
+		DeliveryState:     report.DeliveryStatus,
+		ServiceCenterTime: report.ServiceCenterTimestamp,
+		DischargeTime:     report.DischargeTimestamp,
+		ReceivedAt:        report.Timestamp,
+	}
+	var applyErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		_, applyErr = database.ApplySMSDeliveryReport(ctx, deliveryReport)
+		if errors.Is(applyErr, store.ErrSMSDeliveryReportAmbiguous) {
+			// TP-MR is only eight bits. A report that cannot be tied to
+			// one submission must not update either SIM's history, but it
+			// is still acknowledged so the SMSC does not retransmit it.
+			return nil
+		}
+		if !errors.Is(applyErr, store.ErrNotFound) {
+			return applyErr
+		}
+		// A status report can race the API handler persisting the SIP 202
+		// result. Give that write a brief chance to complete.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	// A late report from before this process started must still be
+	// acknowledged, otherwise the SMSC will keep retransmitting it.
+	return nil
+}
+
 func newVoWiFiOrchestrator(
 	deviceConfig store.Device,
 	database *store.Store,
+	mapper integration.ATMapper,
 	adapter *vowifi.EC20Adapter,
+	qmiRadio *vowifi.QMIManagerRadio,
 ) (*vowifi.Orchestrator, error) {
 	var akaProvider vowifi.AKAProvider = adapter
-	if deviceConfig.DeviceType == store.DeviceTypeWiFi410 {
+	radioController := vowifi.RadioController(adapter)
+	if store.NormalizeDeviceType(deviceConfig.DeviceType) == store.DeviceTypeWiFi410 {
 		qmiProvider, err := vowifi.NewQMIUIMAKAProvider(deviceConfig.ControlDevice)
 		if err != nil {
 			return nil, fmt.Errorf("device %q QMI-UIM provider: %w", deviceConfig.ID, err)
 		}
 		akaProvider = qmiProvider
+		if qmiRadio == nil {
+			return nil, fmt.Errorf("device %q QMI radio controller is unavailable", deviceConfig.ID)
+		}
+		radioController = qmiRadio
 	}
-	apn := deviceConfig.APN
-	if apn == "" {
-		apn = "ims"
-	}
-	tunnelProvider, err := ike.NewProvider(ike.Config{APN: apn})
+	tunnelConfig, imsConfig := voWiFiCarrierConfigs(deviceConfig)
+	tunnelProvider, err := ike.NewProvider(tunnelConfig)
 	if err != nil {
 		return nil, fmt.Errorf("device %q IKE provider: %w", deviceConfig.ID, err)
 	}
 	imsProvider, err := ims.NewProvider(akaProvider, ims.Config{
-		// The userspace SWu data plane currently carries the protected P-CSCF
-		// signalling path over TCP.
-		Transport: "tcp",
-		// Some Vodafone UK SIM profiles leave AT+CSCA empty; Vodafone publishes
-		// this service-centre number for manual SMS setup.
-		SMSCenter: "+447785016005",
+		Transport:                 imsConfig.Transport,
+		PrivateIdentity:           imsConfig.PrivateIdentity,
+		PublicIdentity:            imsConfig.PublicIdentity,
+		RequireExplicitIdentities: imsConfig.RequireExplicitIdentities,
+		SMSCenter:                 imsConfig.SMSCenter,
 		OnSMS: func(ctx context.Context, message ims.ReceivedSMS) error {
-			extra, _ := json.Marshal(map[string]any{
-				"transport":                "ims",
-				"encoding":                 message.Encoding,
-				"concat":                   message.Concat,
-				"rp_reference":             message.RPReference,
-				"call_id":                  message.CallID,
-				"received_at":              message.Timestamp,
-				"service_center_timestamp": message.ServiceCenterTimestamp,
-				"raw_rpdu":                 message.RawRPDU,
-				"raw_tpdu":                 message.RawTPDU,
-			})
-			partsTotal := 1
-			if message.Concat != nil && message.Concat.Total > 0 {
-				partsTotal = message.Concat.Total
-			}
-			messageID := message.MessageID
-			if message.Concat != nil && message.Concat.Total > 1 {
-				// A segment of a carrier-split long SMS over IMS. Address the whole
-				// message with a stable id so SaveSMSMessage folds every segment
-				// into one progressively merged row instead of one row per segment.
-				messageID = store.StableConcatMessageID(
-					"ims", deviceConfig.ModemIMEI, message.DeviceID, message.From,
-					message.Concat.Reference, message.Concat.Total,
-				)
-			}
-			_, saveErr := database.SaveSMSMessage(ctx, store.SMSMessage{
-				MessageID:  messageID,
-				DeviceID:   message.DeviceID,
-				ModemIMEI:  deviceConfig.ModemIMEI,
-				IMSI:       message.IMSI,
-				Peer:       message.From,
-				Direction:  "inbound",
-				Body:       message.Text,
-				Timestamp:  message.Timestamp,
-				Status:     "received",
-				Source:     "ims",
-				PartsTotal: partsTotal,
-				Read:       false,
-				Extra:      extra,
-			})
-			return saveErr
+			return persistVoWiFiReceivedSMS(ctx, database, mapper, deviceConfig, message)
 		},
 		OnSMSStatus: func(ctx context.Context, report ims.ReceivedSMSStatus) error {
-			deliveryReport := store.SMSDeliveryReport{
-				DeviceID:          report.DeviceID,
-				ModemIMEI:         deviceConfig.ModemIMEI,
-				IMSI:              report.IMSI,
-				Peer:              report.To,
-				Source:            "ims",
-				MessageReference:  report.MessageReference,
-				StatusCode:        report.StatusCode,
-				DeliveryState:     report.DeliveryStatus,
-				ServiceCenterTime: report.ServiceCenterTimestamp,
-				DischargeTime:     report.DischargeTimestamp,
-				ReceivedAt:        report.Timestamp,
-			}
-			var applyErr error
-			for attempt := 0; attempt < 10; attempt++ {
-				_, applyErr = database.ApplySMSDeliveryReport(ctx, deliveryReport)
-				if !errors.Is(applyErr, store.ErrNotFound) {
-					return applyErr
-				}
-				// A status report can race the API handler persisting the SIP 202
-				// result. Give that write a brief chance to complete.
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(100 * time.Millisecond):
-				}
-			}
-			// A late report from before this process started must still be
-			// acknowledged, otherwise the SMSC will keep retransmitting it.
-			return nil
+			return persistVoWiFiSMSStatus(ctx, database, mapper, deviceConfig, report)
 		},
 	})
 	if err != nil {
@@ -662,14 +864,15 @@ func newVoWiFiOrchestrator(
 	orchestrator, err := vowifi.New(vowifi.Dependencies{
 		SIM:    adapter,
 		AKA:    akaProvider,
-		Radio:  adapter,
+		Radio:  radioController,
 		Proxy:  integration.ProxyResolver{Store: database},
 		Tunnel: tunnelProvider,
 		IMS:    imsProvider,
 		Phones: integration.PhoneStore{Store: database, DeviceID: deviceConfig.ID},
 	}, vowifi.Options{
-		DeviceID:           deviceConfig.ID,
-		AllowIMSWithoutSMS: true,
+		DeviceID:              deviceConfig.ID,
+		AllowIMSWithoutSMS:    true,
+		IdentityCheckInterval: 15 * time.Second,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("device %q VoWiFi orchestrator: %w", deviceConfig.ID, err)
@@ -703,23 +906,29 @@ func provisionDiscoveredDevices(
 			name = "Quectel EC20 / EC25"
 		}
 		if err := database.UpsertDevice(ctx, store.Device{
-			ID:             discovered.ID,
-			Name:           name,
-			DeviceType:     deviceType,
-			Interface:      candidate.NetworkInterface,
-			ControlDevice:  control,
-			ATPort:         candidate.ATPort.OpenPath(),
-			USBPath:        candidate.USBPath,
-			ProxyPort:      1080,
-			BaudRate:       115200,
-			DataBits:       8,
-			StopBits:       1,
-			Parity:         "none",
-			DeviceBackend:  backend,
-			ESIMTransport:  backend,
-			NetworkEnabled: false,
-			SMSEnabled:     true,
-			VoWiFiEnabled:  false,
+			ID:                          discovered.ID,
+			Name:                        name,
+			DeviceType:                  deviceType,
+			Interface:                   candidate.NetworkInterface,
+			ControlDevice:               control,
+			ATPort:                      candidate.ATPort.OpenPath(),
+			USBPath:                     candidate.USBPath,
+			IMSAPN:                      "ims",
+			IMSTransport:                "tcp",
+			IMSAllowIMSIDerivedIdentity: true,
+			VoWiFiEAPMethod:             "aka",
+			VoWiFiAllowSHA1:             false,
+			VoWiFiUseMODP1024:           false,
+			ProxyPort:                   1080,
+			BaudRate:                    115200,
+			DataBits:                    8,
+			StopBits:                    1,
+			Parity:                      "none",
+			DeviceBackend:               backend,
+			ESIMTransport:               backend,
+			NetworkEnabled:              false,
+			SMSEnabled:                  true,
+			VoWiFiEnabled:               false,
 		}); err != nil {
 			return err
 		}

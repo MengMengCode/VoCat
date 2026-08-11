@@ -70,7 +70,7 @@ func (s *Server) handleESIM(w http.ResponseWriter, r *http.Request, rest []strin
 			if !requireMethod(w, r, http.MethodPost) {
 				return true
 			}
-			s.handleEsimDisable(w, r, physicalID, physicalPresent)
+			s.handleEsimDisable(w, r, configID, physicalID, physicalPresent)
 			return true
 		}
 		if len(rest) == 2 && rest[1] == "download" {
@@ -349,6 +349,12 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 		writeError(w, http.StatusConflict, "vowifi_quiesce_failed", err.Error())
 		return
 	}
+	releaseSubscriberChange, err := s.beginVoWiFiSubscriberChange(r.Context(), configID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "vowifi_subscriber_change_failed", err.Error())
+		return
+	}
+	defer releaseSubscriberChange()
 	if err := s.devices.ESIMSwitchProfile(r.Context(), physicalID, iccid, request.AIDHex); err != nil {
 		s.writeDeviceError(w, err)
 		return
@@ -367,21 +373,21 @@ func (s *Server) quiesceVoWiFiForESIM(ctx context.Context, configID string) erro
 	}
 	state, stateErr := s.vowifi.State(configID)
 	if stateErr != nil {
-		return fmt.Errorf("stop VoWiFi before eSIM switch: %w", stateErr)
+		return fmt.Errorf("stop VoWiFi before subscriber change: %w", stateErr)
 	}
 
 	var previous *store.Device
 	if s.store != nil {
 		config, err := s.store.Device(ctx, configID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("load device policy before eSIM switch: %w", err)
+			return fmt.Errorf("load device policy before subscriber change: %w", err)
 		}
 		if err == nil && config.VoWiFiEnabled {
 			copy := config
 			previous = &copy
 			config.VoWiFiEnabled = false
 			if err := s.store.UpsertDevice(ctx, config); err != nil {
-				return fmt.Errorf("disable VoWiFi policy before eSIM switch: %w", err)
+				return fmt.Errorf("disable VoWiFi policy before subscriber change: %w", err)
 			}
 		}
 	}
@@ -393,7 +399,7 @@ func (s *Server) quiesceVoWiFiForESIM(ctx context.Context, configID string) erro
 			if previous != nil {
 				_ = s.store.UpsertDevice(context.Background(), *previous)
 			}
-			return fmt.Errorf("stop VoWiFi before eSIM switch: %w", err)
+			return fmt.Errorf("stop VoWiFi before subscriber change: %w", err)
 		}
 	}
 
@@ -404,7 +410,7 @@ func (s *Server) quiesceVoWiFiForESIM(ctx context.Context, configID string) erro
 	for {
 		state, err := s.vowifi.State(configID)
 		if err != nil {
-			return fmt.Errorf("confirm VoWiFi stopped before eSIM switch: %w", err)
+			return fmt.Errorf("confirm VoWiFi stopped before subscriber change: %w", err)
 		}
 		if !state.Enabled && !state.Active &&
 			(state.Phase == vowifi.PhaseIdle || state.Phase == vowifi.PhaseFailed) {
@@ -412,13 +418,36 @@ func (s *Server) quiesceVoWiFiForESIM(ctx context.Context, configID string) erro
 		}
 		select {
 		case <-waitContext.Done():
-			return fmt.Errorf("wait for VoWiFi to stop before eSIM switch: %w", waitContext.Err())
+			return fmt.Errorf("wait for VoWiFi to stop before subscriber change: %w", waitContext.Err())
 		case <-ticker.C:
 		}
 	}
 }
 
-func (s *Server) handleEsimDisable(w http.ResponseWriter, r *http.Request, physicalID string, physicalPresent bool) {
+type voWiFiSubscriberChangeGuard interface {
+	BeginSubscriberChange(context.Context, string) (func(), error)
+}
+
+func (s *Server) beginVoWiFiSubscriberChange(ctx context.Context, configID string) (func(), error) {
+	configID = strings.TrimSpace(configID)
+	if configID == "" || s.vowifi == nil {
+		return func() {}, nil
+	}
+	guard, ok := s.vowifi.(voWiFiSubscriberChangeGuard)
+	if !ok {
+		return nil, errors.New("VoWiFi controller does not support subscriber-change guards")
+	}
+	release, err := guard.BeginSubscriberChange(ctx, configID)
+	if err != nil {
+		return nil, fmt.Errorf("begin guarded VoWiFi subscriber change: %w", err)
+	}
+	if release == nil {
+		return nil, errors.New("VoWiFi controller returned a nil subscriber-change release")
+	}
+	return release, nil
+}
+
+func (s *Server) handleEsimDisable(w http.ResponseWriter, r *http.Request, configID string, physicalID string, physicalPresent bool) {
 	if s.devices == nil {
 		writeError(w, http.StatusServiceUnavailable, "device_manager_unavailable", "device manager is unavailable")
 		return
@@ -440,6 +469,20 @@ func (s *Server) handleEsimDisable(w http.ResponseWriter, r *http.Request, physi
 		writeError(w, http.StatusBadRequest, "invalid_request", "iccid is required")
 		return
 	}
+	// Disabling a profile performs the same modem reset and live identity
+	// verification as switching, so it must not inherit the normal API deadline.
+	controller := http.NewResponseController(w)
+	_ = controller.SetWriteDeadline(time.Time{})
+	if err := s.quiesceVoWiFiForESIM(r.Context(), configID); err != nil {
+		writeError(w, http.StatusConflict, "vowifi_quiesce_failed", err.Error())
+		return
+	}
+	releaseSubscriberChange, err := s.beginVoWiFiSubscriberChange(r.Context(), configID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "vowifi_subscriber_change_failed", err.Error())
+		return
+	}
+	defer releaseSubscriberChange()
 	if err := s.devices.ESIMDisableProfile(r.Context(), physicalID, iccid, request.AIDHex); err != nil {
 		s.writeDeviceError(w, err)
 		return

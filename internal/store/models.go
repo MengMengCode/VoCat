@@ -15,32 +15,41 @@ import (
 const SecretMask = "********"
 
 type Device struct {
-	ID                 string
-	Name               string
-	DeviceType         string
-	Interface          string
-	ControlDevice      string
-	ATPort             string
-	USBPath            string
-	AudioDevice        string
-	ModemIMEI          string
-	APN                string
-	ProxyPort          int
-	BaudRate           int
-	DataBits           int
-	StopBits           int
-	Parity             string
-	DeviceBackend      string
-	ESIMTransport      string
-	QMIUseProxy        bool
-	QMIProxyPath       string
-	QMIProxyExecutable string
-	NetworkEnabled     bool
-	SMSEnabled         bool
-	VoWiFiEnabled      bool
-	Extra              json.RawMessage
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ID                          string
+	Name                        string
+	DeviceType                  string
+	Interface                   string
+	ControlDevice               string
+	ATPort                      string
+	USBPath                     string
+	AudioDevice                 string
+	ModemIMEI                   string
+	APN                         string
+	IMSAPN                      string
+	IMSPrivateIdentity          string
+	IMSPublicIdentity           string
+	IMSSMSCenter                string
+	IMSTransport                string
+	IMSAllowIMSIDerivedIdentity bool
+	VoWiFiEAPMethod             string
+	VoWiFiAllowSHA1             bool
+	VoWiFiUseMODP1024           bool
+	ProxyPort                   int
+	BaudRate                    int
+	DataBits                    int
+	StopBits                    int
+	Parity                      string
+	DeviceBackend               string
+	ESIMTransport               string
+	QMIUseProxy                 bool
+	QMIProxyPath                string
+	QMIProxyExecutable          string
+	NetworkEnabled              bool
+	SMSEnabled                  bool
+	VoWiFiEnabled               bool
+	Extra                       json.RawMessage
+	CreatedAt                   time.Time
+	UpdatedAt                   time.Time
 }
 
 type DeviceRuntime struct {
@@ -148,6 +157,7 @@ type SMSFilter struct {
 	DeviceID  string
 	ModemIMEI string
 	IMSI      string
+	IMSIExact bool
 	Peer      string
 	Since     time.Time
 	Until     time.Time
@@ -158,6 +168,7 @@ type SMSFilter struct {
 // SMSDeliveryReport is network evidence for one submitted SMS part. The
 // message reference is the TP-MR returned in SMS-STATUS-REPORT.
 type SMSDeliveryReport struct {
+	ReportID          string
 	DeviceID          string
 	ModemIMEI         string
 	IMSI              string

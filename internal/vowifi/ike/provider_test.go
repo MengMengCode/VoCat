@@ -24,15 +24,17 @@ func (reader constantReader) Read(destination []byte) (int, error) {
 }
 
 type firstAuthCaptureTransport struct {
-	t       *testing.T
-	calls   int
-	suite   negotiatedSuite
-	keys    ikeKeys
-	spii    [8]byte
-	spir    [8]byte
-	nonceI  []byte
-	nonceR  []byte
-	floated bool
+	t           *testing.T
+	allowSHA1   bool
+	useMODP1024 bool
+	calls       int
+	suite       negotiatedSuite
+	keys        ikeKeys
+	spii        [8]byte
+	spir        [8]byte
+	nonceI      []byte
+	nonceR      []byte
+	floated     bool
 }
 
 func (transport *firstAuthCaptureTransport) LocalAddr() *net.UDPAddr {
@@ -78,8 +80,14 @@ func (transport *firstAuthCaptureTransport) answerIKEInit(packet []byte) ([]byte
 		return nil, err
 	}
 	group := uint16(ke.Body[0])<<8 | uint16(ke.Body[1])
-	if group != dhMODP1024 || len(ke.Body[4:]) != 128 {
-		transport.t.Fatalf("Vodafone init KE = group %d length %d", group, len(ke.Body[4:]))
+	wantGroup := uint16(dhMODP2048)
+	wantLength := 256
+	if transport.useMODP1024 {
+		wantGroup = dhMODP1024
+		wantLength = 128
+	}
+	if group != wantGroup || len(ke.Body[4:]) != wantLength {
+		transport.t.Fatalf("IKE init KE = group %d length %d, want group %d length %d", group, len(ke.Body[4:]), wantGroup, wantLength)
 	}
 	serverDH, err := newDHExchange(group, constantReader{value: 0x77})
 	if err != nil {
@@ -89,7 +97,17 @@ func (transport *firstAuthCaptureTransport) answerIKEInit(packet []byte) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	transport.suite = legacyTestSuite()
+	transport.suite = negotiatedSuite{
+		EncryptionID:   encryptionAESCBC,
+		EncryptionBits: 128,
+		PRFID:          prfHMACSHA256,
+		IntegrityID:    integrityHMACSHA256_128,
+		DHID:           wantGroup,
+	}
+	if transport.allowSHA1 {
+		transport.suite.PRFID = prfHMACSHA1
+		transport.suite.IntegrityID = integrityHMACSHA1_96
+	}
 	transport.spii = header.InitiatorSPI
 	transport.spir = [8]byte{0x80, 1, 2, 3, 4, 5, 6, 7}
 	transport.nonceI = append([]byte(nil), nonce.Body...)
@@ -110,9 +128,9 @@ func (transport *firstAuthCaptureTransport) answerIKEInit(packet []byte) ([]byte
 		Protocol: protocolIKE,
 		Transforms: []transform{
 			{Type: transformEncryption, ID: encryptionAESCBC, KeyLength: 128},
-			{Type: transformPRF, ID: prfHMACSHA1},
-			{Type: transformIntegrity, ID: integrityHMACSHA1_96},
-			{Type: transformDH, ID: dhMODP1024},
+			{Type: transformPRF, ID: transport.suite.PRFID},
+			{Type: transformIntegrity, ID: transport.suite.IntegrityID},
+			{Type: transformDH, ID: transport.suite.DHID},
 		},
 	}})
 	keBody := make([]byte, 4+len(serverDH.Public))
@@ -231,12 +249,14 @@ func TestSessionCloseStopsRelayBeforeChildDataplane(t *testing.T) {
 }
 
 func TestProviderVodafoneFirstAuthIsEAPOnlyAndRequestsIMSAPN(t *testing.T) {
-	capture := &firstAuthCaptureTransport{t: t}
+	capture := &firstAuthCaptureTransport{t: t, allowSHA1: true, useMODP1024: true}
 	provider, err := NewProvider(Config{
-		Random:    constantReader{value: 0x42},
-		Timeout:   time.Second,
-		Installer: unusedInstaller{},
-		APN:       "ims",
+		Random:      constantReader{value: 0x42},
+		Timeout:     time.Second,
+		Installer:   unusedInstaller{},
+		APN:         "ims",
+		AllowSHA1:   true,
+		UseMODP1024: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -266,6 +286,123 @@ func TestProviderVodafoneFirstAuthIsEAPOnlyAndRequestsIMSAPN(t *testing.T) {
 	}
 	if capture.calls != 2 || capture.floated || aka.calls != 0 {
 		t.Fatalf("capture calls=%d floated=%v AKA calls=%d", capture.calls, capture.floated, aka.calls)
+	}
+}
+
+func TestProviderVodafoneDefaultsToStrongCryptoDespitePLMN(t *testing.T) {
+	capture := &firstAuthCaptureTransport{t: t}
+	provider, err := NewProvider(Config{
+		Random:    constantReader{value: 0x42},
+		Timeout:   time.Second,
+		Installer: unusedInstaller{},
+		APN:       "ims",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.transportFactory = func(
+		context.Context,
+		transportConfig,
+		vowifi.ProxyRoute,
+		string,
+	) (datagramTransport, error) {
+		return capture, nil
+	}
+	_, err = provider.Start(context.Background(), vowifi.TunnelRequest{
+		DeviceID: "ec20-1",
+		Identity: vowifi.SIMIdentity{
+			ICCID:   "8944100000000000000",
+			IMSI:    "234150123456789",
+			HomeMCC: "234",
+			HomeMNC: "15",
+		},
+		EPDG: "epdg.epc.mnc015.mcc234.pub.3gppnetwork.org",
+		AKA:  &testAKAProvider{},
+	})
+	if !errors.Is(err, errFirstAuthObserved) {
+		t.Fatalf("Start() error = %v, want capture sentinel", err)
+	}
+}
+
+func TestProviderWeakCryptoRequiresExplicitOptIn(t *testing.T) {
+	strongIKE := ikeOffer(dhMODP2048, false)
+	strongESP := espOffer([]byte{1, 2, 3, 4}, false)
+	for _, candidate := range append(append([]transform(nil), strongIKE.Transforms...), strongESP.Transforms...) {
+		if candidate.Type == transformPRF && candidate.ID == prfHMACSHA1 ||
+			candidate.Type == transformIntegrity && candidate.ID == integrityHMACSHA1_96 ||
+			candidate.Type == transformDH && candidate.ID == dhMODP1024 {
+			t.Fatalf("strong default advertised legacy transform: %#v", candidate)
+		}
+	}
+	if got := transformIDs(strongIKE, transformPRF); !equalUint16s(got, []uint16{prfHMACSHA256}) {
+		t.Fatalf("strong IKE PRFs = %v", got)
+	}
+	if got := transformIDs(strongIKE, transformIntegrity); !equalUint16s(got, []uint16{integrityHMACSHA256_128}) {
+		t.Fatalf("strong IKE integrity = %v", got)
+	}
+	legacyIKE := ikeOffer(dhMODP1024, true)
+	legacyESP := espOffer([]byte{1, 2, 3, 4}, true)
+	if got := transformIDs(legacyIKE, transformPRF); !equalUint16s(got, []uint16{prfHMACSHA256, prfHMACSHA1}) {
+		t.Fatalf("legacy IKE PRFs = %v", got)
+	}
+	if got := transformIDs(legacyIKE, transformIntegrity); !equalUint16s(got, []uint16{integrityHMACSHA256_128, integrityHMACSHA1_96}) {
+		t.Fatalf("legacy IKE integrity = %v", got)
+	}
+	if got := transformIDs(legacyESP, transformIntegrity); !equalUint16s(got, []uint16{integrityHMACSHA256_128, integrityHMACSHA1_96}) {
+		t.Fatalf("legacy ESP integrity = %v", got)
+	}
+	sha1WithGroup14 := ikeOffer(dhMODP2048, true)
+	if got := transformIDs(sha1WithGroup14, transformDH); !equalUint16s(got, []uint16{dhMODP2048}) {
+		t.Fatalf("SHA-1-compatible group14 offer DH = %v", got)
+	}
+	group2WithSHA256 := ikeOffer(dhMODP1024, false)
+	if got := transformIDs(group2WithSHA256, transformPRF); !equalUint16s(got, []uint16{prfHMACSHA256}) {
+		t.Fatalf("group2 strong PRFs = %v", got)
+	}
+	if got := transformIDs(group2WithSHA256, transformIntegrity); !equalUint16s(got, []uint16{integrityHMACSHA256_128}) {
+		t.Fatalf("group2 strong integrity = %v", got)
+	}
+}
+
+func transformIDs(item proposal, kind uint8) []uint16 {
+	var result []uint16
+	for _, candidate := range item.Transforms {
+		if candidate.Type == kind {
+			result = append(result, candidate.ID)
+		}
+	}
+	return result
+}
+
+func equalUint16s(left, right []uint16) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestProviderEAPMethodConfiguration(t *testing.T) {
+	defaultProvider, err := NewProvider(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultProvider.config.EAPMethod != "aka" {
+		t.Fatalf("default EAP method = %q", defaultProvider.config.EAPMethod)
+	}
+	primeProvider, err := NewProvider(Config{EAPMethod: "AKA-PRIME"})
+	if err != nil {
+		t.Fatalf("NewProvider(AKA-PRIME) error = %v", err)
+	}
+	if primeProvider.config.EAPMethod != "aka-prime" {
+		t.Fatalf("normalized EAP method = %q", primeProvider.config.EAPMethod)
+	}
+	if _, err := NewProvider(Config{EAPMethod: "auto"}); err == nil {
+		t.Fatal("NewProvider() accepted ambiguous automatic AKA downgrade")
 	}
 }
 

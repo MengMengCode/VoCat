@@ -15,9 +15,11 @@ import (
 )
 
 var (
-	ErrNotRegistered       = errors.New("vowifi runtime: device is not registered")
-	ErrOperationInProgress = errors.New("vowifi runtime: an operation is already in progress")
-	ErrClosed              = errors.New("vowifi runtime: manager is closed")
+	ErrNotRegistered              = errors.New("vowifi runtime: device is not registered")
+	ErrOperationInProgress        = errors.New("vowifi runtime: an operation is already in progress")
+	ErrNotQuiesced                = errors.New("vowifi runtime: device is not quiesced")
+	ErrSubscriberChangeInProgress = errors.New("vowifi runtime: subscriber change is in progress")
+	ErrClosed                     = errors.New("vowifi runtime: manager is closed")
 )
 
 const (
@@ -48,10 +50,12 @@ type Manager struct {
 	onState          StateHandler
 	factory          OrchestratorFactory
 
-	mu      sync.Mutex
-	closed  bool
-	entries map[string]*entry
-	wg      sync.WaitGroup
+	mu                   sync.Mutex
+	closed               bool
+	entries              map[string]*entry
+	subscriberChanges    map[string]uint64
+	nextSubscriberChange uint64
+	wg                   sync.WaitGroup
 }
 
 type entry struct {
@@ -64,6 +68,8 @@ type entry struct {
 	retryFailures    uint
 	operationCancel  context.CancelFunc
 	stopWatch        func()
+	watchCancel      context.CancelFunc
+	watchDone        chan struct{}
 }
 
 func New(options Options) *Manager {
@@ -84,15 +90,16 @@ func New(options Options) *Manager {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		ctx:              ctx,
-		cancel:           cancel,
-		logger:           options.Logger,
-		operationTimeout: options.OperationTimeout,
-		retryInitial:     options.RetryInitial,
-		retryMaximum:     options.RetryMaximum,
-		onState:          options.OnState,
-		factory:          options.Factory,
-		entries:          make(map[string]*entry),
+		ctx:               ctx,
+		cancel:            cancel,
+		logger:            options.Logger,
+		operationTimeout:  options.OperationTimeout,
+		retryInitial:      options.RetryInitial,
+		retryMaximum:      options.RetryMaximum,
+		onState:           options.OnState,
+		factory:           options.Factory,
+		entries:           make(map[string]*entry),
+		subscriberChanges: make(map[string]uint64),
 	}
 }
 
@@ -100,54 +107,66 @@ func New(options Options) *Manager {
 // configuration and runtime lifecycle in sync when a modem is added after the
 // service has already started.
 func (manager *Manager) Ensure(ctx context.Context, deviceID string) error {
+	_, err := manager.getOrEnsure(ctx, deviceID)
+	return err
+}
+
+// getOrEnsure returns the entry it creates while still holding the same lock
+// used by subscriber-change barriers. Callers must not perform a second map
+// lookup after Ensure: a profile change may legitimately remove that entry as
+// soon as Ensure returns.
+func (manager *Manager) getOrEnsure(ctx context.Context, deviceID string) (*entry, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	manager.mu.Lock()
-	if manager.closed {
-		manager.mu.Unlock()
-		return ErrClosed
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	if _, exists := manager.entries[deviceID]; exists {
-		manager.mu.Unlock()
-		return nil
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.closed {
+		return nil, ErrClosed
+	}
+	if manager.subscriberChangeLocked(deviceID) {
+		return nil, ErrSubscriberChangeInProgress
+	}
+	if item := manager.entries[deviceID]; item != nil {
+		return item, nil
 	}
 	if manager.factory == nil {
-		manager.mu.Unlock()
-		return ErrNotRegistered
+		return nil, ErrNotRegistered
 	}
 
 	// The factory is called while holding the manager lock so concurrent status
 	// and enable requests cannot create duplicate runtimes for the same device.
 	orchestrator, err := manager.factory(ctx, deviceID)
 	if err != nil {
-		manager.mu.Unlock()
-		return err
+		return nil, err
 	}
 	if orchestrator == nil {
-		manager.mu.Unlock()
-		return errors.New("vowifi runtime: factory returned a nil orchestrator")
+		return nil, errors.New("vowifi runtime: factory returned a nil orchestrator")
 	}
 	state := orchestrator.State()
 	if state.DeviceID != deviceID {
-		manager.mu.Unlock()
 		_ = orchestrator.Close(context.Background())
-		return fmt.Errorf(
+		return nil, fmt.Errorf(
 			"vowifi runtime: factory returned device %q for %q",
 			state.DeviceID,
 			deviceID,
 		)
 	}
 	states, stopWatch := orchestrator.Subscribe(8)
-	manager.entries[deviceID] = &entry{
+	watchContext, watchCancel := context.WithCancel(manager.ctx)
+	item := &entry{
 		orchestrator: orchestrator,
 		stopWatch:    stopWatch,
+		watchCancel:  watchCancel,
+		watchDone:    make(chan struct{}),
 	}
+	manager.entries[deviceID] = item
 	manager.wg.Add(1)
-	manager.mu.Unlock()
-
-	go manager.watch(deviceID, states)
-	return nil
+	go manager.watch(watchContext, deviceID, item, states)
+	return item, nil
 }
 
 func (manager *Manager) Register(orchestrator *vowifi.Orchestrator) error {
@@ -160,44 +179,193 @@ func (manager *Manager) Register(orchestrator *vowifi.Orchestrator) error {
 	}
 
 	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	if manager.closed {
-		manager.mu.Unlock()
 		return ErrClosed
 	}
+	if manager.subscriberChangeLocked(state.DeviceID) {
+		return ErrSubscriberChangeInProgress
+	}
 	if _, exists := manager.entries[state.DeviceID]; exists {
-		manager.mu.Unlock()
 		return fmt.Errorf("vowifi runtime: device %q is already registered", state.DeviceID)
 	}
 	states, stopWatch := orchestrator.Subscribe(8)
+	watchContext, watchCancel := context.WithCancel(manager.ctx)
 	item := &entry{
 		orchestrator: orchestrator,
 		stopWatch:    stopWatch,
+		watchCancel:  watchCancel,
+		watchDone:    make(chan struct{}),
 	}
 	manager.entries[state.DeviceID] = item
 	manager.wg.Add(1)
-	manager.mu.Unlock()
-
-	go manager.watch(state.DeviceID, states)
+	go manager.watch(watchContext, state.DeviceID, item, states)
 	return nil
 }
 
 func (manager *Manager) State(deviceID string) (vowifi.State, error) {
-	manager.mu.Lock()
-	item := manager.entries[deviceID]
-	closed := manager.closed
-	manager.mu.Unlock()
-	if item == nil {
-		if closed {
-			return vowifi.State{}, ErrClosed
-		}
-		if err := manager.Ensure(manager.ctx, deviceID); err != nil {
-			return vowifi.State{}, err
-		}
-		manager.mu.Lock()
-		item = manager.entries[deviceID]
-		manager.mu.Unlock()
+	item, err := manager.getOrEnsure(manager.ctx, deviceID)
+	if err != nil {
+		return vowifi.State{}, err
 	}
-	return item.orchestrator.State(), nil
+	manager.mu.Lock()
+	if err := manager.validateEntryLocked(deviceID, item); err != nil {
+		manager.mu.Unlock()
+		return vowifi.State{}, err
+	}
+	state := item.orchestrator.State()
+	manager.mu.Unlock()
+	return state, nil
+}
+
+// BeginSubscriberChange atomically blocks new runtime users and removes the
+// quiesced runtime for deviceID. The returned release is idempotent and must be
+// held until the physical SIM mutation (or config deletion) has completed.
+// While the guard is held, no status, enable, SMS, or call request may recreate
+// an orchestrator with the old subscriber identity.
+func (manager *Manager) BeginSubscriberChange(
+	ctx context.Context,
+	deviceID string,
+) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	manager.mu.Lock()
+	if manager.closed {
+		manager.mu.Unlock()
+		return nil, ErrClosed
+	}
+	if manager.subscriberChangeLocked(deviceID) {
+		manager.mu.Unlock()
+		return nil, ErrSubscriberChangeInProgress
+	}
+	manager.nextSubscriberChange++
+	if manager.nextSubscriberChange == 0 {
+		manager.nextSubscriberChange++
+	}
+	token := manager.nextSubscriberChange
+	manager.subscriberChanges[deviceID] = token
+	watchDone, err := manager.invalidateLocked(ctx, deviceID, true)
+	if err != nil {
+		delete(manager.subscriberChanges, deviceID)
+		manager.mu.Unlock()
+		return nil, err
+	}
+	manager.mu.Unlock()
+
+	if err := waitForWatch(ctx, watchDone); err != nil {
+		manager.releaseSubscriberChange(deviceID, token)
+		return nil, fmt.Errorf("join device %q runtime watcher: %w", deviceID, err)
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			manager.releaseSubscriberChange(deviceID, token)
+		})
+	}, nil
+}
+
+// Invalidate removes one cached orchestrator after its subscriber session has
+// been quiesced. The next Ensure call rebuilds the runtime through Factory, so
+// no SIM identity or carrier configuration from the previous card is reused.
+// Subscriber-changing callers should use BeginSubscriberChange so that this
+// standalone invalidation cannot be followed by an old-identity rebuild.
+func (manager *Manager) Invalidate(ctx context.Context, deviceID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	manager.mu.Lock()
+	if manager.closed {
+		manager.mu.Unlock()
+		return ErrClosed
+	}
+	watchDone, err := manager.invalidateLocked(ctx, deviceID, false)
+	manager.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := waitForWatch(ctx, watchDone); err != nil {
+		return fmt.Errorf("join device %q runtime watcher: %w", deviceID, err)
+	}
+	return nil
+}
+
+// invalidateLocked closes and removes a quiesced entry. When subscriberChange
+// is true, a desired enable left in the narrow Ensure-to-startOperation window
+// is stale policy rather than an active session and is cleared before removal.
+func (manager *Manager) invalidateLocked(
+	ctx context.Context,
+	deviceID string,
+	subscriberChange bool,
+) (<-chan struct{}, error) {
+	item := manager.entries[deviceID]
+	if item == nil {
+		return nil, nil
+	}
+	state := item.orchestrator.State()
+	if item.busy || (!subscriberChange && item.desiredEnabled) || state.Enabled || state.Active ||
+		(state.Phase != vowifi.PhaseIdle && state.Phase != vowifi.PhaseFailed) {
+		return nil, fmt.Errorf("%w: phase=%s", ErrNotQuiesced, state.Phase)
+	}
+	if subscriberChange {
+		item.desiredEnabled = false
+		item.reconnectPending = false
+		item.disablePending = false
+		item.autoRetryPending = false
+		item.retryFailures = 0
+	}
+	if err := item.orchestrator.Close(ctx); err != nil {
+		return nil, fmt.Errorf("close device %q runtime before invalidation: %w", deviceID, err)
+	}
+	delete(manager.entries, deviceID)
+	if item.watchCancel != nil {
+		item.watchCancel()
+		item.watchCancel = nil
+	}
+	if item.stopWatch != nil {
+		item.stopWatch()
+		item.stopWatch = nil
+	}
+	return item.watchDone, nil
+}
+
+func (manager *Manager) subscriberChangeLocked(deviceID string) bool {
+	_, blocked := manager.subscriberChanges[deviceID]
+	return blocked
+}
+
+func (manager *Manager) releaseSubscriberChange(deviceID string, token uint64) {
+	manager.mu.Lock()
+	if manager.subscriberChanges[deviceID] == token {
+		delete(manager.subscriberChanges, deviceID)
+	}
+	manager.mu.Unlock()
+}
+
+func waitForWatch(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // RequestEnabled queues an enable or disable transaction and returns
@@ -205,11 +373,15 @@ func (manager *Manager) State(deviceID string) (vowifi.State, error) {
 // persisted in the orchestrator state instead of being lost with an HTTP
 // request context.
 func (manager *Manager) RequestEnabled(deviceID string, enabled bool) (vowifi.State, error) {
-	if err := manager.Ensure(manager.ctx, deviceID); err != nil {
+	item, err := manager.getOrEnsure(manager.ctx, deviceID)
+	if err != nil {
 		return vowifi.State{}, err
 	}
 	manager.mu.Lock()
-	item := manager.entries[deviceID]
+	if err := manager.validateEntryLocked(deviceID, item); err != nil {
+		manager.mu.Unlock()
+		return vowifi.State{}, err
+	}
 	item.desiredEnabled = enabled
 	if !enabled && item.busy {
 		item.disablePending = true
@@ -233,13 +405,16 @@ func (manager *Manager) RequestEnabled(deviceID string, enabled bool) (vowifi.St
 }
 
 func (manager *Manager) RequestReconnect(deviceID string) (vowifi.State, error) {
-	if err := manager.Ensure(manager.ctx, deviceID); err != nil {
+	item, err := manager.getOrEnsure(manager.ctx, deviceID)
+	if err != nil {
 		return vowifi.State{}, err
 	}
 	manager.mu.Lock()
-	if item := manager.entries[deviceID]; item != nil {
-		item.desiredEnabled = true
+	if err := manager.validateEntryLocked(deviceID, item); err != nil {
+		manager.mu.Unlock()
+		return vowifi.State{}, err
 	}
+	item.desiredEnabled = true
 	manager.mu.Unlock()
 	return manager.startOperation(deviceID, true, func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
 		_, err := orchestrator.Reconnect(ctx)
@@ -252,85 +427,120 @@ func (manager *Manager) SendSMS(
 	deviceID string,
 	request vowifi.SMSSubmitRequest,
 ) (vowifi.SMSSubmitResult, error) {
-	if err := manager.Ensure(ctx, deviceID); err != nil {
+	item, err := manager.getOrEnsure(ctx, deviceID)
+	if err != nil {
 		return vowifi.SMSSubmitResult{}, err
 	}
 	manager.mu.Lock()
-	if manager.closed {
+	if err := manager.validateEntryLocked(deviceID, item); err != nil {
 		manager.mu.Unlock()
-		return vowifi.SMSSubmitResult{}, ErrClosed
+		return vowifi.SMSSubmitResult{}, err
 	}
-	item := manager.entries[deviceID]
 	manager.mu.Unlock()
-	if item == nil {
-		return vowifi.SMSSubmitResult{}, ErrNotRegistered
-	}
 	return item.orchestrator.SendSMS(ctx, request)
 }
 
 func (manager *Manager) Calls(deviceID string) ([]vowifi.Call, error) {
-	if err := manager.Ensure(manager.ctx, deviceID); err != nil {
+	item, err := manager.getOrEnsure(manager.ctx, deviceID)
+	if err != nil {
 		return nil, err
 	}
 	manager.mu.Lock()
-	item := manager.entries[deviceID]
+	err = manager.validateEntryLocked(deviceID, item)
 	manager.mu.Unlock()
-	if item == nil {
-		return nil, ErrNotRegistered
+	if err != nil {
+		return nil, err
 	}
 	return item.orchestrator.Calls()
 }
 
 func (manager *Manager) DialCall(ctx context.Context, deviceID, number string) (vowifi.Call, error) {
-	if err := manager.Ensure(ctx, deviceID); err != nil {
+	item, err := manager.getOrEnsure(ctx, deviceID)
+	if err != nil {
 		return vowifi.Call{}, err
 	}
 	manager.mu.Lock()
-	item := manager.entries[deviceID]
+	err = manager.validateEntryLocked(deviceID, item)
 	manager.mu.Unlock()
-	if item == nil {
-		return vowifi.Call{}, ErrNotRegistered
+	if err != nil {
+		return vowifi.Call{}, err
 	}
 	return item.orchestrator.DialCall(ctx, number)
 }
 
 func (manager *Manager) AnswerCall(ctx context.Context, deviceID, id string) (vowifi.Call, error) {
-	if err := manager.Ensure(ctx, deviceID); err != nil {
+	item, err := manager.getOrEnsure(ctx, deviceID)
+	if err != nil {
 		return vowifi.Call{}, err
 	}
 	manager.mu.Lock()
-	item := manager.entries[deviceID]
+	err = manager.validateEntryLocked(deviceID, item)
 	manager.mu.Unlock()
-	if item == nil {
-		return vowifi.Call{}, ErrNotRegistered
+	if err != nil {
+		return vowifi.Call{}, err
 	}
 	return item.orchestrator.AnswerCall(ctx, id)
 }
 
 func (manager *Manager) HangupCall(ctx context.Context, deviceID, id string) error {
-	if err := manager.Ensure(ctx, deviceID); err != nil {
+	item, err := manager.getOrEnsure(ctx, deviceID)
+	if err != nil {
 		return err
 	}
 	manager.mu.Lock()
-	item := manager.entries[deviceID]
+	err = manager.validateEntryLocked(deviceID, item)
 	manager.mu.Unlock()
-	if item == nil {
-		return ErrNotRegistered
+	if err != nil {
+		return err
 	}
 	return item.orchestrator.HangupCall(ctx, id)
 }
 
+func (manager *Manager) SendDTMF(
+	ctx context.Context,
+	deviceID string,
+	id string,
+	digit byte,
+	duration time.Duration,
+) error {
+	item, err := manager.getOrEnsure(ctx, deviceID)
+	if err != nil {
+		return err
+	}
+	manager.mu.Lock()
+	err = manager.validateEntryLocked(deviceID, item)
+	manager.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return item.orchestrator.SendDTMF(ctx, id, digit, duration)
+}
+
 func (manager *Manager) CallMedia(ctx context.Context, deviceID, id string) (vowifi.CallMedia, error) {
-	if err := manager.Ensure(ctx, deviceID); err != nil {
+	item, err := manager.getOrEnsure(ctx, deviceID)
+	if err != nil {
 		return nil, err
 	}
 	manager.mu.Lock()
-	item := manager.entries[deviceID]
+	err = manager.validateEntryLocked(deviceID, item)
 	manager.mu.Unlock()
-	if item == nil {
-		return nil, ErrNotRegistered
+	if err != nil {
+		return nil, err
 	}
 	return item.orchestrator.CallMedia(ctx, id)
+}
+
+func (manager *Manager) validateEntryLocked(deviceID string, item *entry) error {
+	if manager.closed {
+		return ErrClosed
+	}
+	if manager.subscriberChangeLocked(deviceID) {
+		return ErrSubscriberChangeInProgress
+	}
+	if item == nil || manager.entries[deviceID] != item {
+		return ErrNotRegistered
+	}
+	return nil
 }
 
 func (manager *Manager) startOperation(
@@ -342,6 +552,10 @@ func (manager *Manager) startOperation(
 	if manager.closed {
 		manager.mu.Unlock()
 		return vowifi.State{}, ErrClosed
+	}
+	if manager.subscriberChangeLocked(deviceID) {
+		manager.mu.Unlock()
+		return vowifi.State{}, ErrSubscriberChangeInProgress
 	}
 	item := manager.entries[deviceID]
 	if item == nil {
@@ -446,7 +660,9 @@ func (manager *Manager) runOperations(
 
 func (manager *Manager) scheduleAutoRetry(deviceID string, item *entry) {
 	manager.mu.Lock()
-	if manager.closed || item.busy || item.autoRetryPending || !item.desiredEnabled {
+	if manager.closed || manager.subscriberChangeLocked(deviceID) ||
+		manager.entries[deviceID] != item || item.busy || item.autoRetryPending ||
+		!item.desiredEnabled {
 		manager.mu.Unlock()
 		return
 	}
@@ -483,7 +699,8 @@ func (manager *Manager) scheduleAutoRetry(deviceID string, item *entry) {
 
 		manager.mu.Lock()
 		item.autoRetryPending = false
-		if manager.closed || manager.entries[deviceID] != item || !item.desiredEnabled {
+		if manager.closed || manager.subscriberChangeLocked(deviceID) ||
+			manager.entries[deviceID] != item || !item.desiredEnabled {
 			manager.mu.Unlock()
 			return
 		}
@@ -510,26 +727,40 @@ func (manager *Manager) scheduleAutoRetry(deviceID string, item *entry) {
 	}()
 }
 
-func (manager *Manager) watch(deviceID string, states <-chan vowifi.State) {
+func (manager *Manager) watch(
+	ctx context.Context,
+	deviceID string,
+	item *entry,
+	states <-chan vowifi.State,
+) {
 	defer manager.wg.Done()
+	defer close(item.watchDone)
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
-		case <-manager.ctx.Done():
+		case <-ctx.Done():
 			return
 		case state, ok := <-states:
 			if !ok {
 				return
 			}
+			if ctx.Err() != nil {
+				return
+			}
+			manager.mu.Lock()
+			current := !manager.closed && !manager.subscriberChangeLocked(deviceID) &&
+				manager.entries[deviceID] == item
+			manager.mu.Unlock()
+			if !current {
+				return
+			}
 			if state.Phase == vowifi.PhaseFailed {
-				manager.mu.Lock()
-				item := manager.entries[deviceID]
-				manager.mu.Unlock()
-				if item != nil {
-					manager.scheduleAutoRetry(deviceID, item)
-				}
+				manager.scheduleAutoRetry(deviceID, item)
 			} else if state.Phase == vowifi.PhaseSMSReady || !state.Enabled {
 				manager.mu.Lock()
-				if item := manager.entries[deviceID]; item != nil {
+				if manager.entries[deviceID] == item && !manager.subscriberChangeLocked(deviceID) {
 					item.retryFailures = 0
 				}
 				manager.mu.Unlock()
@@ -537,8 +768,8 @@ func (manager *Manager) watch(deviceID string, states <-chan vowifi.State) {
 			if manager.onState == nil {
 				continue
 			}
-			ctx, cancel := context.WithTimeout(manager.ctx, 5*time.Second)
-			err := manager.onState(ctx, state)
+			persistContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := manager.onState(persistContext, state)
 			cancel()
 			if err != nil && !errors.Is(err, context.Canceled) {
 				manager.logger.Error(

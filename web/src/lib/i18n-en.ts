@@ -461,13 +461,35 @@ export const EN_DICT: Record<string, string> = {
   " 的对话": "",
   个国家规则: "country rules",
   "APN（可选）": "APN (optional)",
+  "运营商 IMS / VoWiFi 配置": "Carrier IMS / VoWiFi Profile",
+  "蜂窝数据 APN 与 IMS APN 相互独立；这里的参数由运营商 Profile 决定。":
+    "The cellular-data APN and IMS APN are independent; these values are carrier-profile specific.",
+  "蜂窝数据 APN": "Cellular Data APN",
+  "IMS / VoWiFi APN": "IMS / VoWiFi APN",
+  "EAP 鉴权方法": "EAP Authentication Method",
+  "SIP 传输协议": "SIP Transport",
+  "IMS 短信中心（SMSC）": "IMS SMS Centre (SMSC)",
+  "允许按 IMSI 派生 IMS 身份": "Allow IMSI-derived IMS identities",
+  "没有可靠 ISIM 读取能力时保持兼容；关闭后必须同时填写 IMPI 和 IMPU。":
+    "Keeps compatibility when trusted ISIM reads are unavailable. If disabled, both IMPI and IMPU are required.",
+  "已关闭 IMSI 派生：保存前必须填写完整 IMPI 和 IMPU，否则 IMS 注册将拒绝启动。":
+    "IMSI derivation is disabled. Configure both IMPI and IMPU or IMS registration will fail closed.",
+  "IMPI 和 IMPU 必须同时填写或同时留空。": "IMPI and IMPU must both be configured or both be left empty.",
+  "允许 IKE / ESP SHA-1（弱兼容）": "Allow IKE / ESP SHA-1 (weak compatibility mode)",
+  "仅在运营商明确要求 SHA-1 时启用；修改后需重启服务。":
+    "Enable only when the carrier explicitly requires SHA-1. A service restart is required.",
+  "警告：当前 Profile 将允许 SHA-1 PRF / 完整性算法。":
+    "Warning: this profile allows SHA-1 PRF and integrity algorithms.",
+  "使用 MODP1024 / DH Group 2（弱兼容）": "Use MODP1024 / DH Group 2 (weak compatibility mode)",
+  "仅在运营商明确要求 DH Group 2 时启用；修改后需重启服务。":
+    "Enable only when the carrier explicitly requires DH Group 2. A service restart is required.",
+  "警告：当前 Profile 将把 IKE Diffie-Hellman 降为 1024 位 Group 2。":
+    "Warning: this profile reduces IKE Diffie-Hellman to 1024-bit Group 2.",
   "AT 端口": "AT Port",
   "AT 终端": "AT Terminal",
   "AT 终端暂不可用": "AT terminal unavailable",
   "AT=串口 / QMI=纯 QMI": "AT=serial / QMI=pure QMI",
   "AT=传统串口 / QMI=纯 QMI": "AT=legacy serial / QMI=pure QMI",
-  "E911地址": "E911 Address",
-  "E911地址设置页面打开失败": "Failed to open the E911 address setup page",
   "IMEI 绑定": "IMEI Binding",
   "IP 版本": "IP Version",
   "IPv4 + IPv6（双栈）": "IPv4 + IPv6 (dual stack)",

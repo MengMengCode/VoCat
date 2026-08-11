@@ -23,7 +23,10 @@ func (manager *Manager) SetNetwork(
 		return NetworkResult{}, err
 	}
 	apn := strings.TrimSpace(request.APN)
-	if request.Enabled && apn != "" && !apnPattern.MatchString(apn) {
+	// qmi-network sources its profile as shell syntax for both start and stop.
+	// Validate an optional APN on every path so a disable request cannot inject
+	// additional profile assignments or commands.
+	if apn != "" && !apnPattern.MatchString(apn) {
 		return NetworkResult{}, ErrInvalidNetworkAPN
 	}
 	ipVersion := normalizeIPVersion(request.IPVersion)

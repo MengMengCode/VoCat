@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,8 @@ type fakeDeviceQMIUIMSession struct {
 	sendChannel []byte
 	sendAPDUs   [][]byte
 	responses   [][]byte
+	sendStarted chan struct{}
+	sendOnce    sync.Once
 	closeSlot   uint8
 	closed      bool
 }
@@ -53,6 +56,9 @@ func (session *fakeDeviceQMIUIMSession) SendAPDU(
 	channel byte,
 	apdu []byte,
 ) ([]byte, error) {
+	if session.sendStarted != nil {
+		session.sendOnce.Do(func() { close(session.sendStarted) })
+	}
 	session.sendSlots = append(session.sendSlots, slot)
 	session.sendChannel = append(session.sendChannel, channel)
 	session.sendAPDUs = append(session.sendAPDUs, append([]byte(nil), apdu...))
@@ -62,6 +68,71 @@ func (session *fakeDeviceQMIUIMSession) SendAPDU(
 	response := append([]byte(nil), session.responses[0]...)
 	session.responses = session.responses[1:]
 	return response, nil
+}
+
+func TestNativeWWANEuiccQMITransmitWaitsForDeviceOperationLock(t *testing.T) {
+	const id = "wwan0"
+	manager, err := NewManager(Options{
+		Discoverer: staticDiscoverer{candidates: []modem.Candidate{{
+			ID:         id,
+			QMIControl: "/dev/wwan0qmi0",
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
+
+	session := &fakeDeviceQMIUIMSession{
+		channel:     3,
+		responses:   [][]byte{{0x90, 0x00}},
+		sendStarted: make(chan struct{}),
+	}
+	manager.qmiEUICCOpener = func(context.Context, string) (qmiEUICCSession, error) {
+		return session, nil
+	}
+	channel, err := manager.openEuiccAID(context.Background(), id, isdRAID)
+	if err != nil {
+		t.Fatalf("openEuiccAID: %v", err)
+	}
+	t.Cleanup(func() { channel.close(context.Background()) })
+
+	state, err := manager.lookup(id)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	state.opMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			state.opMu.Unlock()
+		}
+	}()
+	result := make(chan error, 1)
+	go func() {
+		_, _, err := channel.transmit(context.Background(), []byte{0x80, 0xCA, 0x00, 0x00, 0x00}, 0x80)
+		result <- err
+	}()
+
+	select {
+	case <-session.sendStarted:
+		t.Fatal("SendAPDU ran while the device operation lock was held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	state.opMu.Unlock()
+	locked = false
+	select {
+	case <-session.sendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("SendAPDU did not proceed after the device operation lock was released")
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("transmit: %v", err)
+	}
 }
 
 func (session *fakeDeviceQMIUIMSession) Close() error {

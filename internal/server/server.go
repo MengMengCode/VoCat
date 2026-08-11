@@ -84,6 +84,8 @@ type Server struct {
 	netTraffic          *liveNetTracker
 	publicIPMu          sync.RWMutex
 	publicIPs           map[string]cachedPublicIP
+	smsMEMu             sync.Mutex
+	smsMEProvenance     map[string]smsMEProvenance
 }
 
 func New(options Options) (*Server, error) {
@@ -175,6 +177,10 @@ type VoWiFiCallController interface {
 
 type VoWiFiCallMediaController interface {
 	CallMedia(context.Context, string, string) (vowifi.CallMedia, error)
+}
+
+type VoWiFiCallDTMFController interface {
+	SendDTMF(context.Context, string, string, byte, time.Duration) error
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -589,9 +595,9 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(self), geolocation=()")
-		if strings.HasPrefix(r.URL.Path, "/websheets/") || strings.HasPrefix(r.URL.Path, "/plugin-assets/") {
-			// The self-hosted E911 websheet is embedded in an iframe by the SPA, so
-			// it must be frameable same-origin. Every other route stays DENY.
+		if strings.HasPrefix(r.URL.Path, "/plugin-assets/") {
+			// Plugin assets may be embedded by the SPA. The retired E911 websheet
+			// path now returns only a fail-closed JSON error and remains DENY.
 			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 			w.Header().Set(
 				"Content-Security-Policy",

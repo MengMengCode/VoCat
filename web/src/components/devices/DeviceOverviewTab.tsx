@@ -15,8 +15,6 @@ export interface DeviceOverviewTabProps {
   trafficSpeedTx: string;
   trafficMinuteRx: string;
   trafficMinuteTx: string;
-  e911Starting: boolean;
-  onSetupE911: () => void;
   onRefresh: () => void;
 }
 
@@ -38,8 +36,6 @@ export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
         <OverviewSimPanel
           device={device}
           simOperatorDisplay={props.simOperatorDisplay}
-          e911Starting={props.e911Starting}
-          onSetupE911={props.onSetupE911}
         />
         <OverviewNetworkPanel
           device={device}

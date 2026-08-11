@@ -60,6 +60,8 @@ func (s *Server) handleCallAction(w http.ResponseWriter, r *http.Request, config
 	duration := time.Duration(0)
 	number := ""
 	callID := ""
+	var dtmfDigit byte
+	var dtmfDuration time.Duration
 	switch action {
 	case "dial":
 		var request struct {
@@ -73,6 +75,15 @@ func (s *Server) handleCallAction(w http.ResponseWriter, r *http.Request, config
 		number = strings.TrimSpace(request.Number)
 		if !validDialNumber(number) {
 			writeError(w, http.StatusBadRequest, "invalid_number", "phone number is invalid")
+			return true
+		}
+		if isEmergencyDialNumber(number) {
+			writeError(
+				w,
+				http.StatusNotImplemented,
+				"emergency_call_unsupported",
+				"emergency calls are not supported through VoCat; use a carrier-provisioned phone or contact local emergency services directly",
+			)
 			return true
 		}
 		duration = time.Duration(request.DurationSeconds) * time.Second
@@ -101,6 +112,31 @@ func (s *Server) handleCallAction(w http.ResponseWriter, r *http.Request, config
 		}
 		callID = strings.TrimSpace(request.CallID)
 		command = "ATH"
+	case "dtmf":
+		var request struct {
+			CallID     string `json:"call_id"`
+			Digit      string `json:"digit"`
+			DurationMS int    `json:"duration_ms"`
+		}
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return true
+		}
+		callID = strings.TrimSpace(request.CallID)
+		var valid bool
+		dtmfDigit, valid = normalizeDTMFDigit(request.Digit)
+		if !valid {
+			writeError(w, http.StatusBadRequest, "invalid_dtmf_digit", "digit must be one of 0-9, *, #, or A-D")
+			return true
+		}
+		if request.DurationMS == 0 {
+			request.DurationMS = 120
+		}
+		if request.DurationMS < 40 || request.DurationMS > 5000 {
+			writeError(w, http.StatusBadRequest, "invalid_dtmf_duration", "duration_ms must be between 40 and 5000")
+			return true
+		}
+		dtmfDuration = time.Duration(request.DurationMS) * time.Millisecond
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "call action not found")
 		return true
@@ -128,6 +164,17 @@ func (s *Server) handleCallAction(w http.ResponseWriter, r *http.Request, config
 			if err == nil {
 				err = controller.HangupCall(r.Context(), config.ID, callID)
 			}
+		case "dtmf":
+			callID, err = resolveVoWiFiCallID(controller, config.ID, callID, "active")
+			if err == nil {
+				dtmfController, ok := s.vowifi.(VoWiFiCallDTMFController)
+				if !ok {
+					writeError(w, http.StatusNotImplemented, "vowifi_dtmf_unavailable", "the active IMS media session does not expose RFC 4733 DTMF")
+					return true
+				}
+				err = dtmfController.SendDTMF(r.Context(), config.ID, callID, dtmfDigit, dtmfDuration)
+				result = map[string]any{"digit": string(dtmfDigit), "duration_ms": int(dtmfDuration / time.Millisecond)}
+			}
 		}
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "vowifi_call_failed", err.Error())
@@ -142,10 +189,19 @@ func (s *Server) handleCallAction(w http.ResponseWriter, r *http.Request, config
 			}
 		}
 		s.recordAudit(r.Context(), "admin", "call."+action, "device", config.ID, "success", transport)
-		writeJSON(w, http.StatusAccepted, map[string]any{"data": map[string]any{
+		responseData := map[string]any{
 			"accepted": true, "action": action, "number": number, "call_id": callID,
 			"duration_seconds": int(duration / time.Second), "transport": transport, "call": result,
-		}})
+		}
+		if action == "dtmf" {
+			responseData["digit"] = string(dtmfDigit)
+			responseData["duration_ms"] = int(dtmfDuration / time.Millisecond)
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"data": responseData})
+		return true
+	}
+	if action == "dtmf" {
+		writeError(w, http.StatusNotImplemented, "cellular_dtmf_unavailable", "cellular in-call DTMF is not implemented by this modem control path")
 		return true
 	}
 	operationContext, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -240,6 +296,52 @@ func validDialNumber(value string) bool {
 		return false
 	}
 	return true
+}
+
+func normalizeDTMFDigit(value string) (byte, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) != 1 {
+		return 0, false
+	}
+	digit := value[0]
+	if digit >= 'a' && digit <= 'd' {
+		digit -= 'a' - 'A'
+	}
+	if digit >= '0' && digit <= '9' || digit == '*' || digit == '#' || digit >= 'A' && digit <= 'D' {
+		return digit, true
+	}
+	return 0, false
+}
+
+// isEmergencyDialNumber recognizes universal and common national emergency
+// short codes before either the modem ATD path or the VoWiFi IMS path is
+// selected. VoCat does not implement carrier emergency registration, emergency
+// APN/bearer setup, location provisioning, or emergency-call routing, so these
+// numbers must never be presented as ordinary calls.
+func isEmergencyDialNumber(value string) bool {
+	number := strings.TrimSpace(value)
+	number = strings.TrimPrefix(number, "+")
+	for _, prefix := range []string{"*31#", "#31#"} {
+		number = strings.TrimPrefix(number, prefix)
+	}
+	switch number {
+	case "000", // Australia
+		"08",             // legacy/mobile emergency short code in several regions
+		"15", "17", "18", // France medical, police, fire
+		"100", "101", "102", "108", // India legacy and integrated emergency services
+		"110", "119", "120", "122", // China police, fire, ambulance, traffic police
+		"111",                      // New Zealand
+		"112",                      // GSM/3GPP universal emergency number
+		"113", "115", "117", "118", // common European national emergency services
+		"144", "166", // ambulance services in parts of Europe
+		"190", "191", "192", "193", // Brazil emergency services
+		"911",               // North American and other integrated emergency services
+		"995",               // Singapore fire and ambulance
+		"997", "998", "999": // European/UK and other national emergency services
+		return true
+	default:
+		return false
+	}
 }
 
 func parseCLCC(response modem.Response) []map[string]any {

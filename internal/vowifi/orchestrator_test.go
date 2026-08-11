@@ -153,7 +153,16 @@ func (fake fakeSIM) ReadIdentity(ctx context.Context, _ string) (SIMIdentity, er
 	if err := fake.environment.record(ctx, "sim.identity"); err != nil {
 		return SIMIdentity{}, err
 	}
-	return fake.environment.identity, nil
+	fake.environment.mu.Lock()
+	identity := fake.environment.identity
+	fake.environment.mu.Unlock()
+	return identity, nil
+}
+
+func (environment *fakeEnvironment) setIdentity(identity SIMIdentity) {
+	environment.mu.Lock()
+	environment.identity = identity
+	environment.mu.Unlock()
 }
 
 type fakeAKA struct{ environment *fakeEnvironment }
@@ -254,6 +263,20 @@ func (fake *fakeIMSSession) EnableSMS(ctx context.Context) (SMSEvidence, error) 
 		return SMSEvidence{}, err
 	}
 	return fake.environment.smsEvidence, nil
+}
+
+func (fake *fakeIMSSession) SendSMS(ctx context.Context, request SMSSubmitRequest) (SMSSubmitResult, error) {
+	if err := fake.environment.record(ctx, "ims.send_sms"); err != nil {
+		return SMSSubmitResult{}, err
+	}
+	return SMSSubmitResult{
+		To:               request.Recipient,
+		PartsTotal:       1,
+		PartsAttempted:   1,
+		PartsAccepted:    1,
+		AllPartsAccepted: true,
+		SubmissionStatus: "accepted_by_ims",
+	}, nil
 }
 
 func (fake *fakeIMSSession) Close(ctx context.Context) error {
@@ -815,6 +838,96 @@ func TestRuntimeIMSFailureRevokesRegistrationEvidence(t *testing.T) {
 	}
 }
 
+func TestRuntimeSIMChangeRevokesOldSubscriberSMSWithoutRetry(t *testing.T) {
+	environment := newFakeEnvironment()
+	orchestrator := newTestOrchestratorWithOptions(t, environment, Options{
+		DeviceID:              "EC20",
+		CleanupTimeout:        time.Second,
+		IdentityCheckInterval: 5 * time.Millisecond,
+	})
+	if _, err := orchestrator.Enable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	changed := environment.identity
+	changed.ICCID = "8999900000000000000"
+	changed.IMSI = "310260999999999"
+	changed.HomeMCC = "310"
+	changed.HomeMNC = "260"
+	environment.setIdentity(changed)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state := orchestrator.State()
+		if state.LastReason == "runtime_sim_identity_changed" {
+			if state.Phase != PhaseIdle || state.Enabled || state.Active ||
+				state.SIMReady || state.TunnelReady || state.IMSReady || state.SMSReady ||
+				state.LastErrorClass != "sim_identity_changed" ||
+				state.LastError != ErrSIMIdentityChanged.Error() {
+				t.Fatalf("identity-change state = %+v", state)
+			}
+			calls := environment.callsSnapshot()
+			wantTail := []string{"ims.close", "tunnel.close", "radio.restore"}
+			if len(calls) < len(wantTail) || !reflect.DeepEqual(calls[len(calls)-len(wantTail):], wantTail) {
+				t.Fatalf("identity-change cleanup tail = %#v", calls)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for SIM identity revocation; state=%+v", orchestrator.State())
+}
+
+func TestSendSMSRechecksLiveSIMIdentityAndRevokesStaleSession(t *testing.T) {
+	environment := newFakeEnvironment()
+	orchestrator := newTestOrchestrator(t, environment, false)
+	if _, err := orchestrator.Enable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	changed := environment.identity
+	changed.ICCID = "8999900000000000000"
+	changed.IMSI = "310260999999999"
+	environment.setIdentity(changed)
+
+	result, err := orchestrator.SendSMS(context.Background(), SMSSubmitRequest{
+		Recipient: "+12025550123",
+		Text:      "hello",
+	})
+	if !errors.Is(err, ErrSMSNotReady) || !errors.Is(err, ErrSIMIdentityChanged) {
+		t.Fatalf("SendSMS error = %v, want SMS-not-ready identity change", err)
+	}
+	if result.PartsAttempted != 0 || environment.callCount("ims.send_sms") != 0 {
+		t.Fatalf("stale IMS submission reached sender: result=%+v calls=%#v", result, environment.callsSnapshot())
+	}
+	state := orchestrator.State()
+	if state.Phase != PhaseIdle || state.Enabled || state.Active || state.IMSReady || state.SMSReady ||
+		state.LastReason != "runtime_sim_identity_changed" {
+		t.Fatalf("identity-change state = %+v", state)
+	}
+}
+
+func TestSendSMSFailsClosedWhenLiveSIMCannotBeRead(t *testing.T) {
+	environment := newFakeEnvironment()
+	orchestrator := newTestOrchestrator(t, environment, false)
+	if _, err := orchestrator.Enable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	environment.setFailure("sim.identity", 1)
+
+	result, err := orchestrator.SendSMS(context.Background(), SMSSubmitRequest{
+		Recipient: "+12025550123",
+		Text:      "hello",
+	})
+	if !errors.Is(err, ErrSMSNotReady) {
+		t.Fatalf("SendSMS error = %v, want ErrSMSNotReady", err)
+	}
+	if result.PartsAttempted != 0 || environment.callCount("ims.send_sms") != 0 {
+		t.Fatalf("unverified IMS submission reached sender: result=%+v calls=%#v", result, environment.callsSnapshot())
+	}
+	if state := orchestrator.State(); state.Phase != PhaseSMSReady || !state.SMSReady {
+		t.Fatalf("transient identity read failure tore down session: %+v", state)
+	}
+}
+
 func TestSubscriptionPublishesOrderedEvidencePhases(t *testing.T) {
 	environment := newFakeEnvironment()
 	orchestrator := newTestOrchestrator(t, environment, false)
@@ -920,5 +1033,131 @@ func TestNewRejectsMissingProvidersAndInvalidOptions(t *testing.T) {
 	}
 	if _, err := New(dependencies, Options{}); err == nil {
 		t.Fatal("New() accepted empty device ID")
+	}
+}
+
+// smscSIM is a SIM reader that also answers the service-centre probe, the
+// shape EC20/EC25 firmware has through AT+CSCA?.
+type smscSIM struct {
+	environment *fakeEnvironment
+	value       string
+	err         error
+	calls       int
+}
+
+func (fake *smscSIM) ReadIdentity(ctx context.Context, deviceID string) (SIMIdentity, error) {
+	return fakeSIM{fake.environment}.ReadIdentity(ctx, deviceID)
+}
+
+func (fake *smscSIM) ReadSMSCenter(context.Context, string) (string, error) {
+	fake.calls++
+	return fake.value, fake.err
+}
+
+// smscAKA is an AKA provider that also answers the probe, the shape a native
+// Qualcomm 410 has through QMI while its AT port stays silent.
+type smscAKA struct {
+	environment *fakeEnvironment
+	value       string
+	err         error
+	calls       int
+}
+
+func (fake *smscAKA) CheckReady(ctx context.Context, identity SIMIdentity) (AKAEvidence, error) {
+	return fakeAKA{fake.environment}.CheckReady(ctx, identity)
+}
+
+func (fake *smscAKA) Authenticate(
+	ctx context.Context,
+	identity SIMIdentity,
+	challenge AKAChallenge,
+) (AKAResult, error) {
+	return fakeAKA{fake.environment}.Authenticate(ctx, identity, challenge)
+}
+
+func (fake *smscAKA) ReadSMSCenter(context.Context, string) (string, error) {
+	fake.calls++
+	return fake.value, fake.err
+}
+
+// smscDualRole fills both dependency slots with one object, as the EC20
+// adapter does in production.
+type smscDualRole struct {
+	smscAKA
+}
+
+func (fake *smscDualRole) ReadIdentity(ctx context.Context, deviceID string) (SIMIdentity, error) {
+	return fakeSIM{fake.environment}.ReadIdentity(ctx, deviceID)
+}
+
+func newSMSCenterOrchestrator(
+	t *testing.T,
+	environment *fakeEnvironment,
+	sim SIMIdentityReader,
+	aka AKAProvider,
+) *Orchestrator {
+	t.Helper()
+	orchestrator, err := New(Dependencies{
+		SIM:    sim,
+		AKA:    aka,
+		Radio:  fakeRadio{environment},
+		Proxy:  fakeProxy{environment},
+		Tunnel: fakeTunnelProvider{environment},
+		IMS:    fakeIMSProvider{environment},
+		Phones: fakePhones{environment},
+	}, Options{DeviceID: "wwan0", CleanupTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return orchestrator
+}
+
+func TestReadSMSCenterFallsBackToTheAKAProvider(t *testing.T) {
+	environment := newFakeEnvironment()
+	sim := &smscSIM{environment: environment, err: errors.New("AT+CSCA? is not supported")}
+	aka := &smscAKA{environment: environment, value: "  +447785016005  "}
+	orchestrator := newSMSCenterOrchestrator(t, environment, sim, aka)
+
+	value, failures := orchestrator.readSMSCenter(context.Background())
+	if value != "+447785016005" {
+		t.Fatalf("service centre = %q, want %q", value, "+447785016005")
+	}
+	if len(failures) != 0 {
+		t.Fatalf("failures = %v, want none once a source succeeded", failures)
+	}
+	if sim.calls != 1 || aka.calls != 1 {
+		t.Fatalf("probe counts sim=%d aka=%d, want 1 and 1", sim.calls, aka.calls)
+	}
+}
+
+func TestReadSMSCenterSkipsAnEmptySIMAnswer(t *testing.T) {
+	environment := newFakeEnvironment()
+	sim := &smscSIM{environment: environment, value: "   "}
+	aka := &smscAKA{environment: environment, value: "+447785016005"}
+	orchestrator := newSMSCenterOrchestrator(t, environment, sim, aka)
+
+	value, failures := orchestrator.readSMSCenter(context.Background())
+	if value != "+447785016005" {
+		t.Fatalf("service centre = %q, want the AKA provider's value", value)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("failures = %v, want none; a blank answer is not an error", failures)
+	}
+}
+
+func TestReadSMSCenterProbesADualRoleProviderOnce(t *testing.T) {
+	environment := newFakeEnvironment()
+	dual := &smscDualRole{smscAKA{environment: environment, err: errors.New("AT+CSCA? is not supported")}}
+	orchestrator := newSMSCenterOrchestrator(t, environment, dual, dual)
+
+	value, failures := orchestrator.readSMSCenter(context.Background())
+	if value != "" {
+		t.Fatalf("service centre = %q, want it empty", value)
+	}
+	if len(failures) != 1 {
+		t.Fatalf("failures = %v, want exactly one; the same provider must not be probed twice", failures)
+	}
+	if dual.calls != 1 {
+		t.Fatalf("probe count = %d, want 1", dual.calls)
 	}
 }

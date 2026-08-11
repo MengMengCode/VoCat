@@ -1,0 +1,22 @@
+# Explicit Linux hardware-access override for supported modem hosts.
+#
+# This mode is equivalent to giving VoCat broad root access to the host's
+# devices and network namespace. Review it before use, then start with:
+#   docker compose -f docker-compose.yml -f docker-compose.hardware.yml up -d
+
+services:
+  vocat:
+    # Host networking is required for QMI-created WWAN interfaces, policy
+    # routing, XFRM/IPsec state, and SO_BINDTODEVICE to affect the host links.
+    network_mode: host
+    ports: !reset []
+
+    # Device nodes can be created after startup and the 410/QMI paths need more
+    # than a fixed tty mapping. Privileged root mode is therefore explicit here
+    # instead of being hidden in the default deployment.
+    privileged: true
+    user: "0:0"
+
+    volumes:
+      - /dev:/dev
+      - /sys:/sys:ro

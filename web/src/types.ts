@@ -195,6 +195,15 @@ export interface DeviceConfig {
   audioDevice?: string;
   modemImei?: string;
   apn: string;
+  imsApn: string;
+  imsPrivateIdentity: string;
+  imsPublicIdentity: string;
+  imsSmsCenter: string;
+  imsTransport: "tcp" | "udp";
+  imsAllowImsiDerivedIdentity: boolean;
+  vowifiEapMethod: "aka" | "aka-prime";
+  vowifiAllowSha1: boolean;
+  vowifiUseModp1024: boolean;
   proxyPort: number;
   baudRate: number;
   dataBits: number;

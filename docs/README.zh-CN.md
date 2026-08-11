@@ -41,7 +41,7 @@ Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组的开源 Web 控制�
 | 射频与网络 | 注册状态、运营商、信号指标、RSRP/RSRQ/SINR、网络模式、频段、信道、运营商扫描以及自动/手动选网。 |
 | AT 与 USSD | 交互式 AT 终端、命令历史、原始模组响应、USSD 发起/继续/取消流程以及清晰的模组错误上报。 |
 | 短信 | 蜂窝与 IMS 短信直接发送、入站同步、长短信合并、送达报告、会话历史、未读状态、时间戳以及逐条消息的送达状态。 |
-| WiFi Calling | IKEv2/ePDG 隧道建立、EAP-AKA 鉴权、IMS 注册、IMS 短信、重连控制、状态诊断以及按设备路由。 |
+| WiFi Calling | IKEv2/ePDG 隧道、EAP-AKA/EAP-AKA' 鉴权、IMS 注册、IMS 短信与通话、重连控制、状态诊断及按设备路由的工程实现；运营商互通性需另行验证。 |
 | eSIM 与 eUICC | eUICC 发现、EID 与生产信息、证书元数据、多 eUICC 清单、已安装配置文件列表、启用/禁用/切换操作,以及在卡片支持时进行下载、重命名和删除。 |
 | 卡策略 | 基于 ICCID 的 WiFi Calling 与飞行模式行为,策略即时应用。 |
 | 代理路由 | 上游 SOCKS 路由、设备绑定、国家规则、TCP 可达性检查以及面向 WiFi Calling 数据路径的 UDP Associate 检查。 |
@@ -60,6 +60,53 @@ Vocat 面向基于高通芯片、并暴露兼容 AT、QMI、串口与 USB 网络
 - 兼容的 EG600 及相关模组
 
 可用功能取决于模组固件、USB 复合设备配置、SIM/eSIM 能力、主机驱动、无线网络以及运营商配置。
+
+仅凭 Snapdragon 410/MSM8916 或 OpenStick 外形不能视为受支持。该路径还
+需要匹配的基带、可用的 UIM/QMI 控制口、主机 WWAN 驱动以及运营商
+IMS/VoWiFi 权限，并必须在实际硬件与 SIM 组合上验收。
+
+## 能力与验收边界
+
+Vocat **不是**完整的高通蜂窝 IMS/VoLTE 栈。蜂窝侧通过 QMI 建立分组数据
+会话，通过模组 AT 命令完成拨号、接听、挂断及通话列表操作。通话最终使用
+VoLTE、回落到电路域还是失败，由模组固件、SIM、无线网络及运营商配置决定。
+Vocat 目前不自行实现蜂窝 IMS PDN/注册、专用语音承载、QMI IMSA/VOICE、
+SRVCC 或 LTE 与 WiFi 之间的通话连续性。
+
+VoWiFi 代码是工程实现，不代表运营商认证，也不能证明任意 Snapdragon 410
+设备支持 WiFi Calling。不要只看界面状态；应按以下顺序保存目标设备的基带
+日志、抓包及通话/媒体证据：
+
+| 阶段 | 必需证据 | 当前责任边界 |
+| --- | --- | --- |
+| 0. 平台 | MSM8916/基带版本、UIM、QMI/AT 端口、主机驱动 | 硬件镜像与设备集成；逐台验证 |
+| 1. LTE 数据 | LTE 注册、默认数据会话、地址、DNS 与路由流量 | Vocat QMI 数据控制加模组/网络 |
+| 2. 蜂窝 IMS | 独立 IMS 连通性与 P-CSCF 发现 | 模组/运营商；Vocat 未实现蜂窝 IMS 栈 |
+| 3. VoLTE | IMS 已注册、主被叫、双向媒体与紧急策略检查 | 模组/运营商；仅 AT 拨号成功不够 |
+| 4. ePDG | 正确的运营商 ePDG FQDN 与可达 DNS 结果 | Vocat 加运营商 DNS/配置 |
+| 5. IKE | 算法协商及 ePDG 证书/AUTH 验证 | Vocat；用外层隧道抓包确认 |
+| 6. EAP | 配置的 EAP-AKA 或 EAP-AKA' 使用目标 UICC 成功 | Vocat/UICC/运营商；收到挑战不等于成功 |
+| 7. CHILD_SA | 内层 IP、流量选择器及可达 P-CSCF | Vocat；验证路由与加密流量 |
+| 8. VoWiFi IMS | IMS 注册、主被叫短信/通话及双向媒体 | Vocat/运营商互通；逐配置验证 |
+| 9. 连续性 | LTE→WiFi 与 WiFi→LTE 通话切换成功 | 当前未实现 |
+
+紧急呼叫和运营商登记的紧急地址需要运营商集成及当地认证。Vocat 不能作为
+已认证的紧急呼叫方案，因此会拒绝紧急号码拨号，也不声称能够登记紧急地址。
+
+验收时还需注意以下实现限制：
+
+- QMI 分组数据后端目前只支持 IPv4。请求 `IPV4V6` 时会明确报告降级为
+  IPv4；IPv6-only 请求会在启动数据会话前失败。
+- VoWiFi 媒体支持 G.711 PCMA/PCMU、RTCP 及协商后的 RFC 4733 DTMF；
+  不提供 AMR-NB/AMR-WB 转码，运营商只提供 AMR 时会明确拒绝。
+- IMS APN、私有/公共身份、传输协议、SMSC 与 EAP 方法按设备配置，并与
+  蜂窝数据 APN 分离。保存后需重启 Vocat，内存中的 VoWiFi 运行时才会重建。
+- IKE 默认使用 MODP2048 与 SHA-256。SHA-1 兼容和 MODP1024 是两个独立的
+  设备开关，默认均关闭；只应按已验证运营商 Profile 的实际要求启用对应项，
+  升级时不会再按 PLMN 静默开启弱算法。
+- IMS SMSC 留空时，Vocat 优先读取 SIM/模组的 `AT+CSCA?`；不再提供任何
+  运营商专用的全局 SMSC 默认值。升级不会保留旧版仅适用于 Vodafone 的
+  硬编码回退；SIM 返回空值时需明确填写运营商 SMSC。
 
 ## 安装
 
@@ -86,6 +133,11 @@ sudo bash install.sh 0.0.2
 - 将运行时配置存放在 `/etc/vocat/env`;
 - 首次安装时生成随机初始管理员密码。
 
+安装器还会安装并验证运行时网络工具：`iproute2`、包含 `udhcpc` applet 的
+BusyBox，以及 libqmi 的 `qmi-network`、`qmicli` 和 `qmi-proxy`。Debian/
+Ubuntu 使用 `iproute2`、`busybox`、`libqmi-utils`，Alpine 使用
+`iproute2`、`busybox`、`qmi-utils`；其他发行版需安装等价软件包。
+
 安装完成后打开:
 
 ```text
@@ -103,6 +155,14 @@ http://<服务器地址>:7575
 | Linux ARM64 | `vocat-linux-arm64` |
 | Linux ARMv7 | `vocat-linux-armv7` |
 
+先安装上述运行时软件包，并确认工具可用：
+
+```bash
+command -v ip busybox qmi-network qmicli
+busybox udhcpc --help >/dev/null
+command -v qmi-proxy >/dev/null 2>&1 || test -x /usr/libexec/qmi-proxy
+```
+
 校验并安装:
 
 ```bash
@@ -119,7 +179,31 @@ sudo env \
 
 ### Docker
 
-如果 Linux 主机需要发现每一个接入的受支持 Quectel 模组,并持续感知 USB 热插拔事件,请以硬件访问模式运行 Vocat:
+默认 Compose 以普通桥接容器启动，不提供主机设备权限。它适合查看界面与配置，
+不能发现或控制模组，也不是 Snapdragon 410 的测试或部署方式：
+
+```bash
+cp .env.example .env
+# 在 .env 中设置 VOCAT_ADMIN_PASSWORD。
+docker compose up -d
+```
+
+在受信任的 Linux 模组主机上，显式叠加硬件配置：
+
+```bash
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.hardware.yml \
+  up -d
+```
+
+硬件配置使用 Compose `!reset` 标签，需要 Docker Compose 2.24 或更新版本。
+它会切换到主机网络、以特权 root 运行，并挂载主机 `/dev` 与 `/sys`。这为
+QMI 创建的 WWAN 接口、串口/QMI 热插拔、TUN/XFRM 和策略路由所需，同时也
+赋予容器广泛的主机控制权；使用前请审查 `docker-compose.hardware.yml`。
+
+官方镜像包含并在构建时验证 `iproute2`、BusyBox `udhcpc`、
+`qmi-network`、`qmicli` 与 `qmi-proxy`。仅使用镜像部署硬件时，等价命令为：
 
 ```bash
 docker pull ghcr.io/mengmengcode/vocat:latest
@@ -137,7 +221,8 @@ docker run -d \
   ghcr.io/mengmengcode/vocat:latest
 ```
 
-容器启动后打开 `http://<服务器地址>:7575`。主机网络是必需的,这样 QMI 网络接口才能对 Vocat 可见;而特权设备访问是串口、QMI 控制节点、TUN 接口、网络配置以及容器启动后新增设备所必需的。`/dev` 挂载使新的 `ttyUSB*`、`ttyACM*` 和 `cdc-wdm*` 节点无需重建容器即可见。
+容器启动后打开 `http://<服务器地址>:7575`。`/dev` 挂载使新的
+`ttyUSB*`、`ttyACM*` 和 `cdc-wdm*` 节点无需重建容器即可见。
 
 该模式有意赋予 Vocat 对主机设备与网络栈的广泛访问权限,仅在受信任的 Linux 主机上使用。自动发现目前仅识别受支持的 Quectel USB 模组(USB 厂商 ID `2c7c`),不识别任意品牌的模组。仅用 `--device` 映射单个节点(例如 `/dev/ttyUSB2` 与 `/dev/cdc-wdm0`)会将容器限定在这些固定节点上,无法提供完整的多设备或热插拔发现。
 
@@ -262,7 +347,7 @@ internal/modem/             AT 会话与响应处理
 internal/server/            HTTP API、通知与内嵌 Web 服务器
 internal/store/             SQLite 持久化
 internal/update/            GitHub Release 自更新器
-internal/vowifi/            IKE、EAP-AKA、IMS 与 WiFi Calling 运行时
+internal/vowifi/            IKE、EAP-AKA/EAP-AKA'、IMS 与 WiFi Calling 运行时
 scripts/install.sh          Linux 安装与更新脚本
 web/src/                    React 与 TypeScript 前端
 .github/workflows/          二进制与 Docker 发布自动化

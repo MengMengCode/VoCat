@@ -208,6 +208,16 @@ func (adapter *EC20Adapter) ReadSMSCenter(ctx context.Context, deviceID string) 
 		return "", errors.New("vocat: EC20 returned no SMS service-centre address")
 	}
 	value := strings.Trim(strings.TrimSpace(fields[0]), `"`)
+	// 3GPP TS 27.007 permits an international service-centre number to be
+	// returned without a leading "+" when <tosca> carries TON=international
+	// (145 / 0x91). Preserve that type information so SMS-over-IMS builds both
+	// the tel URI and RP destination as an international address while roaming.
+	if len(fields) > 1 {
+		if tosca, parseErr := strconv.Atoi(strings.TrimSpace(fields[1])); parseErr == nil &&
+			tosca&0x70 == 0x10 && !strings.HasPrefix(value, "+") {
+			value = "+" + value
+		}
+	}
 	digits := strings.TrimPrefix(value, "+")
 	if !validDigits(digits, 3, 20) {
 		return "", errors.New("vocat: EC20 returned an invalid SMS service-centre address")

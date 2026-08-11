@@ -1,5 +1,4 @@
 import { EyeRegular, EyeOffRegular } from "@fluentui/react-icons";
-import { Button } from "../ui";
 import { FieldRow } from "./FieldRow";
 import { useShowSensitive } from "./shared";
 import type { DeviceDetail } from "./types";
@@ -9,11 +8,9 @@ import { carrierIso, flagEmoji } from "../../lib/carrier";
 export interface OverviewSimPanelProps {
   device: DeviceDetail;
   simOperatorDisplay: string;
-  e911Starting: boolean;
-  onSetupE911: () => void;
 }
 
-export function OverviewSimPanel({ device, simOperatorDisplay, e911Starting, onSetupE911 }: OverviewSimPanelProps) {
+export function OverviewSimPanel({ device, simOperatorDisplay }: OverviewSimPanelProps) {
   const { t } = useI18n();
   const [showSensitive, toggleSensitive] = useShowSensitive();
   const modem = device.modem;
@@ -44,14 +41,6 @@ export function OverviewSimPanel({ device, simOperatorDisplay, e911Starting, onS
         <FieldRow label="ICCID" value={modem?.iccid} sensitive={sensitive} monospace copyable />
         <FieldRow label="IMSI" value={modem?.imsi} sensitive={sensitive} monospace copyable />
         <FieldRow label={t("本机号码")} value={device.localPhone || "--"} sensitive={sensitive} monospace copyable />
-        {device?.e911SetupAvailable ? (
-          <div className="flex justify-between gap-3">
-            <span className="text-gray-500">{t("E911地址")}</span>
-            <Button variant="primary" size="small" plain loading={e911Starting} className="!border-0" onClick={onSetupE911}>
-              {t("设置")}
-            </Button>
-          </div>
-        ) : null}
         {activeEsim ? <FieldRow label={t("当前eSIM")} value={activeEsim} monospace copyable /> : null}
         <FieldRow label={t("原运营商")} value={operatorValue} copyable />
         <FieldRow label={t("固件版本")} value={modem?.firmware} monospace copyable />

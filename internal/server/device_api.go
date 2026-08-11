@@ -60,29 +60,38 @@ type activeESIMProfileReader interface {
 }
 
 type deviceConfigPayload struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	DeviceType         string `json:"device_type"`
-	Interface          string `json:"interface"`
-	ControlDevice      string `json:"control_device"`
-	ATPort             string `json:"at_port"`
-	USBPath            string `json:"usb_path"`
-	AudioDevice        string `json:"audio_device"`
-	ModemIMEI          string `json:"modem_imei"`
-	APN                string `json:"apn"`
-	ProxyPort          int    `json:"proxy_port"`
-	BaudRate           int    `json:"baud_rate"`
-	DataBits           int    `json:"data_bits"`
-	StopBits           int    `json:"stop_bits"`
-	Parity             string `json:"parity"`
-	DeviceBackend      string `json:"device_backend"`
-	ESIMTransport      string `json:"esim_transport"`
-	QMIUseProxy        bool   `json:"qmi_use_proxy"`
-	QMIProxyPath       string `json:"qmi_proxy_path"`
-	QMIProxyExecutable string `json:"qmi_proxy_executable"`
-	NetworkEnabled     bool   `json:"network_enabled"`
-	SMSEnabled         bool   `json:"sms_enabled"`
-	VoWiFiEnabled      bool   `json:"vowifi_enabled"`
+	ID                          string `json:"id"`
+	Name                        string `json:"name"`
+	DeviceType                  string `json:"device_type"`
+	Interface                   string `json:"interface"`
+	ControlDevice               string `json:"control_device"`
+	ATPort                      string `json:"at_port"`
+	USBPath                     string `json:"usb_path"`
+	AudioDevice                 string `json:"audio_device"`
+	ModemIMEI                   string `json:"modem_imei"`
+	APN                         string `json:"apn"`
+	IMSAPN                      string `json:"ims_apn"`
+	IMSPrivateIdentity          string `json:"ims_private_identity"`
+	IMSPublicIdentity           string `json:"ims_public_identity"`
+	IMSSMSCenter                string `json:"ims_sms_center"`
+	IMSTransport                string `json:"ims_transport"`
+	IMSAllowIMSIDerivedIdentity *bool  `json:"ims_allow_imsi_derived_identity"`
+	VoWiFiEAPMethod             string `json:"vowifi_eap_method"`
+	VoWiFiAllowSHA1             bool   `json:"vowifi_allow_sha1"`
+	VoWiFiUseMODP1024           bool   `json:"vowifi_use_modp1024"`
+	ProxyPort                   int    `json:"proxy_port"`
+	BaudRate                    int    `json:"baud_rate"`
+	DataBits                    int    `json:"data_bits"`
+	StopBits                    int    `json:"stop_bits"`
+	Parity                      string `json:"parity"`
+	DeviceBackend               string `json:"device_backend"`
+	ESIMTransport               string `json:"esim_transport"`
+	QMIUseProxy                 bool   `json:"qmi_use_proxy"`
+	QMIProxyPath                string `json:"qmi_proxy_path"`
+	QMIProxyExecutable          string `json:"qmi_proxy_executable"`
+	NetworkEnabled              bool   `json:"network_enabled"`
+	SMSEnabled                  bool   `json:"sms_enabled"`
+	VoWiFiEnabled               bool   `json:"vowifi_enabled"`
 }
 
 func (payload deviceConfigPayload) toStoreDevice() store.Device {
@@ -90,30 +99,55 @@ func (payload deviceConfigPayload) toStoreDevice() store.Device {
 	if name == "" {
 		name = payload.ID
 	}
+	imsAPN := strings.TrimSpace(payload.IMSAPN)
+	if imsAPN == "" {
+		imsAPN = "ims"
+	}
+	imsTransport := strings.ToLower(strings.TrimSpace(payload.IMSTransport))
+	if imsTransport == "" {
+		imsTransport = "tcp"
+	}
+	vowifiEAPMethod := strings.ToLower(strings.TrimSpace(payload.VoWiFiEAPMethod))
+	if vowifiEAPMethod == "" {
+		vowifiEAPMethod = "aka"
+	}
+	allowIMSIDerivedIdentity := true
+	if payload.IMSAllowIMSIDerivedIdentity != nil {
+		allowIMSIDerivedIdentity = *payload.IMSAllowIMSIDerivedIdentity
+	}
 	return store.Device{
-		ID:                 strings.TrimSpace(payload.ID),
-		Name:               name,
-		DeviceType:         store.NormalizeDeviceType(payload.DeviceType),
-		Interface:          strings.TrimSpace(payload.Interface),
-		ControlDevice:      strings.TrimSpace(payload.ControlDevice),
-		ATPort:             strings.TrimSpace(payload.ATPort),
-		USBPath:            strings.TrimSpace(payload.USBPath),
-		AudioDevice:        strings.TrimSpace(payload.AudioDevice),
-		ModemIMEI:          strings.TrimSpace(payload.ModemIMEI),
-		APN:                strings.TrimSpace(payload.APN),
-		ProxyPort:          payload.ProxyPort,
-		BaudRate:           payload.BaudRate,
-		DataBits:           payload.DataBits,
-		StopBits:           payload.StopBits,
-		Parity:             payload.Parity,
-		DeviceBackend:      payload.DeviceBackend,
-		ESIMTransport:      payload.ESIMTransport,
-		QMIUseProxy:        payload.QMIUseProxy,
-		QMIProxyPath:       strings.TrimSpace(payload.QMIProxyPath),
-		QMIProxyExecutable: strings.TrimSpace(payload.QMIProxyExecutable),
-		NetworkEnabled:     payload.NetworkEnabled,
-		SMSEnabled:         payload.SMSEnabled,
-		VoWiFiEnabled:      payload.VoWiFiEnabled,
+		ID:                          strings.TrimSpace(payload.ID),
+		Name:                        name,
+		DeviceType:                  store.NormalizeDeviceType(payload.DeviceType),
+		Interface:                   strings.TrimSpace(payload.Interface),
+		ControlDevice:               strings.TrimSpace(payload.ControlDevice),
+		ATPort:                      strings.TrimSpace(payload.ATPort),
+		USBPath:                     strings.TrimSpace(payload.USBPath),
+		AudioDevice:                 strings.TrimSpace(payload.AudioDevice),
+		ModemIMEI:                   strings.TrimSpace(payload.ModemIMEI),
+		APN:                         strings.TrimSpace(payload.APN),
+		IMSAPN:                      imsAPN,
+		IMSPrivateIdentity:          strings.TrimSpace(payload.IMSPrivateIdentity),
+		IMSPublicIdentity:           strings.TrimSpace(payload.IMSPublicIdentity),
+		IMSSMSCenter:                strings.TrimSpace(payload.IMSSMSCenter),
+		IMSTransport:                imsTransport,
+		IMSAllowIMSIDerivedIdentity: allowIMSIDerivedIdentity,
+		VoWiFiEAPMethod:             vowifiEAPMethod,
+		VoWiFiAllowSHA1:             payload.VoWiFiAllowSHA1,
+		VoWiFiUseMODP1024:           payload.VoWiFiUseMODP1024,
+		ProxyPort:                   payload.ProxyPort,
+		BaudRate:                    payload.BaudRate,
+		DataBits:                    payload.DataBits,
+		StopBits:                    payload.StopBits,
+		Parity:                      payload.Parity,
+		DeviceBackend:               payload.DeviceBackend,
+		ESIMTransport:               payload.ESIMTransport,
+		QMIUseProxy:                 payload.QMIUseProxy,
+		QMIProxyPath:                strings.TrimSpace(payload.QMIProxyPath),
+		QMIProxyExecutable:          strings.TrimSpace(payload.QMIProxyExecutable),
+		NetworkEnabled:              payload.NetworkEnabled,
+		SMSEnabled:                  payload.SMSEnabled,
+		VoWiFiEnabled:               payload.VoWiFiEnabled,
 	}
 }
 
@@ -390,6 +424,21 @@ func (s *Server) handleDevicePath(
 	if len(tail) == 0 {
 		switch r.Method {
 		case http.MethodDelete:
+			// Runtime teardown may wait for an in-flight persistence callback;
+			// clearing the ordinary response deadline avoids reporting an
+			// ambiguous timeout after the configuration was actually deleted.
+			controller := http.NewResponseController(w)
+			_ = controller.SetWriteDeadline(time.Time{})
+			if err := s.quiesceVoWiFiForESIM(r.Context(), id); err != nil {
+				writeError(w, http.StatusConflict, "vowifi_quiesce_failed", err.Error())
+				return true
+			}
+			releaseSubscriberChange, err := s.beginVoWiFiSubscriberChange(r.Context(), id)
+			if err != nil {
+				writeError(w, http.StatusConflict, "vowifi_subscriber_change_failed", err.Error())
+				return true
+			}
+			defer releaseSubscriberChange()
 			if err := s.store.DeleteDevice(r.Context(), id); err != nil {
 				s.writeStoreError(w, err)
 				return true
@@ -427,8 +476,13 @@ func (s *Server) handleDevicePath(
 				s.writeStoreError(w, err)
 				return true
 			}
+			w.Header().Set("Cache-Control", "no-store")
 			writeJSON(w, http.StatusOK, map[string]any{
-				"data": map[string]any{"status": "saved", "config": storedDeviceConfig(next)},
+				"data": map[string]any{
+					"status":           "saved",
+					"config":           storedDeviceConfig(next),
+					"requires_restart": true,
+				},
 			})
 		default:
 			w.Header().Set("Allow", "DELETE, PUT")
@@ -460,6 +514,7 @@ func (s *Server) handleDevicePath(
 		if !requireMethod(w, r, http.MethodGet) {
 			return true
 		}
+		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, map[string]any{
 			"data": map[string]any{"config": storedDeviceConfig(config)},
 		})
@@ -558,7 +613,7 @@ func (s *Server) handleDevicePath(
 			return true
 		}
 		return s.handleCalls(w, r, config, physicalID)
-	case "calls/dial", "calls/answer", "calls/hangup":
+	case "calls/dial", "calls/answer", "calls/hangup", "calls/dtmf":
 		if !s.requirePhysicalDevice(w, physicalPresent) {
 			return true
 		}
@@ -1189,6 +1244,8 @@ func (s *Server) writeDeviceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid_apn", "APN must contain only letters, digits, dots, underscores, or hyphens")
 	case errors.Is(err, device.ErrRegionBlocked):
 		writeError(w, http.StatusForbidden, "region_blocked", err.Error())
+	case errors.Is(err, device.ErrSMSSubscriberIdentity):
+		writeError(w, http.StatusServiceUnavailable, "sms_subscriber_identity_unavailable", err.Error())
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, modem.ErrCommandTimeout):
 		writeError(w, http.StatusGatewayTimeout, "modem_timeout", "the modem did not answer before the command timeout")
 	case errors.Is(err, context.Canceled):
@@ -1559,29 +1616,38 @@ func deviceStatus(entry device.Device) map[string]any {
 
 func storedDeviceConfig(config store.Device) map[string]any {
 	return map[string]any{
-		"id":                   config.ID,
-		"name":                 config.Name,
-		"device_type":          store.NormalizeDeviceType(config.DeviceType),
-		"interface":            config.Interface,
-		"control_device":       config.ControlDevice,
-		"at_port":              config.ATPort,
-		"usb_path":             config.USBPath,
-		"audio_device":         config.AudioDevice,
-		"modem_imei":           config.ModemIMEI,
-		"apn":                  config.APN,
-		"proxy_port":           config.ProxyPort,
-		"baud_rate":            config.BaudRate,
-		"data_bits":            config.DataBits,
-		"stop_bits":            config.StopBits,
-		"parity":               config.Parity,
-		"device_backend":       config.DeviceBackend,
-		"esim_transport":       config.ESIMTransport,
-		"qmi_use_proxy":        config.QMIUseProxy,
-		"qmi_proxy_path":       config.QMIProxyPath,
-		"qmi_proxy_executable": config.QMIProxyExecutable,
-		"network_enabled":      config.NetworkEnabled,
-		"sms_enabled":          config.SMSEnabled,
-		"vowifi_enabled":       config.VoWiFiEnabled,
+		"id":                              config.ID,
+		"name":                            config.Name,
+		"device_type":                     store.NormalizeDeviceType(config.DeviceType),
+		"interface":                       config.Interface,
+		"control_device":                  config.ControlDevice,
+		"at_port":                         config.ATPort,
+		"usb_path":                        config.USBPath,
+		"audio_device":                    config.AudioDevice,
+		"modem_imei":                      config.ModemIMEI,
+		"apn":                             config.APN,
+		"ims_apn":                         config.IMSAPN,
+		"ims_private_identity":            config.IMSPrivateIdentity,
+		"ims_public_identity":             config.IMSPublicIdentity,
+		"ims_sms_center":                  config.IMSSMSCenter,
+		"ims_transport":                   config.IMSTransport,
+		"ims_allow_imsi_derived_identity": config.IMSAllowIMSIDerivedIdentity,
+		"vowifi_eap_method":               config.VoWiFiEAPMethod,
+		"vowifi_allow_sha1":               config.VoWiFiAllowSHA1,
+		"vowifi_use_modp1024":             config.VoWiFiUseMODP1024,
+		"proxy_port":                      config.ProxyPort,
+		"baud_rate":                       config.BaudRate,
+		"data_bits":                       config.DataBits,
+		"stop_bits":                       config.StopBits,
+		"parity":                          config.Parity,
+		"device_backend":                  config.DeviceBackend,
+		"esim_transport":                  config.ESIMTransport,
+		"qmi_use_proxy":                   config.QMIUseProxy,
+		"qmi_proxy_path":                  config.QMIProxyPath,
+		"qmi_proxy_executable":            config.QMIProxyExecutable,
+		"network_enabled":                 config.NetworkEnabled,
+		"sms_enabled":                     config.SMSEnabled,
+		"vowifi_enabled":                  config.VoWiFiEnabled,
 	}
 }
 

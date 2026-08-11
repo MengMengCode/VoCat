@@ -352,6 +352,9 @@ func normalizeSMSRecipient(value string) (string, error) {
 		}
 	}
 	normalized := result.String()
+	if strings.HasPrefix(normalized, "00") && len(normalized) > 2 {
+		normalized = "+" + normalized[2:]
+	}
 	digits := strings.TrimPrefix(normalized, "+")
 	if len(digits) < 1 || len(digits) > 20 {
 		return "", ErrSMSInvalidRecipient

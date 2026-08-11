@@ -149,6 +149,7 @@ func TestProviderNegotiatesIPSecAndRegistersOverProtectedTCP(t *testing.T) {
 			IMSI:    "001010123456789",
 			HomeMCC: "001",
 			HomeMNC: "01",
+			SMSC:    "+12025550100",
 		},
 		Tunnel: evidenceTunnel{evidence: vowifi.TunnelEvidence{
 			Established: true,
@@ -491,9 +492,11 @@ func serveProtectedRegistrar(
 	if !strings.Contains(headers["contact"], net.JoinHostPort("127.0.0.1", strconv.Itoa(wantUEServerPort))) {
 		return result, fmt.Errorf("protected Contact = %q", headers["contact"])
 	}
-	if strings.Contains(strings.ToUpper(startLine), "MESSAGE") ||
-		strings.Contains(strings.ToUpper(headers["allow"]), "MESSAGE") {
-		return result, errors.New("registration transaction advertised or sent MESSAGE")
+	if strings.Contains(strings.ToUpper(startLine), "MESSAGE") {
+		return result, errors.New("registration transaction sent MESSAGE")
+	}
+	if !strings.Contains(strings.ToUpper(headers["allow"]), "MESSAGE") {
+		return result, errors.New("registration transaction omitted MESSAGE capability")
 	}
 
 	if _, err := protectedConnection.Write(testResponse(

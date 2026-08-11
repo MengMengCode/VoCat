@@ -111,6 +111,33 @@ func migrationStatements(version int) []string {
 			`ALTER TABLE devices
 				ADD COLUMN device_type TEXT NOT NULL DEFAULT 'pcie_ec20_ec25'`,
 		}
+	case 9:
+		return []string{
+			`ALTER TABLE devices
+				ADD COLUMN ims_apn TEXT NOT NULL DEFAULT 'ims'`,
+			`ALTER TABLE devices
+				ADD COLUMN ims_private_identity TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE devices
+				ADD COLUMN ims_public_identity TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE devices
+				ADD COLUMN ims_sms_center TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE devices
+				ADD COLUMN ims_transport TEXT NOT NULL DEFAULT 'tcp'`,
+			`ALTER TABLE devices
+				ADD COLUMN ims_allow_imsi_derived_identity INTEGER NOT NULL DEFAULT 1
+					CHECK (ims_allow_imsi_derived_identity IN (0, 1))`,
+			`ALTER TABLE devices
+				ADD COLUMN vowifi_eap_method TEXT NOT NULL DEFAULT 'aka'`,
+		}
+	case 10:
+		return []string{
+			`ALTER TABLE devices
+				ADD COLUMN vowifi_allow_sha1 INTEGER NOT NULL DEFAULT 0
+					CHECK (vowifi_allow_sha1 IN (0, 1))`,
+			`ALTER TABLE devices
+				ADD COLUMN vowifi_use_modp1024 INTEGER NOT NULL DEFAULT 0
+					CHECK (vowifi_use_modp1024 IN (0, 1))`,
+		}
 	default:
 		return nil
 	}

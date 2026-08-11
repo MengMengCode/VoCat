@@ -71,6 +71,77 @@ die() {
     exit 1
 }
 
+# --- Runtime dependencies ---------------------------------------------------
+# VoCat invokes these host tools for QMI data sessions, DHCP, policy routing,
+# and shared QMI access. qmi-proxy is intentionally installed outside PATH by
+# both Debian/Ubuntu and Alpine, so check the known libexec locations too.
+find_qmi_proxy() {
+    if command -v qmi-proxy >/dev/null 2>&1; then
+        command -v qmi-proxy
+        return 0
+    fi
+    local candidate
+    for candidate in \
+        /usr/libexec/qmi-proxy \
+        /usr/lib/libqmi-glib/qmi-proxy \
+        /usr/lib64/libqmi-glib/qmi-proxy; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+runtime_dependencies_ready() {
+    command -v ip >/dev/null 2>&1 &&
+        command -v busybox >/dev/null 2>&1 &&
+        busybox udhcpc --help >/dev/null 2>&1 &&
+        command -v qmi-network >/dev/null 2>&1 &&
+        command -v qmicli >/dev/null 2>&1 &&
+        find_qmi_proxy >/dev/null 2>&1
+}
+
+missing_runtime_dependencies() {
+    local missing=()
+    command -v ip >/dev/null 2>&1 || missing+=(ip)
+    if ! command -v busybox >/dev/null 2>&1 ||
+        ! busybox udhcpc --help >/dev/null 2>&1; then
+        missing+=("busybox udhcpc")
+    fi
+    command -v qmi-network >/dev/null 2>&1 || missing+=(qmi-network)
+    command -v qmicli >/dev/null 2>&1 || missing+=(qmicli)
+    find_qmi_proxy >/dev/null 2>&1 || missing+=(qmi-proxy)
+    local IFS=', '
+    printf '%s' "${missing[*]}"
+}
+
+ensure_runtime_dependencies() {
+    runtime_dependencies_ready && return
+
+    local missing
+    missing=$(missing_runtime_dependencies)
+    msg "缺少运行时依赖 ($missing)，正在安装。" "Missing runtime dependencies ($missing); installing them."
+
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2 busybox libqmi-utils
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache iproute2 busybox qmi-utils
+    else
+        die \
+            "无法自动安装运行时依赖: $missing。请先安装 iproute2、带 udhcpc 的 busybox 及 libqmi 工具。" \
+            "Cannot install runtime dependencies automatically: $missing. Install iproute2, BusyBox with udhcpc, and the libqmi utilities first."
+    fi
+
+    if ! runtime_dependencies_ready; then
+        missing=$(missing_runtime_dependencies)
+        die \
+            "运行时依赖安装后仍不可用: $missing。" \
+            "Runtime dependencies are still unavailable after installation: $missing."
+    fi
+}
+
 # --- Root --------------------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || die "请以 root 身份运行此脚本。" "Run this script as root."
 
@@ -212,6 +283,9 @@ WorkingDirectory=/opt/vocat
 EnvironmentFile=${ENV_FILE}
 Environment=VOCAT_ADDR=0.0.0.0:7575
 Environment=VOCAT_DATABASE_PATH=/opt/vocat/data/vocat.db
+# Fail before starting the service if the external networking/QMI helpers are
+# missing. This prevents a healthy-looking UI with unusable modem controls.
+ExecStartPre=/bin/sh -ec 'command -v ip >/dev/null; command -v busybox >/dev/null; busybox udhcpc --help >/dev/null 2>&1; command -v qmi-network >/dev/null; command -v qmicli >/dev/null; command -v qmi-proxy >/dev/null 2>&1 || test -x /usr/libexec/qmi-proxy || test -x /usr/lib/libqmi-glib/qmi-proxy || test -x /usr/lib64/libqmi-glib/qmi-proxy'
 ExecStart=${BINARY_PATH}
 Restart=on-failure
 RestartSec=3s
@@ -262,6 +336,7 @@ enable_and_start() {
 }
 
 # --- Main --------------------------------------------------------------------
+ensure_runtime_dependencies
 resolve_target_version
 detect_arch
 skip_if_equal

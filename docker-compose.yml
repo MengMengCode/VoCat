@@ -1,12 +1,16 @@
-# VoCat Docker Compose deployment.
+# VoCat Docker Compose deployment (control-panel mode, no host hardware).
 #
 # First-time setup:
 #   cp .env.example .env        # then edit VOCAT_ADMIN_PASSWORD
 #   docker compose pull         # fetch the prebuilt GHCR image
-#   docker compose up -d        # start
+#   docker compose up -d        # start without modem/device access
 #
 # Build locally from this repo instead of using the GHCR image:
 #   docker compose up -d --build
+#
+# Qualcomm/OpenStick/Quectel hardware access is deliberately NOT enabled by
+# this file. Use the explicit, security-sensitive override instead:
+#   docker compose -f docker-compose.yml -f docker-compose.hardware.yml up -d
 #
 # In-container binary self-update is intentionally disabled (VOCAT_CONTAINER=docker
 # makes the server return 409 on the apply endpoint). Update by pulling a new
@@ -25,21 +29,11 @@ services:
     container_name: vocat
     restart: unless-stopped
 
-    # Host network mode: the export-proxy plugin uses SO_BINDTODEVICE to pin
-    # outbound proxy traffic to the modem interface (wwan0) so roaming data
-    # egresses only the module — never the host's default route. That syscall
-    # needs the host network namespace visible inside the container, which
-    # network_mode: host provides directly. Port publishing is therefore
-    # meaningless (the container shares the host stack and vocat binds
-    # 0.0.0.0:7575 itself); proxy ports opened by the plugin are likewise
-    # reachable on the host IP without explicit mapping.
-    network_mode: host
-
-    # VoWiFi / eSIM / IMS paths need raw sockets (IPsec, netlink). The systemd
-    # unit grants CAP_NET_ADMIN + CAP_NET_RAW; mirror that here.
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
+    # This default is intentionally a normal bridged container. It can serve
+    # the UI and persistent configuration, but cannot discover or control host
+    # modems and must not be used as Qualcomm 410 hardware acceptance evidence.
+    ports:
+      - "${VOCAT_PORT:-7575}:7575"
 
     environment:
       # Marks the process as containerized: the web UI then advertises

@@ -15,11 +15,18 @@ import (
 	"vocat/internal/vowifi"
 )
 
-const smsContentType = "application/vnd.3gpp.sms"
+const (
+	smsContentType               = "application/vnd.3gpp.sms"
+	defaultSMSTR1M               = 40 * time.Second
+	smsServerTransactionLifetime = 2 * defaultSMSTR1M
+	maxSMSServerTransactions     = 256
+)
 
 var (
-	ErrSMSCUnavailable = errors.New("ims: SMS service-centre address is unavailable")
-	ErrSMSRejected     = errors.New("ims: SMS MESSAGE was rejected")
+	ErrSMSCUnavailable        = errors.New("ims: SMS service-centre address is unavailable")
+	ErrSMSRejected            = errors.New("ims: SMS MESSAGE was rejected")
+	ErrSMSSubmitReportTimeout = errors.New("ims: SMS submit report timed out")
+	errRPMessageType          = errors.New("ims: RP message type is invalid")
 )
 
 type smsCenterReader interface {
@@ -64,6 +71,23 @@ type sipTransactionKey struct {
 	callID string
 	cseq   uint32
 	method string
+}
+
+type smsSubmitTransaction struct {
+	callID  string
+	reports chan rpMessage
+}
+
+type smsServerTransactionKey struct {
+	via    string
+	callID string
+	cseq   uint32
+}
+
+type smsServerTransaction struct {
+	response  []byte
+	createdAt time.Time
+	ready     chan struct{}
 }
 
 func (session *Session) startRuntimeReceivers() error {
@@ -177,8 +201,9 @@ func (session *Session) readProtectedUDP() {
 			continue
 		}
 		session.dispatchPacket(packet, func(response []byte) error {
-			_, err := session.protectedUDP.WriteToUDP(response, remote)
-			return err
+			// Protected UDP requests arrive on the UE server port, but UE
+			// responses use the client pair (port_uc -> port_ps).
+			return session.writeRuntimeRequest(response)
 		})
 	}
 }
@@ -213,6 +238,10 @@ func (session *Session) dispatchPacket(packet sipPacket, respond func([]byte) er
 			case channel <- response:
 			default:
 			}
+		} else if method == "INVITE" && response.StatusCode >= 200 {
+			// 2xx retransmissions live above the INVITE client transaction, and a
+			// retransmitted non-2xx final still requires the transaction ACK.
+			session.handleUnmatchedInviteResponse(response)
 		}
 		return
 	}
@@ -226,6 +255,22 @@ func (session *Session) exchangeRuntime(
 	request []byte,
 	key sipTransactionKey,
 ) (*sipResponse, error) {
+	return session.exchangeRuntimeWithTimers(ctx, request, key, sipTransactionT1, session.transactionTimeout())
+}
+
+func (session *Session) exchangeRuntimeWithTimers(
+	ctx context.Context,
+	request []byte,
+	key sipTransactionKey,
+	t1 time.Duration,
+	timeout time.Duration,
+) (*sipResponse, error) {
+	if t1 <= 0 {
+		t1 = sipTransactionT1
+	}
+	if timeout <= 0 {
+		timeout = session.transactionTimeout()
+	}
 	responses := make(chan *sipResponse, 4)
 	session.transactionsMu.Lock()
 	if _, duplicate := session.transactions[key]; duplicate {
@@ -240,22 +285,48 @@ func (session *Session) exchangeRuntime(
 		session.transactionsMu.Unlock()
 	}()
 
-	session.writeMu.Lock()
-	_, err := session.conn.Write(request)
-	session.writeMu.Unlock()
-	if err != nil {
+	if err := session.writeRuntimeRequest(request); err != nil {
 		return nil, fmt.Errorf("ims: send SIP %s: %w", key.method, err)
 	}
-	timer := time.NewTimer(session.provider.config.TransactionTimeout)
-	defer timer.Stop()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	var retransmit *time.Timer
+	var retransmitC <-chan time.Time
+	interval := t1
+	if session.transport == "udp" {
+		retransmit = time.NewTimer(interval)
+		retransmitC = retransmit.C
+		defer retransmit.Stop()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-timer.C:
+		case <-deadline.C:
 			return nil, fmt.Errorf("ims: SIP %s transaction timed out", key.method)
+		case <-retransmitC:
+			if err := session.writeRuntimeRequest(request); err != nil {
+				return nil, fmt.Errorf("ims: retransmit SIP %s: %w", key.method, err)
+			}
+			interval *= 2
+			if interval > sipTransactionT2 {
+				interval = sipTransactionT2
+			}
+			retransmit.Reset(interval)
 		case response := <-responses:
 			if response.StatusCode >= 100 && response.StatusCode < 200 {
+				// Timer E switches to T2 after a provisional response for a
+				// non-INVITE client transaction.
+				if retransmit != nil {
+					if !retransmit.Stop() {
+						select {
+						case <-retransmit.C:
+						default:
+						}
+					}
+					interval = sipTransactionT2
+					retransmit.Reset(interval)
+				}
 				continue
 			}
 			return response, nil
@@ -263,29 +334,170 @@ func (session *Session) exchangeRuntime(
 	}
 }
 
+func (session *Session) transactionTimeout() time.Duration {
+	if session != nil && session.provider != nil && session.provider.config.TransactionTimeout > 0 {
+		return session.provider.config.TransactionTimeout
+	}
+	return defaultTransactionTimeout
+}
+
+func (session *Session) writeRuntimeRequest(request []byte) error {
+	if session == nil || session.conn == nil {
+		return errors.New("SIP transport is unavailable")
+	}
+	session.writeMu.Lock()
+	_, err := session.conn.Write(request)
+	session.writeMu.Unlock()
+	return err
+}
+
 func (session *Session) handleSIPRequest(request *sipRequest, respond func([]byte) error) {
 	if session.handleCallRequest(request, respond) {
 		return
 	}
+	var serverKey smsServerTransactionKey
+	var cacheable bool
+	var serverTransaction *smsServerTransaction
+	if request.Method == "MESSAGE" {
+		serverKey, cacheable = smsServerKey(request)
+		if cacheable {
+			var duplicateResponse []byte
+			serverTransaction, duplicateResponse = session.reserveSMSServerTransaction(serverKey)
+			if serverTransaction == nil {
+				if len(duplicateResponse) > 0 {
+					_ = respond(duplicateResponse)
+				}
+				return
+			}
+		}
+	}
 	status := 200
+	processMT := false
 	switch request.Method {
 	case "OPTIONS":
 	case "MESSAGE":
 		contentType := strings.ToLower(strings.TrimSpace(strings.SplitN(request.value("Content-Type"), ";", 2)[0]))
 		if contentType != smsContentType {
 			status = 415
+			break
 		}
+		message, parseErr := parseRPDU(request.Body)
+		messageType := byte(0xff)
+		if len(request.Body) > 0 {
+			messageType = request.Body[0] & 0x07
+		}
+		if messageType == 3 || messageType == 5 {
+			if parseErr != nil || !session.queueSMSSubmitReport(request, message) {
+				status = 488
+			}
+			break
+		}
+		processMT = true
 	default:
 		status = 405
 	}
 	response, err := buildSIPResponse(request, status, session.fromTag)
-	if err == nil {
-		_ = respond(response)
+	if cacheable {
+		session.completeSMSServerTransaction(serverTransaction, response, err)
 	}
-	if status != 200 || request.Method != "MESSAGE" {
+	if err != nil {
+		return
+	}
+	_ = respond(response)
+	if status != 200 || !processMT {
 		return
 	}
 	go session.processSMSMessage(request)
+}
+
+func smsServerKey(request *sipRequest) (smsServerTransactionKey, bool) {
+	if request == nil {
+		return smsServerTransactionKey{}, false
+	}
+	vias := request.values("Via")
+	callID := strings.TrimSpace(request.value("Call-ID"))
+	cseq, method, err := cseqNumber(request.value("CSeq"))
+	if len(vias) == 0 || callID == "" || err != nil || method != "MESSAGE" {
+		return smsServerTransactionKey{}, false
+	}
+	return smsServerTransactionKey{
+		via:    strings.TrimSpace(vias[0]),
+		callID: callID,
+		cseq:   cseq,
+	}, true
+}
+
+func (session *Session) reserveSMSServerTransaction(
+	key smsServerTransactionKey,
+) (*smsServerTransaction, []byte) {
+	now := time.Now()
+	session.smsServerMu.Lock()
+	if session.smsServer == nil {
+		session.smsServer = make(map[smsServerTransactionKey]*smsServerTransaction)
+	}
+	for existingKey, entry := range session.smsServer {
+		if now.Sub(entry.createdAt) >= smsServerTransactionLifetime {
+			delete(session.smsServer, existingKey)
+		}
+	}
+	if entry := session.smsServer[key]; entry != nil {
+		ready := entry.ready
+		session.smsServerMu.Unlock()
+		<-ready
+		return nil, append([]byte(nil), entry.response...)
+	}
+	if len(session.smsServer) >= maxSMSServerTransactions {
+		var oldestKey smsServerTransactionKey
+		var oldestTime time.Time
+		for existingKey, entry := range session.smsServer {
+			if oldestTime.IsZero() || entry.createdAt.Before(oldestTime) {
+				oldestKey = existingKey
+				oldestTime = entry.createdAt
+			}
+		}
+		delete(session.smsServer, oldestKey)
+	}
+	entry := &smsServerTransaction{
+		createdAt: now,
+		ready:     make(chan struct{}),
+	}
+	session.smsServer[key] = entry
+	session.smsServerMu.Unlock()
+	return entry, nil
+}
+
+func (session *Session) completeSMSServerTransaction(
+	transaction *smsServerTransaction,
+	response []byte,
+	err error,
+) {
+	if transaction == nil {
+		return
+	}
+	if err == nil {
+		transaction.response = append([]byte(nil), response...)
+	}
+	close(transaction.ready)
+}
+
+func (session *Session) queueSMSSubmitReport(request *sipRequest, message rpMessage) bool {
+	inReplyTo := strings.TrimSpace(request.value("In-Reply-To"))
+	if inReplyTo == "" {
+		return false
+	}
+	session.smsSubmitMu.Lock()
+	defer session.smsSubmitMu.Unlock()
+	transaction := session.smsSubmit[message.reference]
+	if transaction == nil || transaction.callID != inReplyTo {
+		return false
+	}
+	select {
+	case transaction.reports <- message:
+	default:
+		// A retransmission using a fresh SIP transaction still refers to the
+		// same outstanding RP transaction. The first report remains decisive.
+	}
+	return true
 }
 
 func buildSIPResponse(request *sipRequest, status int, tag string) ([]byte, error) {
@@ -315,7 +527,7 @@ func buildSIPResponse(request *sipRequest, status int, tag string) ([]byte, erro
 		"CSeq: "+cseq,
 	)
 	if status == 405 {
-		lines = append(lines, "Allow: REGISTER, MESSAGE, OPTIONS")
+		lines = append(lines, "Allow: REGISTER, MESSAGE, INVITE, ACK, CANCEL, BYE, PRACK, OPTIONS")
 	}
 	if status == 415 {
 		lines = append(lines, "Accept: "+smsContentType)
@@ -327,10 +539,22 @@ func buildSIPResponse(request *sipRequest, status int, tag string) ([]byte, erro
 func (session *Session) processSMSMessage(request *sipRequest) {
 	rpdu, err := parseRPDU(request.Body)
 	if err != nil {
-		session.sendDeliveryReport(request, buildRPError(0, 95))
+		// Without the RP-Message-Reference the network cannot correlate an
+		// RP-ERROR, so TS 24.011 requires the too-short message to be ignored.
+		if len(request.Body) >= 2 {
+			cause := byte(96)
+			if errors.Is(err, errRPMessageType) {
+				cause = 97
+			}
+			session.sendDeliveryReport(request, buildRPError(rpdu.reference, cause))
+		}
 		return
 	}
-	if rpdu.messageType != 1 { // RP-DATA, network to MS.
+	if rpdu.messageType != 1 { // Only RP-DATA, network to MS, is valid on this path.
+		// The even MTI values are defined only in the MS-to-network direction.
+		// Received from the network they are reserved and require cause 97, just
+		// like the direction-independent reserved values rejected by parseRPDU.
+		session.sendDeliveryReport(request, buildRPError(rpdu.reference, 97))
 		return
 	}
 	message, err := device.DecodeSMSDeliverTPDU(rpdu.tpdu)
@@ -453,9 +677,6 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 		if strings.TrimSpace(smsc) == "" {
 			return vowifi.SMSSubmitResult{}, errors.Join(ErrSMSCUnavailable, readErr)
 		}
-		session.mu.Lock()
-		session.request.Identity.SMSC = smsc
-		session.mu.Unlock()
 	}
 	parts, err := device.PrepareSMSSubmitTPDUs(request.Recipient, request.Text)
 	if err != nil {
@@ -473,7 +694,11 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 	}
 	psi := "tel:" + normalizeE164(smsc)
 	for _, part := range parts {
-		reference := session.allocateRPReference()
+		reference, referenceErr := session.allocateRPReference()
+		if referenceErr != nil {
+			result.SubmissionStatus = "failed"
+			return result, referenceErr
+		}
 		if len(part.TPDU) < 2 {
 			return result, errors.New("ims: SMS-SUBMIT TPDU is truncated")
 		}
@@ -485,41 +710,131 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 			return result, buildErr
 		}
 		result.PartsAttempted++
-		response, sendErr := session.sendSIPMessage(ctx, psi, rpdu, "")
 		partResult := vowifi.SMSSubmitPart{
 			Part: part.Part, Total: part.Total, Reference: int(reference), SubmittedAt: time.Now().UTC(),
 		}
+		message, key, buildErr := session.buildSIPMessage(psi, rpdu, "")
+		if buildErr != nil {
+			partResult.SubmissionStatus = "send_failed"
+			result.PartResults = append(result.PartResults, partResult)
+			result.SubmissionStatus = "failed"
+			return result, buildErr
+		}
+		transaction, registerErr := session.registerSMSSubmit(reference, key.callID)
+		if registerErr != nil {
+			partResult.SubmissionStatus = "send_failed"
+			result.PartResults = append(result.PartResults, partResult)
+			result.SubmissionStatus = "failed"
+			return result, registerErr
+		}
+		response, sendErr := session.exchangeRuntime(ctx, message, key)
 		if response != nil {
 			partResult.SIPCode = response.StatusCode
 		}
-		if sendErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
-			partResult.Accepted = true
-			partResult.SubmissionStatus = "accepted_by_ims"
-			result.PartsAccepted++
-		} else {
-			partResult.SubmissionStatus = "rejected_by_ims"
-		}
-		result.PartResults = append(result.PartResults, partResult)
 		if sendErr != nil {
+			session.unregisterSMSSubmit(reference, transaction)
+			partResult.SubmissionStatus = "send_failed"
+			result.PartResults = append(result.PartResults, partResult)
 			result.SubmissionStatus = "failed"
 			return result, sendErr
 		}
-		if !partResult.Accepted {
+		if response == nil || response.StatusCode < 200 || response.StatusCode >= 300 {
+			session.unregisterSMSSubmit(reference, transaction)
+			partResult.SubmissionStatus = "rejected_by_ims"
+			result.PartResults = append(result.PartResults, partResult)
 			result.SubmissionStatus = "rejected"
+			if response == nil {
+				return result, fmt.Errorf("%w: missing SIP response", ErrSMSRejected)
+			}
 			return result, fmt.Errorf("%w: SIP %d", ErrSMSRejected, response.StatusCode)
 		}
+		report, reportErr := session.waitSMSSubmitReport(ctx, reference, transaction)
+		if reportErr != nil {
+			partResult.SubmissionStatus = "submit_report_unknown"
+			result.PartResults = append(result.PartResults, partResult)
+			result.SubmissionStatus = "unknown"
+			return result, reportErr
+		}
+		if report.messageType == 5 {
+			partResult.SubmissionStatus = "rejected_by_ims"
+			result.PartResults = append(result.PartResults, partResult)
+			result.SubmissionStatus = "rejected"
+			return result, fmt.Errorf("%w: RP-ERROR cause %d", ErrSMSRejected, report.cause)
+		}
+		partResult.Accepted = true
+		partResult.SubmissionStatus = "accepted_by_ims"
+		result.PartsAccepted++
+		result.PartResults = append(result.PartResults, partResult)
 	}
 	result.AllPartsAccepted = true
 	result.SubmissionStatus = "accepted_by_ims"
 	return result, nil
 }
 
-func (session *Session) allocateRPReference() byte {
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	value := session.nextRPReference
-	session.nextRPReference++
-	return value
+func (session *Session) allocateRPReference() (byte, error) {
+	session.smsSubmitMu.Lock()
+	defer session.smsSubmitMu.Unlock()
+	for attempts := 0; attempts < 256; attempts++ {
+		value := session.nextRPReference
+		session.nextRPReference++
+		if _, active := session.smsSubmit[value]; !active {
+			return value, nil
+		}
+	}
+	return 0, errors.New("ims: all RP message references are active")
+}
+
+func (session *Session) registerSMSSubmit(reference byte, callID string) (*smsSubmitTransaction, error) {
+	transaction := &smsSubmitTransaction{
+		callID:  callID,
+		reports: make(chan rpMessage, 1),
+	}
+	session.smsSubmitMu.Lock()
+	defer session.smsSubmitMu.Unlock()
+	if session.smsSubmit == nil {
+		session.smsSubmit = make(map[byte]*smsSubmitTransaction)
+	}
+	if _, active := session.smsSubmit[reference]; active {
+		return nil, errors.New("ims: duplicate RP message reference")
+	}
+	session.smsSubmit[reference] = transaction
+	return transaction, nil
+}
+
+func (session *Session) unregisterSMSSubmit(reference byte, transaction *smsSubmitTransaction) {
+	session.smsSubmitMu.Lock()
+	if session.smsSubmit[reference] == transaction {
+		delete(session.smsSubmit, reference)
+	}
+	session.smsSubmitMu.Unlock()
+}
+
+func (session *Session) waitSMSSubmitReport(
+	ctx context.Context,
+	reference byte,
+	transaction *smsSubmitTransaction,
+) (rpMessage, error) {
+	defer session.unregisterSMSSubmit(reference, transaction)
+	timeout := session.smsTR1M
+	if timeout <= 0 {
+		timeout = defaultSMSTR1M
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	var sessionDone <-chan struct{}
+	if session.refreshContext != nil {
+		sessionDone = session.refreshContext.Done()
+	}
+	select {
+	case report := <-transaction.reports:
+		return report, nil
+	case <-ctx.Done():
+		return rpMessage{}, ctx.Err()
+	case <-sessionDone:
+		return rpMessage{}, ErrSessionClosed
+	case <-timer.C:
+		return rpMessage{}, ErrSMSSubmitReportTimeout
+	}
 }
 
 func (session *Session) sendSIPMessage(
@@ -528,13 +843,25 @@ func (session *Session) sendSIPMessage(
 	body []byte,
 	inReplyTo string,
 ) (*sipResponse, error) {
-	callToken, err := randomHex(18)
+	request, key, err := session.buildSIPMessage(target, body, inReplyTo)
 	if err != nil {
 		return nil, err
 	}
+	return session.exchangeRuntime(ctx, request, key)
+}
+
+func (session *Session) buildSIPMessage(
+	target string,
+	body []byte,
+	inReplyTo string,
+) ([]byte, sipTransactionKey, error) {
+	callToken, err := randomHex(18)
+	if err != nil {
+		return nil, sipTransactionKey{}, err
+	}
 	branch, err := randomHex(12)
 	if err != nil {
-		return nil, err
+		return nil, sipTransactionKey{}, err
 	}
 	callID := callToken + "@" + addressHost(session.conn.LocalAddr())
 	session.mu.Lock()
@@ -578,7 +905,7 @@ func (session *Session) sendSIPMessage(
 		"", "",
 	)
 	request := append([]byte(strings.Join(lines, "\r\n")), body...)
-	return session.exchangeRuntime(ctx, request, sipTransactionKey{callID: callID, cseq: cseq, method: "MESSAGE"})
+	return request, sipTransactionKey{callID: callID, cseq: cseq, method: "MESSAGE"}, nil
 }
 
 func runtimeSecurityHeaders(active bool, verifyValue string) []string {
@@ -599,6 +926,7 @@ func runtimeSecurityHeaders(active bool, verifyValue string) []string {
 type rpMessage struct {
 	messageType byte
 	reference   byte
+	cause       byte
 	tpdu        []byte
 }
 
@@ -607,31 +935,70 @@ func parseRPDU(data []byte) (rpMessage, error) {
 		return rpMessage{}, errors.New("ims: RPDU is truncated")
 	}
 	result := rpMessage{messageType: data[0] & 0x07, reference: data[1]}
-	if result.messageType != 1 {
-		return result, nil
+	if data[0]&0xf8 != 0 {
+		return result, fmt.Errorf("%w: spare bits are non-zero", errRPMessageType)
 	}
-	index := 2
-	for count := 0; count < 2; count++ {
+	switch result.messageType {
+	case 0, 1: // RP-DATA, MS to network or network to MS.
+		index := 2
+		for count := 0; count < 2; count++ {
+			if index >= len(data) {
+				return result, errors.New("ims: RP-DATA address is truncated")
+			}
+			length := int(data[index])
+			index++
+			if length > len(data)-index {
+				return result, errors.New("ims: RP-DATA address length is invalid")
+			}
+			index += length
+		}
 		if index >= len(data) {
-			return rpMessage{}, errors.New("ims: RP-DATA address is truncated")
+			return result, errors.New("ims: RP-DATA omitted user data")
 		}
 		length := int(data[index])
 		index++
-		if length > len(data)-index {
-			return rpMessage{}, errors.New("ims: RP-DATA address length is invalid")
+		if length == 0 || length != len(data)-index {
+			return result, errors.New("ims: RP-DATA user-data length is invalid")
 		}
-		index += length
+		result.tpdu = append([]byte(nil), data[index:]...)
+		return result, nil
+	case 2, 3: // RP-ACK, optionally followed by RP-User-Data.
+		if err := parseRPUserData(data, 2, &result); err != nil {
+			return result, err
+		}
+		return result, nil
+	case 4, 5: // RP-ERROR with mandatory RP-Cause.
+		if len(data) < 4 {
+			return result, errors.New("ims: RP-ERROR omitted cause")
+		}
+		causeLength := int(data[2])
+		if causeLength == 0 || causeLength > len(data)-3 {
+			return result, errors.New("ims: RP-ERROR cause length is invalid")
+		}
+		result.cause = data[3] & 0x7f
+		if err := parseRPUserData(data, 3+causeLength, &result); err != nil {
+			return result, err
+		}
+		return result, nil
+	default:
+		return result, fmt.Errorf("%w: reserved MTI %d", errRPMessageType, result.messageType)
 	}
-	if index >= len(data) {
-		return rpMessage{}, errors.New("ims: RP-DATA omitted user data")
+}
+
+func parseRPUserData(data []byte, index int, result *rpMessage) error {
+	if index == len(data) {
+		return nil
 	}
-	length := int(data[index])
-	index++
-	if length == 0 || length > len(data)-index {
-		return rpMessage{}, errors.New("ims: RP-DATA user-data length is invalid")
+	if index < 0 || index+2 > len(data) || data[index] != 0x41 {
+		return errors.New("ims: RPDU optional user-data IE is invalid")
 	}
-	result.tpdu = append([]byte(nil), data[index:index+length]...)
-	return result, nil
+	length := int(data[index+1])
+	index += 2
+	if length == 0 || length != len(data)-index {
+		return errors.New("ims: RPDU optional user-data length is invalid")
+	}
+	result.tpdu = append([]byte(nil), data[index:]...)
+	return nil
 }
 
 func buildRPData(reference byte, smsc string, tpdu []byte) ([]byte, error) {
@@ -659,6 +1026,9 @@ func encodeRPAddress(value string) ([]byte, error) {
 	if len(digits) < 3 || len(digits) > 20 {
 		return nil, ErrSMSCUnavailable
 	}
+	if strings.Count(value, "+") > 1 || (strings.Contains(value, "+") && !strings.HasPrefix(value, "+")) {
+		return nil, ErrSMSCUnavailable
+	}
 	toa := byte(0x81)
 	if strings.HasPrefix(value, "+") {
 		toa = 0x91
@@ -682,14 +1052,7 @@ func encodeRPAddress(value string) ([]byte, error) {
 }
 
 func normalizeE164(value string) string {
-	value = strings.TrimSpace(value)
-	var result strings.Builder
-	for index, character := range value {
-		if character >= '0' && character <= '9' || (index == 0 && character == '+') {
-			result.WriteRune(character)
-		}
-	}
-	return result.String()
+	return strings.TrimSpace(value)
 }
 
 func firstURI(value string) string {

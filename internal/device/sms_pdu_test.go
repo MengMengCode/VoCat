@@ -1,6 +1,7 @@
 package device
 
 import (
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
@@ -56,6 +57,23 @@ func TestPrepareAndDecodeTransportIndependentTPDU(t *testing.T) {
 	})
 	if err != nil || message.From != "+12345" || message.Text != "HELLO" {
 		t.Fatalf("DecodeSMSDeliverTPDU = (%#v, %v)", message, err)
+	}
+}
+
+func TestPrepareSMSSubmitTPDUsNormalizesInternational00Prefix(t *testing.T) {
+	parts, err := PrepareSMSSubmitTPDUs("0012345", "HELLO")
+	if err != nil {
+		t.Fatalf("PrepareSMSSubmitTPDUs: %v", err)
+	}
+	if len(parts) != 1 || parts[0].To != "+12345" {
+		t.Fatalf("parts = %#v", parts)
+	}
+	message, err := decodeSMSPDU("00" + hex.EncodeToString(parts[0].TPDU))
+	if err != nil {
+		t.Fatalf("decodeSMSPDU: %v", err)
+	}
+	if message.To != "+12345" {
+		t.Fatalf("decoded recipient = %q", message.To)
 	}
 }
 
