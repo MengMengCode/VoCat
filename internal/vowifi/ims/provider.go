@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -499,7 +500,7 @@ func newSession(
 	if err != nil {
 		return nil, err
 	}
-	instanceID, err := randomUUID()
+	instanceID, err := sipInstanceUUID(request)
 	if err != nil {
 		return nil, err
 	}
@@ -1261,6 +1262,41 @@ func randomUUID() (string, error) {
 		return "", fmt.Errorf("ims: create SIP instance identifier: %w", err)
 	}
 	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	return fmt.Sprintf(
+		"%x-%x-%x-%x-%x",
+		value[0:4], value[4:6], value[6:8], value[8:10], value[10:16],
+	), nil
+}
+
+// sipInstanceUUID returns the RFC 5626 SIP instance identifier for this UE.
+// A +sip.instance identifies the physical user agent and must survive process
+// restarts. Generating a new UUID for every IMS retry makes strict registrars
+// (including Telefonica/O2 deployments) see one modem as many simultaneous
+// devices and can turn an otherwise valid initial REGISTER into SIP 403.
+func sipInstanceUUID(request vowifi.IMSRequest) (string, error) {
+	identifier := strings.TrimSpace(request.Identity.IMEI)
+	identifierType := "imei"
+	if identifier == "" {
+		identifier = strings.ToLower(strings.TrimSpace(request.DeviceID))
+		identifierType = "device"
+	}
+	if identifier == "" {
+		return randomUUID()
+	}
+
+	// A private, fixed UUID namespace plus the equipment identity gives the
+	// same RFC 4122 version-5 UUID after every reconnect without storing or
+	// exposing the raw IMEI in SIP headers.
+	namespace := [16]byte{
+		0x8d, 0xd1, 0x93, 0x64, 0x8a, 0x6f, 0x4b, 0x29,
+		0x9b, 0x64, 0x88, 0x7d, 0x61, 0x3e, 0x7a, 0x11,
+	}
+	hash := sha1.New() // SHA-1 is required by UUIDv5; this is not a security credential.
+	_, _ = hash.Write(namespace[:])
+	_, _ = hash.Write([]byte("vocat-sip-instance:" + identifierType + ":" + identifier))
+	value := hash.Sum(nil)[:16]
+	value[6] = (value[6] & 0x0f) | 0x50
 	value[8] = (value[8] & 0x3f) | 0x80
 	return fmt.Sprintf(
 		"%x-%x-%x-%x-%x",

@@ -59,6 +59,51 @@ func TestIMSIdentitiesFailClosedWithoutISIMOverrides(t *testing.T) {
 	}
 }
 
+func TestSIPInstanceUUIDIsStablePerEquipment(t *testing.T) {
+	first, err := sipInstanceUUID(vowifi.IMSRequest{
+		DeviceID: "wwan0",
+		Identity: vowifi.SIMIdentity{IMEI: "867394042309830"},
+	})
+	if err != nil {
+		t.Fatalf("sipInstanceUUID(first) error = %v", err)
+	}
+	second, err := sipInstanceUUID(vowifi.IMSRequest{
+		DeviceID: "renamed-device",
+		Identity: vowifi.SIMIdentity{IMEI: "867394042309830"},
+	})
+	if err != nil {
+		t.Fatalf("sipInstanceUUID(second) error = %v", err)
+	}
+	if first != second {
+		t.Fatalf("same equipment instance UUID changed: %q != %q", first, second)
+	}
+	different, err := sipInstanceUUID(vowifi.IMSRequest{
+		DeviceID: "wwan0",
+		Identity: vowifi.SIMIdentity{IMEI: "867394042309831"},
+	})
+	if err != nil {
+		t.Fatalf("sipInstanceUUID(different) error = %v", err)
+	}
+	if different == first {
+		t.Fatalf("different equipment reused instance UUID %q", first)
+	}
+	if len(first) != 36 || first[14] != '5' || !strings.ContainsRune("89ab", rune(first[19])) {
+		t.Fatalf("instance UUID %q is not RFC 4122 version 5", first)
+	}
+
+	fallbackOne, err := sipInstanceUUID(vowifi.IMSRequest{DeviceID: "WWAN0"})
+	if err != nil {
+		t.Fatalf("sipInstanceUUID(fallback one) error = %v", err)
+	}
+	fallbackTwo, err := sipInstanceUUID(vowifi.IMSRequest{DeviceID: "wwan0"})
+	if err != nil {
+		t.Fatalf("sipInstanceUUID(fallback two) error = %v", err)
+	}
+	if fallbackOne != fallbackTwo {
+		t.Fatalf("device fallback instance UUID changed: %q != %q", fallbackOne, fallbackTwo)
+	}
+}
+
 func (tunnel evidenceTunnel) Evidence() vowifi.TunnelEvidence {
 	return tunnel.evidence
 }
