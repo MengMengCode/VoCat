@@ -34,7 +34,13 @@ function primaryLine(d: DeviceListItem): string {
     return `${operator} · ${mode}`;
   }
   if (isDeviceOnline(d)) {
-    return d.registrationStateLabel === "searching" ? tl("搜索网络中") : d.registrationStateLabel === "denied" ? tl("驻网被拒") : tl("未驻网");
+    return d.registrationStateLabel === "searching"
+      ? tl("搜索网络中")
+      : d.registrationStateLabel === "limited"
+        ? tl("受限服务（数据未附着）")
+        : d.registrationStateLabel === "denied"
+          ? tl("驻网被拒")
+          : tl("未驻网");
   }
   return tl("控制面恢复中");
 }

@@ -108,3 +108,20 @@ func TestDeviceSummaryKeepsResponsiveControlOnlineWhenDegraded(t *testing.T) {
 		t.Fatalf("lifecycle phase = %#v, want degraded", got["lifecycle_phase"])
 	}
 }
+
+func TestRegistrationSummarySeparatesLimitedRoamingFromSearching(t *testing.T) {
+	snapshot := &device.Snapshot{
+		RegistrationStatus:  2,
+		RegistrationLimited: true,
+		PSAttached:          false,
+	}
+	if got := registrationLabel(snapshot); got != "limited" {
+		t.Fatalf("registration label = %q, want limited", got)
+	}
+	if got := registrationText(snapshot); got != "limited service (packet data detached)" {
+		t.Fatalf("registration text = %q, want limited service detail", got)
+	}
+	if got := deviceSummary(device.Device{Snapshot: snapshot}); got["radio_registered"] != false {
+		t.Fatalf("limited service was reported as fully registered: %#v", got)
+	}
+}

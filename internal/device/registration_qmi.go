@@ -6,10 +6,11 @@ import (
 )
 
 type platformRegistration struct {
-	Status     int
-	PLMN       string
-	Name       string
-	PSAttached bool
+	Status         int
+	PLMN           string
+	Name           string
+	PSAttached     bool
+	LimitedService bool
 }
 
 var qmiQuotedFieldPattern = regexp.MustCompile(`(?i)^\s*([^:]+):\s*'([^']*)'\s*$`)
@@ -35,6 +36,12 @@ func parseQMIRegistration(output string) (platformRegistration, bool) {
 			roaming = strings.EqualFold(value, "on")
 		case "ps":
 			result.PSAttached = strings.EqualFold(value, "attached")
+		case "status":
+			// QMI NAS can report a camped/limited roaming service even when
+			// Registration state is still searching and PS is detached. Keep
+			// this separate from the full registered states so SMS-only
+			// roaming is visible without being mistaken for packet attach.
+			result.LimitedService = strings.EqualFold(value, "limited")
 		case "mcc":
 			if mcc == "" {
 				mcc = value

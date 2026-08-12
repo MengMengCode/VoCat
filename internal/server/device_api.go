@@ -472,16 +472,34 @@ func (s *Server) handleDevicePath(
 			if next.Name == id && strings.TrimSpace(payload.Name) == "" {
 				next.Name = config.Name
 			}
+			carrierChanged := config.IMSAPN != next.IMSAPN ||
+				config.IMSPrivateIdentity != next.IMSPrivateIdentity ||
+				config.IMSPublicIdentity != next.IMSPublicIdentity ||
+				config.IMSSMSCenter != next.IMSSMSCenter ||
+				config.IMSTransport != next.IMSTransport ||
+				config.IMSAllowIMSIDerivedIdentity != next.IMSAllowIMSIDerivedIdentity ||
+				config.VoWiFiEAPMethod != next.VoWiFiEAPMethod ||
+				config.VoWiFiAllowSHA1 != next.VoWiFiAllowSHA1 ||
+				config.VoWiFiUseMODP1024 != next.VoWiFiUseMODP1024
 			if err := s.store.UpsertDevice(r.Context(), next); err != nil {
 				s.writeStoreError(w, err)
 				return true
 			}
+			reconnectRequested := false
+			if carrierChanged && next.VoWiFiEnabled && s.vowifi != nil {
+				if _, reconnectErr := s.vowifi.RequestReconnect(id); reconnectErr == nil {
+					reconnectRequested = true
+				} else if !errors.Is(reconnectErr, vowifi.ErrNotRunning) {
+					s.logger.Warn("VoWiFi profile saved but reconnect was not queued", "device_id", id, "error", reconnectErr)
+				}
+			}
 			w.Header().Set("Cache-Control", "no-store")
 			writeJSON(w, http.StatusOK, map[string]any{
 				"data": map[string]any{
-					"status":           "saved",
-					"config":           storedDeviceConfig(next),
-					"requires_restart": true,
+					"status":              "saved",
+					"config":              storedDeviceConfig(next),
+					"requires_restart":    false,
+					"reconnect_requested": reconnectRequested,
 				},
 			})
 		default:
@@ -1493,7 +1511,7 @@ func (s *Server) configuredDeviceStatus(
 }
 
 func storedVoWiFiRuntime(runtime store.VoWiFiRuntime) map[string]any {
-	return map[string]any{
+	result := map[string]any{
 		"device_id":           runtime.DeviceID,
 		"phase":               runtime.Phase,
 		"dataplane_mode":      runtime.DataplaneMode,
@@ -1517,6 +1535,17 @@ func storedVoWiFiRuntime(runtime store.VoWiFiRuntime) map[string]any {
 		"imscore":             rawJSONObject(runtime.IMSCore),
 		"smsip":               rawJSONObject(runtime.SMSIP),
 	}
+	if extra, ok := rawJSONObject(runtime.Extra).(map[string]any); ok {
+		for _, key := range []string{
+			"carrier_plmn", "carrier_preset_id", "carrier_source",
+			"epdg_source", "ims_identity_source",
+		} {
+			if value, exists := extra[key]; exists && value != "" && value != nil {
+				result[key] = value
+			}
+		}
+	}
+	return result
 }
 
 func rawJSONObject(value json.RawMessage) any {
@@ -1704,6 +1733,7 @@ func modemSummary(snapshot *device.Snapshot, phone string, phoneSource string) m
 			"iccid":                 "",
 			"reg_status":            0,
 			"reg_status_text":       "not refreshed",
+			"registration_limited":  false,
 			"sim_inserted":          false,
 			"phone_number":          phone,
 			"phone_number_source":   phoneSource,
@@ -1739,6 +1769,7 @@ func modemSummary(snapshot *device.Snapshot, phone string, phoneSource string) m
 		"model":                 snapshot.Model,
 		"reg_status":            snapshot.RegistrationStatus,
 		"reg_status_text":       registrationText(snapshot),
+		"registration_limited":  snapshot.RegistrationLimited,
 		"ps_attached":           snapshot.PSAttached,
 		"sim_inserted":          snapshot.SIMStatus != "",
 		"operating_mode":        snapshot.OperatingMode,
@@ -1779,6 +1810,11 @@ func idleVoWiFiRuntime(id string, snapshot *device.Snapshot) map[string]any {
 		"last_error_class":    "",
 		"last_error":          "",
 		"last_reason":         "disabled",
+		"carrier_plmn":        "",
+		"carrier_preset_id":   "",
+		"carrier_source":      "",
+		"epdg_source":         "",
+		"ims_identity_source": "",
 		"updated_at":          time.Now().UTC(),
 	}
 }
@@ -1821,6 +1857,9 @@ func registrationLabel(snapshot *device.Snapshot) string {
 	if snapshot == nil {
 		return "unknown"
 	}
+	if snapshot.RegistrationLimited {
+		return "limited"
+	}
 	switch snapshot.RegistrationStatus {
 	case 1, 5:
 		return "registered"
@@ -1836,6 +1875,12 @@ func registrationLabel(snapshot *device.Snapshot) string {
 func registrationText(snapshot *device.Snapshot) string {
 	if snapshot == nil {
 		return "unknown"
+	}
+	if snapshot.RegistrationLimited {
+		if !snapshot.PSAttached {
+			return "limited service (packet data detached)"
+		}
+		return "limited service"
 	}
 	switch snapshot.RegistrationStatus {
 	case 1:

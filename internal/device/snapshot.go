@@ -93,6 +93,7 @@ func (manager *Manager) readSnapshot(
 		snapshot.RegistrationStatus = registration.Status
 		snapshot.RegistrationSource = "QMI NAS"
 		snapshot.PSAttached = registration.PSAttached
+		snapshot.RegistrationLimited = registration.LimitedService
 		if registration.PLMN != "" {
 			snapshot.OperatorCode = registration.PLMN
 			snapshot.OperatorName = carrierNameForPLMN(registration.PLMN, registration.Name)
