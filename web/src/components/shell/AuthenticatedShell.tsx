@@ -5,6 +5,7 @@ import {
   DocumentTextRegular,
   GlobeRegular,
   MailRegular,
+  SendClockRegular,
   PanelLeftContractRegular,
   PanelLeftExpandRegular,
   RouterRegular,
@@ -30,6 +31,7 @@ const NAV = [
   { to: "/devices", label: "设备管理", icon: RouterRegular },
   { to: "/proxy", label: "代理管理", icon: GlobeRegular },
   { to: "/sms", label: "短信检测", icon: MailRegular },
+  { to: "/automatic-tasks", label: "自动任务", icon: SendClockRegular },
   { to: "/logs", label: "实时日志", icon: DocumentTextRegular },
   { to: "/settings", label: "系统设置", icon: SettingsRegular },
 ];

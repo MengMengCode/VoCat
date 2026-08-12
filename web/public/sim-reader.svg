@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="USB SIM reader">
+  <defs><linearGradient id="a" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#64748b"/><stop offset="1" stop-color="#1e293b"/></linearGradient></defs>
+  <rect x="12" y="31" width="104" height="68" rx="14" fill="url(#a)"/>
+  <rect x="25" y="43" width="55" height="42" rx="7" fill="#0f172a" stroke="#94a3b8" stroke-width="2"/>
+  <path d="M40 51h24l8 8v18H40z" fill="#facc15"/><path d="M44 60h24M50 54v23M60 54v23" stroke="#a16207" stroke-width="2"/>
+  <rect x="91" y="51" width="25" height="29" rx="4" fill="#cbd5e1"/>
+  <path d="M98 58h11M98 65h11M98 72h11" stroke="#64748b" stroke-width="3"/>
+  <circle cx="101" cy="89" r="3" fill="#22c55e"/>
+</svg>

@@ -1,6 +1,6 @@
 import type { DeviceListItem } from "../../types";
 import { Input, Select, Tag, ListSkeleton, EmptyState } from "../ui";
-import { isDeviceOnline, isRegistered, lifecycleLabel } from "./shared";
+import { isDeviceOnline, isRegistered, isVoWiFiInUse, lifecycleLabel } from "./shared";
 import { DeviceListItemCard } from "./DeviceListItemCard";
 import { tl, useI18n } from "../../lib/i18n";
 
@@ -40,7 +40,7 @@ function primaryLine(d: DeviceListItem): string {
 }
 
 function statusLine(d: DeviceListItem): string {
-  if (d?.vowifiEnabled) return "WiFi-Calling";
+  if (isVoWiFiInUse(d)) return "WiFi-Calling";
   return primaryLine(d);
 }
 

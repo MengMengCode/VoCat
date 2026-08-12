@@ -69,13 +69,9 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     api("/settings/preferences", { method: "PUT", body: { language: next } }).catch(() => {});
   }, []);
 
-  const t = useCallback(
-    (text: string) => {
-      if (!text || lang === "zh") return text;
-      return EN_DICT[text] ?? text;
-    },
-    [lang],
-  );
+  // 委托给模块级 tl（读取实时 activeLang），使 t 的函数身份稳定：
+  // 否则 useCallback 闭包会捕获到旧语言的 t，切换语言后出现标题/正文语言不一致。
+  const t = useCallback((text: string) => tl(text), []);
 
   const value = useMemo(() => ({ lang, setLanguage, t }), [lang, setLanguage, t]);
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;

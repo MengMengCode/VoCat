@@ -171,6 +171,51 @@ func TestSysFSDiscoverySelectsATPortForSecondQMIUSBModem(t *testing.T) {
 	}
 }
 
+func TestSysFSDiscoveryDoesNotCollapseModemsWithSharedFactorySerial(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+
+	for index, item := range []struct {
+		usbName string
+		ttyBase int
+	}{
+		{usbName: "1-5.1", ttyBase: 0},
+		{usbName: "1-5.2", ttyBase: 4},
+	} {
+		mustWrite(t, filepath.Join(usbRoot, item.usbName, "idVendor"), "2c7c\n")
+		mustWrite(t, filepath.Join(usbRoot, item.usbName, "idProduct"), "0125\n")
+		mustWrite(t, filepath.Join(usbRoot, item.usbName, "serial"), "0123456789ABCDEF\n")
+		for number := 0; number < 4; number++ {
+			interfaceName := item.usbName + ":1." + strconv.Itoa(number)
+			tty := fmt.Sprintf("ttyUSB%d", item.ttyBase+number)
+			mustWrite(t, filepath.Join(usbRoot, interfaceName, "bInterfaceNumber"), fmt.Sprintf("%02x\n", number))
+			mustMkdir(t, filepath.Join(usbRoot, interfaceName, tty, "tty", tty))
+		}
+		mustMkdir(t, filepath.Join(usbRoot, item.usbName+":1.4", "usbmisc", fmt.Sprintf("cdc-wdm%d", index)))
+	}
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("got %d candidates, want 2", len(candidates))
+	}
+	if candidates[0].ID == candidates[1].ID {
+		t.Fatalf("shared factory serial collapsed discovery IDs to %q", candidates[0].ID)
+	}
+	for _, candidate := range candidates {
+		if candidate.SerialNumber != "0123456789ABCDEF" {
+			t.Fatalf("serial = %q", candidate.SerialNumber)
+		}
+		if candidate.ATPort.Role != PortRoleAT {
+			t.Fatalf("AT port = %#v", candidate.ATPort)
+		}
+	}
+}
+
 func TestSysFSDiscoveryIgnoresNonQuectelUSB(t *testing.T) {
 	root := t.TempDir()
 	usbRoot := filepath.Join(root, "sys", "bus", "usb", "devices")

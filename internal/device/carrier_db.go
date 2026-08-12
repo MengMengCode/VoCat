@@ -42,3 +42,25 @@ func CarrierForPLMN(plmn string) (name, countryCode string, ok bool) {
 	}
 	return name, countryCode, true
 }
+
+// CarrierForIMSI resolves the home PLMN carried by an IMSI. MNCs may contain
+// either two or three digits, so prefer an exact six-digit database match and
+// then fall back to the five-digit form. This avoids treating the first three
+// subscriber digits as a three-digit MNC for networks such as 234-33.
+func CarrierForIMSI(imsi string) (plmn, name, countryCode string, ok bool) {
+	imsi = strings.TrimSpace(imsi)
+	if !decimalDigits(imsi, 5, 20) {
+		return "", "", "", false
+	}
+	for _, length := range []int{6, 5} {
+		if len(imsi) < length {
+			continue
+		}
+		candidate := imsi[:length]
+		carrier, country, found := CarrierForPLMN(candidate)
+		if found {
+			return candidate, carrier, country, true
+		}
+	}
+	return "", "", "", false
+}

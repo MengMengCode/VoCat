@@ -15,6 +15,9 @@ func setQMINetwork(
 	bool,
 	string,
 	string,
+	string,
+	string,
+	string,
 ) (NetworkResult, error) {
 	return NetworkResult{}, fmt.Errorf("%w: QMI control is supported only on Linux", ErrDataBackendUnavailable)
 }

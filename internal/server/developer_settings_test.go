@@ -1,9 +1,15 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"vocat/internal/developer"
+	"vocat/internal/store"
 )
 
 func TestDeveloperOnlySettingsAreHiddenWhenModeIsOff(t *testing.T) {
@@ -18,5 +24,29 @@ func TestDeveloperOnlySettingsAreHiddenWhenModeIsOff(t *testing.T) {
 		if response.Code != http.StatusNotFound {
 			t.Fatalf("developer-only endpoint status = %d, want 404", response.Code)
 		}
+	}
+}
+
+func TestDeveloperSettingsUpdatesGlobalSMSLimit(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	enabled, _ := json.Marshal(map[string]bool{"enabled": true})
+	if err := database.UpsertAppSetting(ctx, store.AppSetting{Key: developer.EnabledSettingKey, Value: enabled}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: database, developerEnabled: true, logger: regionTestLogger(), maxRequestBodyBytes: 4096}
+	request := httptest.NewRequest(http.MethodPut, "/api/settings/developer", strings.NewReader(`{"sms_hourly_limit":25}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handleDeveloperSettings(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if got := developer.SMSHourlyLimit(ctx, database); got != 25 {
+		t.Fatalf("SMS hourly limit = %d, want 25", got)
 	}
 }

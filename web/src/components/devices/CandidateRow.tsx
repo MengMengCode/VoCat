@@ -1,7 +1,7 @@
 import { Button } from "../ui";
 import type { OperatorCandidate } from "./types";
 import { useI18n } from "../../lib/i18n";
-import { flagEmoji } from "../../lib/carrier";
+import { CountryFlag } from "../CountryFlag";
 
 function ratsText(c: OperatorCandidate): string {
   const list = (c.rats || []).filter(Boolean) as string[];
@@ -21,7 +21,7 @@ export function CandidateRow({ candidate, onLock }: { candidate: OperatorCandida
     >
       <div>
         <div className="flex items-center gap-2 font-medium text-gray-900 dark:text-white">
-          {c.countryCode ? <span aria-hidden="true">{flagEmoji(c.countryCode)}</span> : null}
+          <CountryFlag countryCode={c.countryCode} />
           {c.operatorName || c.shortName || t("未知网络")}{" "}
           {c.status === "current" ? (
             <span className="rounded-full border border-emerald-200 bg-emerald-100 px-1.5 py-0.5 text-[10px] font-bold text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/20 dark:text-emerald-300">

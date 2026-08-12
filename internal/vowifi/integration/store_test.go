@@ -21,7 +21,7 @@ func testStore(t *testing.T) *store.Store {
 	return database
 }
 
-func TestProxyResolverUsesDeviceBinding(t *testing.T) {
+func TestProxyResolverUsesICCIDProfileBinding(t *testing.T) {
 	database := testStore(t)
 	if err := database.UpsertDevice(context.Background(), store.Device{ID: "ec20", Name: "EC20"}); err != nil {
 		t.Fatal(err)
@@ -38,13 +38,15 @@ func TestProxyResolverUsesDeviceBinding(t *testing.T) {
 	}
 	if err := database.UpsertDeviceProxyBinding(context.Background(), store.DeviceProxyBinding{
 		DeviceID:        "ec20",
+		ICCID:           "89441000400128014257",
+		ProfileName:     "Vodafone UK",
 		UpstreamProxyID: "clash",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	route, err := (ProxyResolver{Store: database}).Resolve(
 		context.Background(),
-		vowifi.ProxyRequest{DeviceID: "ec20", HomeMCC: "234", HomeMNC: "15"},
+		vowifi.ProxyRequest{DeviceID: "ec20", ICCID: "89441000400128014257", HomeMCC: "234", HomeMNC: "15"},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +56,26 @@ func TestProxyResolverUsesDeviceBinding(t *testing.T) {
 		route.Username != "proxy-user" ||
 		route.Password != "must-not-be-lost" {
 		t.Fatalf("route = %#v", route)
+	}
+}
+
+func TestProxyResolverDoesNotLeakBindingToAnotherProfileOnSameDevice(t *testing.T) {
+	database := testStore(t)
+	if err := database.UpsertDevice(context.Background(), store.Device{ID: "ec20", Name: "EC20"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertUpstreamProxy(context.Background(), store.UpstreamProxy{ID: "proxy", Name: "Proxy", Addr: "127.0.0.1:1080", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertDeviceProxyBinding(context.Background(), store.DeviceProxyBinding{DeviceID: "ec20", ICCID: "89441000400128014257", ProfileName: "A", UpstreamProxyID: "proxy"}); err != nil {
+		t.Fatal(err)
+	}
+	route, err := (ProxyResolver{Store: database}).Resolve(context.Background(), vowifi.ProxyRequest{DeviceID: "ec20", ICCID: "89104100000028106378"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.Mode != vowifi.ProxyModeDirect {
+		t.Fatalf("route = %#v, want direct for unbound ICCID", route)
 	}
 }
 

@@ -62,7 +62,7 @@ func (s *Server) routeExtensionAPI(w http.ResponseWriter, r *http.Request, clean
 		if !requireMethod(w, r, http.MethodPost) {
 			return true
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxPluginUploadBytes+(1<<20))
+		r.Body = http.MaxBytesReader(nil, r.Body, maxPluginUploadBytes+(1<<20))
 		if err := r.ParseMultipartForm(maxPluginUploadBytes); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_plugin_upload", "plugin upload must be multipart/form-data and no larger than 64 MiB")
 			return true

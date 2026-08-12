@@ -26,8 +26,8 @@ func (s *Server) routeProxyAPI(w http.ResponseWriter, r *http.Request, cleanPath
 		writeJSON(w, http.StatusOK, map[string]any{"data": proxyCountries})
 	case "upstream-proxy-country-rules":
 		s.handleCountryRules(w, r)
-	case "upstream-proxy-device-bindings":
-		s.handleDeviceProxyBindings(w, r)
+	case "upstream-proxy-profile-bindings":
+		s.handleProfileProxyBindings(w, r)
 	default:
 		segments := splitAPIPath(cleanPath)
 		switch {
@@ -40,8 +40,6 @@ func (s *Server) routeProxyAPI(w http.ResponseWriter, r *http.Request, cleanPath
 			s.handleUpstreamProbe(w, r, segments[1])
 		case len(segments) == 2 && segments[0] == "upstream-proxy-country-rules":
 			s.handleCountryRule(w, r, segments[1])
-		case len(segments) == 2 && segments[0] == "upstream-proxy-device-bindings":
-			s.handleDeviceProxyBinding(w, r, segments[1])
 		default:
 			return false
 		}
@@ -114,7 +112,7 @@ func (s *Server) handleUpstreamProxy(w http.ResponseWriter, r *http.Request, id 
 		}
 		for _, binding := range bindings {
 			if binding.UpstreamProxyID == id {
-				s.requestProxyRouteReconnect(binding.DeviceID)
+				s.requestProfileProxyRouteReconnect(binding.DeviceID, binding.ICCID)
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"deleted": true}})
@@ -124,36 +122,32 @@ func (s *Server) handleUpstreamProxy(w http.ResponseWriter, r *http.Request, id 
 	}
 }
 
-func (s *Server) handleDeviceProxyBindings(w http.ResponseWriter, r *http.Request) {
-	if !requireMethod(w, r, http.MethodGet) {
-		return
-	}
-	values, err := s.store.ListDeviceProxyBindings(r.Context())
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	result := make([]map[string]any, 0, len(values))
-	for _, value := range values {
-		result = append(result, deviceProxyBindingResponse(value))
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": result})
+type profileProxyBindingPayload struct {
+	DeviceID    string `json:"device_id"`
+	ICCID       string `json:"iccid"`
+	ProfileName string `json:"profile_name"`
+	// Accepted for compatibility with the first profile-picker bundle, which
+	// sent the read-only display state together with the writable identity.
+	StateText string `json:"state_text,omitempty"`
 }
 
-func (s *Server) handleDeviceProxyBinding(w http.ResponseWriter, r *http.Request, deviceID string) {
-	deviceID = strings.TrimSpace(deviceID)
-	if !validDeviceID(deviceID) {
-		writeError(w, http.StatusBadRequest, "invalid_device_id", "device ID must use 1-64 safe characters")
-		return
-	}
-	if _, err := s.store.Device(r.Context(), deviceID); err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
+func (s *Server) handleProfileProxyBindings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
-	case http.MethodPut:
+	case http.MethodGet:
+		values, err := s.store.ListDeviceProxyBindings(r.Context())
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		result := make([]map[string]any, 0, len(values))
+		for _, value := range values {
+			result = append(result, deviceProxyBindingResponse(value))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": result})
+	case http.MethodPost:
 		var request struct {
-			UpstreamProxyID string `json:"upstream_proxy_id"`
+			UpstreamProxyID string                       `json:"upstream_proxy_id"`
+			Bindings        []profileProxyBindingPayload `json:"bindings"`
 		}
 		if err := s.decodeJSON(w, r, &request); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -166,44 +160,114 @@ func (s *Server) handleDeviceProxyBinding(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if !upstream.Enabled {
-			writeError(w, http.StatusConflict, "upstream_proxy_disabled", "enable the upstream proxy before binding a device")
+			writeError(w, http.StatusConflict, "upstream_proxy_disabled", "enable the upstream proxy before binding a profile")
 			return
 		}
-		// Once bound, a device may not be silently rebinded to a different
-		// upstream proxy. Force the caller to DELETE first so the change is
-		// intentional. Re-binding the same upstream stays idempotent.
-		if existing, err := s.store.DeviceProxyBinding(r.Context(), deviceID); err == nil && existing.UpstreamProxyID != upstream.ID {
-			writeError(w, http.StatusConflict, "device_already_bound", "device is already bound to another upstream proxy; delete the binding first")
-			return
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.writeStoreError(w, err)
+		if len(request.Bindings) == 0 || len(request.Bindings) > 200 {
+			writeError(w, http.StatusBadRequest, "invalid_bindings", "select between 1 and 200 profiles")
 			return
 		}
-		value := store.DeviceProxyBinding{DeviceID: deviceID, UpstreamProxyID: upstream.ID}
-		if err := s.store.UpsertDeviceProxyBinding(r.Context(), value); err != nil {
-			s.writeStoreError(w, err)
-			return
+		values := make([]store.DeviceProxyBinding, 0, len(request.Bindings))
+		seen := make(map[string]struct{}, len(request.Bindings))
+		for _, item := range request.Bindings {
+			deviceID := strings.TrimSpace(item.DeviceID)
+			iccid := strings.TrimSpace(item.ICCID)
+			if !validDeviceID(deviceID) {
+				writeError(w, http.StatusBadRequest, "invalid_device_id", "device ID must use 1-64 safe characters")
+				return
+			}
+			if !validProfileICCID(iccid) {
+				writeError(w, http.StatusBadRequest, "invalid_iccid", "profile ICCID must contain 18 to 22 digits")
+				return
+			}
+			if _, duplicate := seen[iccid]; duplicate {
+				writeError(w, http.StatusBadRequest, "duplicate_iccid", "the same ICCID was selected more than once")
+				return
+			}
+			seen[iccid] = struct{}{}
+			if _, err := s.store.Device(r.Context(), deviceID); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			if existing, err := s.store.DeviceProxyBinding(r.Context(), iccid); err == nil && existing.UpstreamProxyID != upstream.ID {
+				writeError(w, http.StatusConflict, "profile_already_bound", "this ICCID is already bound to another upstream proxy; delete that binding first")
+				return
+			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+				s.writeStoreError(w, err)
+				return
+			}
+			name := strings.TrimSpace(item.ProfileName)
+			if name == "" {
+				name = iccid
+			}
+			values = append(values, store.DeviceProxyBinding{DeviceID: deviceID, ICCID: iccid, ProfileName: name, UpstreamProxyID: upstream.ID})
 		}
-		reconnected, reconnectErr := s.requestProxyRouteReconnect(deviceID)
-		response := deviceProxyBindingResponse(value)
-		response["reconnect_requested"] = reconnected
-		if reconnectErr != nil {
-			response["reconnect_error"] = reconnectErr.Error()
+		requested := false
+		var reconnectErrors []string
+		for _, value := range values {
+			if err := s.store.UpsertDeviceProxyBinding(r.Context(), value); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			reconnected, reconnectErr := s.requestProfileProxyRouteReconnect(value.DeviceID, value.ICCID)
+			requested = requested || reconnected
+			if reconnectErr != nil {
+				reconnectErrors = append(reconnectErrors, reconnectErr.Error())
+			}
+		}
+		response := map[string]any{"created": len(values), "reconnect_requested": requested}
+		if len(reconnectErrors) > 0 {
+			response["reconnect_error"] = strings.Join(reconnectErrors, "; ")
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"data": response})
 	case http.MethodDelete:
-		if err := s.store.DeleteDeviceProxyBinding(r.Context(), deviceID); err != nil {
-			s.writeStoreError(w, err)
+		var request struct {
+			UpstreamProxyID string   `json:"upstream_proxy_id"`
+			ICCIDs          []string `json:"iccids"`
+		}
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		reconnected, reconnectErr := s.requestProxyRouteReconnect(deviceID)
-		response := map[string]any{"deleted": true, "reconnect_requested": reconnected}
-		if reconnectErr != nil {
-			response["reconnect_error"] = reconnectErr.Error()
+		if len(request.ICCIDs) == 0 || len(request.ICCIDs) > 200 {
+			writeError(w, http.StatusBadRequest, "invalid_bindings", "select between 1 and 200 profiles")
+			return
+		}
+		requested := false
+		deleted := 0
+		var reconnectErrors []string
+		for _, rawICCID := range request.ICCIDs {
+			iccid := strings.TrimSpace(rawICCID)
+			binding, err := s.store.DeviceProxyBinding(r.Context(), iccid)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			if strings.TrimSpace(request.UpstreamProxyID) != "" && binding.UpstreamProxyID != strings.TrimSpace(request.UpstreamProxyID) {
+				writeError(w, http.StatusConflict, "binding_proxy_mismatch", "selected ICCID is not bound to this upstream proxy")
+				return
+			}
+			if err := s.store.DeleteDeviceProxyBinding(r.Context(), iccid); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			deleted++
+			reconnected, reconnectErr := s.requestProfileProxyRouteReconnect(binding.DeviceID, binding.ICCID)
+			requested = requested || reconnected
+			if reconnectErr != nil {
+				reconnectErrors = append(reconnectErrors, reconnectErr.Error())
+			}
+		}
+		response := map[string]any{"deleted": deleted, "reconnect_requested": requested}
+		if len(reconnectErrors) > 0 {
+			response["reconnect_error"] = strings.Join(reconnectErrors, "; ")
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"data": response})
 	default:
-		w.Header().Set("Allow", "PUT, DELETE")
+		w.Header().Set("Allow", "GET, POST, DELETE")
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 }
@@ -211,7 +275,7 @@ func (s *Server) handleDeviceProxyBinding(w http.ResponseWriter, r *http.Request
 // A binding is already durable before this is called. Reconnect failures are
 // returned as advisory information: the chosen route will still be used on
 // the next VoWiFi start/reconnect.
-func (s *Server) requestProxyRouteReconnect(deviceID string) (bool, error) {
+func (s *Server) requestProfileProxyRouteReconnect(deviceID, iccid string) (bool, error) {
 	if s.vowifi == nil {
 		return false, nil
 	}
@@ -222,11 +286,28 @@ func (s *Server) requestProxyRouteReconnect(deviceID string) (bool, error) {
 	if !config.VoWiFiEnabled {
 		return false, nil
 	}
+	state, stateErr := s.vowifi.State(deviceID)
+	if stateErr != nil || strings.TrimSpace(state.ICCID) == "" || strings.TrimSpace(state.ICCID) != strings.TrimSpace(iccid) {
+		return false, nil
+	}
 	if _, err := s.vowifi.RequestReconnect(deviceID); err != nil {
 		s.logger.Warn("VoWiFi proxy route saved but immediate reconnect was not started", "device_id", deviceID, "error", err)
 		return false, err
 	}
 	return true, nil
+}
+
+func validProfileICCID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 18 || len(value) > 22 {
+		return false
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) saveAndProbeUpstream(
@@ -258,7 +339,7 @@ func (s *Server) saveAndProbeUpstream(
 	}
 	for _, binding := range bindings {
 		if binding.UpstreamProxyID == saved.ID {
-			s.requestProxyRouteReconnect(binding.DeviceID)
+			s.requestProfileProxyRouteReconnect(binding.DeviceID, binding.ICCID)
 		}
 	}
 	probe, probeErr := localproxy.ProbeSOCKS5(
@@ -449,6 +530,8 @@ func countryRuleResponse(value store.CountryRule) map[string]any {
 func deviceProxyBindingResponse(value store.DeviceProxyBinding) map[string]any {
 	return map[string]any{
 		"device_id":         value.DeviceID,
+		"iccid":             value.ICCID,
+		"profile_name":      value.ProfileName,
 		"upstream_proxy_id": value.UpstreamProxyID,
 	}
 }

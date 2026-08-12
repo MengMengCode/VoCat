@@ -108,7 +108,7 @@ export function UpstreamDialog({ open, editing, form, testing, probe, onPatch, o
           </Field>
           <ToggleRow
             title={t("启用代理")}
-            subtitle={t("禁用后，已绑定设备的 VoWiFi 将停止使用该线路，不会泄漏到直连")}
+            subtitle={t("禁用后，已绑定 Profile 的 VoWiFi 将停止使用该线路，不会泄漏到直连")}
             checked={form.enabled}
             onChange={(v) => onPatch({ enabled: v })}
           />

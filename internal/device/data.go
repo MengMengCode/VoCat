@@ -13,6 +13,49 @@ import (
 
 var apnPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$`)
 
+// ValidAPN reports whether value can safely be used as a modem PDP-context APN.
+func ValidAPN(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "" || apnPattern.MatchString(value)
+}
+
+func validNetworkCredential(value string) bool {
+	if len(value) > 128 || strings.ContainsAny(value, "\r\n\x00\"") {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeNetworkAuthentication(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "", "NONE":
+		return "NONE"
+	case "PAP", "CHAP", "PAP_OR_CHAP":
+		return strings.ToUpper(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func (manager *Manager) sensitiveCommand(
+	ctx context.Context,
+	client modem.Client,
+	command string,
+) (modem.Response, error) {
+	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
+	defer cancel()
+	response, err := client.Execute(commandCtx, command)
+	if err != nil {
+		return response, errors.New("sensitive AT command failed")
+	}
+	return response, nil
+}
+
 func (manager *Manager) SetNetwork(
 	ctx context.Context,
 	id string,
@@ -26,8 +69,15 @@ func (manager *Manager) SetNetwork(
 	// qmi-network sources its profile as shell syntax for both start and stop.
 	// Validate an optional APN on every path so a disable request cannot inject
 	// additional profile assignments or commands.
-	if apn != "" && !apnPattern.MatchString(apn) {
+	if apn != "" && !ValidAPN(apn) {
 		return NetworkResult{}, ErrInvalidNetworkAPN
+	}
+	if !validNetworkCredential(request.Username) || !validNetworkCredential(request.Password) {
+		return NetworkResult{}, errors.New("APN username or password contains unsupported characters")
+	}
+	authentication := normalizeNetworkAuthentication(request.Authentication)
+	if authentication == "" {
+		return NetworkResult{}, errors.New("authentication type must be NONE, PAP, CHAP, or PAP_OR_CHAP")
 	}
 	ipVersion := normalizeIPVersion(request.IPVersion)
 	if ipVersion == "" {
@@ -46,11 +96,22 @@ func (manager *Manager) SetNetwork(
 		}
 	}
 	candidate := manager.candidateFor(state)
+	backend := strings.ToLower(strings.TrimSpace(request.Backend))
+	if backend == "" {
+		if candidate := manager.candidateFor(state); candidate.QMIControl != "" && candidate.NetworkInterface != "" {
+			backend = "qmi"
+		} else {
+			backend = "at"
+		}
+	}
+	if backend != "at" && backend != "qmi" {
+		return NetworkResult{}, fmt.Errorf("unsupported cellular data backend %q", request.Backend)
+	}
 	// OpenStick's native WWAN path must drive registration through QMI NAS.
 	// AT+COPS only updates the legacy AT facade on this firmware and can leave
 	// NAS in not-registered-searching, which then makes qmi-network report a
 	// generic-no-service call failure.
-	if request.Enabled && isNativeQMICandidate(candidate) {
+	if request.Enabled && backend == "qmi" && isNativeQMICandidate(candidate) {
 		registrationContext, cancel := context.WithTimeout(ctx, manager.scanTimeout)
 		registrationSession, openErr := manager.openNativeQMIRegistration(registrationContext, candidate)
 		if openErr != nil {
@@ -71,8 +132,15 @@ func (manager *Manager) SetNetwork(
 			return NetworkResult{}, registrationErr
 		}
 	}
-	if candidate.QMIControl != "" && candidate.NetworkInterface != "" {
-		return setQMINetwork(ctx, candidate, request.Enabled, apn, ipVersion)
+	if backend == "qmi" {
+		if candidate.QMIControl == "" || candidate.NetworkInterface == "" {
+			return NetworkResult{}, fmt.Errorf("%w: QMI control device and network interface are required", ErrDataBackendUnavailable)
+		}
+		result, err := setQMINetwork(ctx, candidate, request.Enabled, apn, ipVersion, request.Username, request.Password, authentication)
+		if err != nil && (request.Username != "" || request.Password != "") {
+			return NetworkResult{}, errors.New("authenticated QMI cellular data operation failed")
+		}
+		return result, err
 	}
 
 	client, err := manager.clientLocked(ctx, state, candidate)
@@ -81,13 +149,27 @@ func (manager *Manager) SetNetwork(
 		return NetworkResult{}, err
 	}
 	if request.Enabled {
-		commands := []string{
-			fmt.Sprintf(`AT+CGDCONT=1,"%s","%s"`, ipVersion, apn),
-			"AT+CGATT=1",
-			"AT+CGACT=1,1",
+		type networkCommand struct {
+			value     string
+			sensitive bool
 		}
+		commands := []networkCommand{{value: fmt.Sprintf(`AT+CGDCONT=1,"%s","%s"`, ipVersion, apn)}}
+		if authentication != "NONE" {
+			authCode := map[string]int{"PAP": 1, "CHAP": 2, "PAP_OR_CHAP": 3}[authentication]
+			commands = append(commands, networkCommand{
+				value:     fmt.Sprintf(`AT+CGAUTH=1,%d,"%s","%s"`, authCode, request.Username, request.Password),
+				sensitive: true,
+			})
+		}
+		commands = append(commands, networkCommand{value: "AT+CGATT=1"}, networkCommand{value: "AT+CGACT=1,1"})
 		for _, command := range commands {
-			if _, err := manager.command(ctx, client, command); err != nil {
+			var err error
+			if command.sensitive {
+				_, err = manager.sensitiveCommand(ctx, client, command.value)
+			} else {
+				_, err = manager.command(ctx, client, command.value)
+			}
+			if err != nil {
 				manager.setResult(id, state, nil, err)
 				return NetworkResult{}, err
 			}

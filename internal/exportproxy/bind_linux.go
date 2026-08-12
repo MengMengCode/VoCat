@@ -8,9 +8,9 @@ import (
 	"hash/fnv"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
+	"unicode"
 )
 
 func platformSupported() error { return nil }
@@ -54,14 +54,15 @@ func boundResolver(networkInterface string) *net.Resolver {
 }
 
 func exportRouteDNSServers(networkInterface string) []string {
-	safeName := strings.Map(func(character rune) rune {
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' {
-			return character
-		}
-		return '_'
-	}, networkInterface)
-	file, err := os.Open(filepath.Join("/run/vocat", "cellular-"+safeName+".dns"))
+	if !validInterfaceName(networkInterface) {
+		return []string{"1.1.1.1", "8.8.8.8"}
+	}
+	root, err := os.OpenRoot("/run/vocat")
+	if err != nil {
+		return []string{"1.1.1.1", "8.8.8.8"}
+	}
+	defer root.Close()
+	file, err := root.Open("cellular-" + networkInterface + ".dns")
 	if err != nil {
 		return []string{"1.1.1.1", "8.8.8.8"}
 	}
@@ -77,4 +78,21 @@ func exportRouteDNSServers(networkInterface string) []string {
 		return []string{"1.1.1.1", "8.8.8.8"}
 	}
 	return servers
+}
+
+// Linux IFNAMSIZ is 16 including the terminator. Restricting names here both
+// matches kernel interface names and prevents a stored device value from ever
+// becoming a filesystem path component.
+func validInterfaceName(value string) bool {
+	if value == "" || len(value) > 15 || value == "." || value == ".." {
+		return false
+	}
+	for _, character := range value {
+		if character > unicode.MaxASCII || !(character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' ||
+			character == '-' || character == '_' || character == '.') {
+			return false
+		}
+	}
+	return true
 }

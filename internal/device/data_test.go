@@ -3,7 +3,10 @@ package device
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+
+	"vocat/internal/modem"
 )
 
 func TestSetNetworkATBackendActivatesAndDeactivatesPDP(t *testing.T) {
@@ -31,6 +34,52 @@ func TestSetNetworkATBackendActivatesAndDeactivatesPDP(t *testing.T) {
 	}
 	if result.Enabled {
 		t.Fatalf("disable result = %#v", result)
+	}
+	client.assertDone(t)
+}
+
+func TestSetNetworkATBackendAppliesPAPCredentials(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: `AT+CGDCONT=1,"IPV4V6","giffgaff.com"`, response: okResponse()},
+		{command: `AT+CGAUTH=1,1,"gg","p"`, response: okResponse()},
+		{command: "AT+CGATT=1", response: okResponse()},
+		{command: "AT+CGACT=1,1", response: okResponse()},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	if _, err := manager.SetNetwork(context.Background(), id, NetworkRequest{
+		Enabled: true, APN: "giffgaff.com", IPVersion: "IPV4V6",
+		Username: "gg", Password: "p", Authentication: "PAP",
+	}); err != nil {
+		t.Fatalf("enable authenticated network: %v", err)
+	}
+	client.assertDone(t)
+}
+
+func TestSetNetworkDoesNotExposeAPNCredentialsInErrorsOrState(t *testing.T) {
+	const username = "private-user"
+	const password = "private-password"
+	command := `AT+CGAUTH=1,1,"` + username + `","` + password + `"`
+	client := &transcriptClient{steps: []clientStep{
+		{command: `AT+CGDCONT=1,"IPV4V6","giffgaff.com"`, response: okResponse()},
+		{command: command, err: &modem.CommandError{Command: command, Final: "ERROR"}},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	_, err := manager.SetNetwork(context.Background(), id, NetworkRequest{
+		Enabled: true, APN: "giffgaff.com", IPVersion: "IPV4V6",
+		Username: username, Password: password, Authentication: "PAP",
+	})
+	if err == nil {
+		t.Fatal("SetNetwork() error = nil")
+	}
+	if strings.Contains(err.Error(), username) || strings.Contains(err.Error(), password) || strings.Contains(err.Error(), "AT+CGAUTH") {
+		t.Fatalf("SetNetwork() exposed credentials: %q", err)
+	}
+	entry, getErr := manager.Get(id)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if strings.Contains(entry.LastError, username) || strings.Contains(entry.LastError, password) || strings.Contains(entry.LastError, "AT+CGAUTH") {
+		t.Fatalf("device state exposed credentials: %q", entry.LastError)
 	}
 	client.assertDone(t)
 }

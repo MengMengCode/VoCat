@@ -1,6 +1,6 @@
 export type ApiStatus = "ok" | "error";
 
-export type DeviceType = "wifi_410" | "dji_4g" | "pcie_ec20_ec25";
+export type DeviceType = "wifi_410" | "dji_4g" | "pcie_ec20_ec25" | "usb_sim_reader";
 
 export interface Session {
   authenticated: boolean;
@@ -31,6 +31,8 @@ export interface ApiErrorBody {
 export interface VoWiFiRuntime {
   deviceId: string;
   phase: string;
+  enabled?: boolean;
+  active?: boolean;
   dataplaneMode: string;
   iccid: string;
   imsi: string;
@@ -171,6 +173,8 @@ export interface DeviceStatus {
 }
 
 export interface DiscoveredDevice {
+	 hardwareKind?: string;
+	 readerName?: string;
   discoveryKey: string;
   controlPath: string;
   netInterface: string;
@@ -200,6 +204,7 @@ export interface DeviceConfig {
   usbPath: string;
   audioDevice?: string;
   modemImei?: string;
+	 simPin?: string;
   apn: string;
   imsApn: string;
   imsPrivateIdentity: string;
@@ -215,8 +220,8 @@ export interface DeviceConfig {
   dataBits: number;
   stopBits: number;
   parity: string;
-  deviceBackend: "at" | "qmi";
-  esimTransport: "at" | "qmi";
+  deviceBackend: "at" | "qmi" | "pcsc";
+  esimTransport: "at" | "qmi" | "pcsc" | "none";
   qmiUseProxy: boolean;
   qmiProxyPath?: string;
   qmiProxyExecutable?: string;
@@ -243,6 +248,7 @@ export interface CardPolicy {
   airplaneEnabled: boolean;
   apn?: string;
   ipVersion?: string;
+  customPhoneNumber?: string;
   source?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -329,9 +335,18 @@ export interface CountryRule {
 
 export interface DeviceProxyBinding {
   deviceId: string;
+  iccid: string;
+  profileName: string;
   upstreamProxyId: string;
   reconnectRequested?: boolean;
   reconnectError?: string;
+}
+
+export interface ProfileProxyCandidate {
+  deviceId: string;
+  iccid: string;
+  profileName: string;
+  stateText?: string;
 }
 
 export interface LogEntry {
@@ -375,6 +390,7 @@ export interface NotificationSettings {
   bark: Record<string, unknown>;
   email: Record<string, unknown>;
   pushplus: Record<string, unknown>;
+  wecom: Record<string, unknown>;
 }
 
 // 网络访问控制策略：默认仅放行内网网段，可切换到对公网开放。
@@ -416,6 +432,9 @@ export interface DeveloperSettings {
   deviceLimit: number;
   defaultDeviceLimit: number;
   maxDeviceLimit: number;
+  smsHourlyLimit: number;
+  defaultSmsHourlyLimit: number;
+  maxSmsHourlyLimit: number;
 }
 
 export type Notice = {

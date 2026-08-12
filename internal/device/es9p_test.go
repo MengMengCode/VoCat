@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -16,9 +17,15 @@ func newTestES9P(t *testing.T, handler http.HandlerFunc) *es9pClient {
 	t.Helper()
 	server := httptest.NewTLSServer(handler)
 	t.Cleanup(server.Close)
-	client := newES9PClient(strings.TrimPrefix(server.URL, "https://"))
-	client.http = server.Client()
-	return client
+	endpoint, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &es9pClient{
+		smdp:     strings.TrimPrefix(server.URL, "https://"),
+		endpoint: endpoint,
+		http:     server.Client(),
+	}
 }
 
 func successEnvelope(fields map[string]any) map[string]any {
@@ -32,6 +39,21 @@ func successEnvelope(fields map[string]any) map[string]any {
 }
 
 func b64(value []byte) string { return base64.StdEncoding.EncodeToString(value) }
+
+func TestNewES9PClientRejectsUnsafeAddress(t *testing.T) {
+	for _, address := range []string{
+		"https://rsp.example.com",
+		"127.0.0.1",
+		"169.254.169.254",
+		"rsp.example.com/unexpected/path",
+		"user:password@rsp.example.com",
+		"rsp.example.com\r\nX-Injected: yes",
+	} {
+		if _, err := newES9PClient(context.Background(), address); err == nil {
+			t.Errorf("newES9PClient(%q) accepted an unsafe address", address)
+		}
+	}
+}
 
 func TestInitiateAuthenticationSuccess(t *testing.T) {
 	signed1 := []byte{0x30, 0x03, 0x80, 0x01, 0x09}
@@ -139,5 +161,36 @@ func TestGetBoundProfilePackageSuccess(t *testing.T) {
 	}
 	if !bytes.Equal(got, pkg) {
 		t.Fatalf("bpp = %X, want %X", got, pkg)
+	}
+}
+
+func TestHandleNotificationRequiresHTTP204(t *testing.T) {
+	pending := []byte{0xBF, 0x37, 0x00}
+	client := newTestES9P(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gsma/rsp2/es9plus/handleNotification" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if r.Header.Get("X-Admin-Protocol") != "gsma/rsp/v2.2.2" {
+			t.Errorf("X-Admin-Protocol = %q", r.Header.Get("X-Admin-Protocol"))
+		}
+		var request map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(request["pendingNotification"])
+		if err != nil || !bytes.Equal(decoded, pending) {
+			t.Errorf("pendingNotification = %q (%X), err=%v", request["pendingNotification"], decoded, err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	if err := client.handleNotification(context.Background(), pending); err != nil {
+		t.Fatalf("handleNotification: %v", err)
+	}
+
+	client = newTestES9P(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(successEnvelope(nil))
+	})
+	if err := client.handleNotification(context.Background(), pending); err == nil || !strings.Contains(err.Error(), "HTTP 200") {
+		t.Fatalf("HTTP 200 error = %v", err)
 	}
 }

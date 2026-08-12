@@ -27,15 +27,16 @@ func (resolver ProxyResolver) Resolve(
 		return vowifi.ProxyRoute{}, errors.New("vowifi proxy resolver: store is nil")
 	}
 	deviceID := strings.TrimSpace(request.DeviceID)
-	if deviceID == "" {
+	iccid := strings.TrimSpace(request.ICCID)
+	if deviceID == "" || iccid == "" {
 		return vowifi.ProxyRoute{Mode: vowifi.ProxyModeDirect}, nil
 	}
-	binding, err := resolver.Store.DeviceProxyBinding(ctx, deviceID)
+	binding, err := resolver.Store.DeviceProxyBinding(ctx, iccid)
 	if errors.Is(err, store.ErrNotFound) {
 		return vowifi.ProxyRoute{Mode: vowifi.ProxyModeDirect}, nil
 	}
 	if err != nil {
-		return vowifi.ProxyRoute{}, fmt.Errorf("resolve proxy binding for device %s: %w", deviceID, err)
+		return vowifi.ProxyRoute{}, fmt.Errorf("resolve proxy binding for ICCID %s: %w", iccid, err)
 	}
 	upstream, err := resolver.Store.UpstreamProxy(ctx, binding.UpstreamProxyID)
 	if err != nil {

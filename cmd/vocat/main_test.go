@@ -153,11 +153,7 @@ func TestEnforceCardRegionSkipsRadioWhenAlreadyOff(t *testing.T) {
 }
 
 func TestEnforceCardRegionLiftsBlockForAllowedSIM(t *testing.T) {
-	client := &fakeModemClient{steps: []fakeStep{
-		{command: "AT+CFUN?", lines: []string{"+CFUN: 4"}},
-		{command: "AT+CFUN=1"},
-		{command: "AT+CFUN?", lines: []string{"+CFUN: 1"}},
-	}}
+	client := &fakeModemClient{}
 	manager := newRegionTestManager(t, client)
 	database := newRegionTestStore(t)
 

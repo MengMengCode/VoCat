@@ -26,6 +26,8 @@ import (
 // isdRAID is the standard ISD-R AID that hosts the LPA functions (ES10).
 const isdRAID = "A0000005591010FFFFFFFF8900000100"
 
+const xesimISDRAID = "A0000005591010FFFFFFFF8900000177"
+
 // eSTK multi-SE products expose each eUICC storage through its own vendor
 // ISD-R AID. The standard GSMA AID aliases one of them, so probing only that
 // AID silently hides the second storage.
@@ -404,6 +406,18 @@ func (manager *Manager) openATEuiccOnceAID(ctx context.Context, id, aidHex strin
 func (manager *Manager) discoverEuiccAIDs(ctx context.Context, id string) []string {
 	product, err := manager.openEuiccAID(ctx, id, estkProductAID)
 	if err != nil {
+		found := make([]string, 0, 2)
+		for _, aid := range []string{isdRAID, xesimISDRAID} {
+			channel, selectErr := manager.openEuiccAID(ctx, id, aid)
+			if selectErr != nil {
+				continue
+			}
+			channel.close(context.Background())
+			found = append(found, aid)
+		}
+		if len(found) != 0 {
+			return found
+		}
 		return []string{isdRAID}
 	}
 	product.close(context.Background())

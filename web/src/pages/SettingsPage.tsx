@@ -14,16 +14,18 @@ import {
   buildBarkPayload,
   buildEmailPayload,
   buildNotificationsPayload,
+  buildWecomPayload,
   buildWebhookPayload,
   defaultNotifyForms,
   formsFromNotifications,
   type NotifyForms,
 } from "../components/settings/model";
 import { PushplusTab, TelegramTab } from "../components/settings/BotTabs";
-import { BarkTab, EmailTab, WebhookTab } from "../components/settings/PushTabs";
+import { BarkTab, EmailTab, WebhookTab, WecomTab } from "../components/settings/PushTabs";
 import { PluginsCard } from "../components/settings/PluginsCard";
 import { HTTPSCard } from "../components/settings/HTTPSCard";
 import { DeviceQuotaCard } from "../components/settings/DeviceQuotaCard";
+import { SMSRateLimitCard } from "../components/settings/SMSRateLimitCard";
 
 const EMPTY_PASSWORD: PasswordForm = { oldPassword: "", newPassword: "", confirmPassword: "" };
 
@@ -33,12 +35,12 @@ const NOTIFY_TABS = [
   { key: "email", label: "Email" },
   { key: "pushplus", label: "Pushplus" },
   { key: "webhook", label: "Webhook" },
+  { key: "wecom", label: "企业微信消息推送" },
 ];
 
 const EMPTY_SYSTEM_INFO: SystemInfo = { version: "", buildTime: "", config: "" };
 
 const EMPTY_SECURITY: NetworkAccessForm = { mode: "internal", allowedCidrs: [], trustProxyHeaders: false };
-
 export default function SettingsPage() {
   const { refresh } = useAuth();
   const { t, lang } = useI18n();
@@ -51,6 +53,7 @@ export default function SettingsPage() {
   const [testingWebhook, setTestingWebhook] = useState(false);
   const [testingBark, setTestingBark] = useState(false);
   const [testingEmail, setTestingEmail] = useState(false);
+  const [testingWecom, setTestingWecom] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [applyingUpdate, setApplyingUpdate] = useState(false);
@@ -65,8 +68,10 @@ export default function SettingsPage() {
   const [savingHTTPS, setSavingHTTPS] = useState(false);
   const [developerSettings, setDeveloperSettings] = useState<DeveloperSettings | null>(null);
   const [deviceLimit, setDeviceLimit] = useState(5);
+  const [smsHourlyLimit, setSMSHourlyLimit] = useState(10);
   const [loadingDeveloper, setLoadingDeveloper] = useState(false);
   const [savingDeveloper, setSavingDeveloper] = useState(false);
+  const [savingSMSLimit, setSavingSMSLimit] = useState(false);
 
   const updateChannel = useCallback(<K extends keyof NotifyForms>(key: K, patch: Partial<NotifyForms[K]>) => {
     setForms((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
@@ -131,8 +136,9 @@ export default function SettingsPage() {
       const data = await api<DeveloperSettings>("/settings/developer");
       setDeveloperSettings(data);
       setDeviceLimit(data.deviceLimit);
+      setSMSHourlyLimit(data.smsHourlyLimit);
     } catch (error) {
-      message.error(apiMessage(error) || (lang === "zh" ? "开发者配置加载失败" : "Failed to load developer settings"));
+      message.error(apiMessage(error) || (lang === "zh" ? "设备配额配置加载失败" : "Failed to load device quota settings"));
     } finally {
       setLoadingDeveloper(false);
     }
@@ -152,6 +158,7 @@ export default function SettingsPage() {
       setHTTPSSettings(null);
       setDeveloperSettings(null);
       setDeviceLimit(5);
+      setSMSHourlyLimit(10);
     }
   }, [systemInfo.developer, fetchHTTPS, fetchDeveloperSettings]);
 
@@ -187,6 +194,25 @@ export default function SettingsPage() {
       setSavingDeveloper(false);
     }
   }, [developerSettings, deviceLimit, lang]);
+
+  const onSaveSMSHourlyLimit = useCallback(async () => {
+    const maximum = developerSettings?.maxSmsHourlyLimit ?? 1000;
+    if (!Number.isInteger(smsHourlyLimit) || smsHourlyLimit < 1 || smsHourlyLimit > maximum) {
+      message.error(lang === "zh" ? `短信发送限制必须是 1 到 ${maximum} 的整数` : `SMS limit must be an integer between 1 and ${maximum}`);
+      return;
+    }
+    setSavingSMSLimit(true);
+    try {
+      const data = await api<DeveloperSettings>("/settings/developer", { method: "PUT", body: { smsHourlyLimit } });
+      setDeveloperSettings(data);
+      setSMSHourlyLimit(data.smsHourlyLimit);
+      message.success(lang === "zh" ? "短信发送速率限制已保存" : "SMS rate limit saved");
+    } catch (error) {
+      message.error(apiMessage(error) || (lang === "zh" ? "短信发送速率限制保存失败" : "Failed to save SMS rate limit"));
+    } finally {
+      setSavingSMSLimit(false);
+    }
+  }, [developerSettings, smsHourlyLimit, lang]);
 
   const onSaveSecurity = useCallback(async () => {
     setSavingSecurity(true);
@@ -297,6 +323,21 @@ export default function SettingsPage() {
     }
   }, [forms.email]);
 
+  const onTestWecom = useCallback(async () => {
+    setTestingWecom(true);
+    try {
+      await api("/settings/notifications/wecom/test", {
+        method: "POST",
+        body: buildWecomPayload(forms.wecom, true),
+      });
+      message.success(t("测试通知已发送"));
+    } catch (error) {
+      message.error(apiMessage(error) || t("企业微信消息推送测试失败"));
+    } finally {
+      setTestingWecom(false);
+    }
+  }, [forms.wecom]);
+
   const onCheckUpdate = useCallback(async () => {
     setCheckingUpdate(true);
     try {
@@ -406,6 +447,14 @@ export default function SettingsPage() {
               onLimitChange={setDeviceLimit}
               onSave={onSaveDeviceLimit}
             />
+            <SMSRateLimitCard
+              value={developerSettings}
+              limit={smsHourlyLimit}
+              loading={loadingDeveloper}
+              saving={savingSMSLimit}
+              onLimitChange={setSMSHourlyLimit}
+              onSave={onSaveSMSHourlyLimit}
+            />
             <PluginsCard />
           </>
         ) : null}
@@ -417,7 +466,7 @@ export default function SettingsPage() {
               <CardIcon>
                 <AlertRegular className="text-[24px]" />
               </CardIcon>
-              <CardTitle title={t("通知")} subtitle={t("Telegram / Bark / Email / Pushplus / Webhook")} />
+              <CardTitle title={t("通知")} subtitle={t("Telegram / Bark / Email / Pushplus / Webhook / 企业微信消息推送")} />
             </div>
             <Button variant="primary" loading={savingNotif} disabled={loadingNotif} onClick={onSaveNotifications} className="!border-0" icon={<CheckmarkRegular />}>
               {t("保存通知配置")}
@@ -447,6 +496,9 @@ export default function SettingsPage() {
                   testing={testingWebhook}
                   onTest={onTestWebhook}
                 />
+              ) : null}
+              {activeTab === "wecom" ? (
+                <WecomTab value={forms.wecom} onChange={(p) => updateChannel("wecom", p)} testing={testingWecom} onTest={onTestWecom} />
               ) : null}
             </div>
           )}

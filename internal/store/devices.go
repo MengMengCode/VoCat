@@ -17,6 +17,7 @@ const (
 	DeviceTypeWiFi410      = "wifi_410"
 	DeviceTypeDJI4G        = "dji_4g"
 	DeviceTypePCIeEC20EC25 = "pcie_ec20_ec25"
+	DeviceTypeUSBSIMReader = "usb_sim_reader"
 )
 
 // NormalizeDeviceType returns a stable persisted device type identifier.
@@ -27,6 +28,8 @@ func NormalizeDeviceType(value string) string {
 		return DeviceTypeWiFi410
 	case DeviceTypeDJI4G:
 		return DeviceTypeDJI4G
+	case DeviceTypeUSBSIMReader:
+		return DeviceTypeUSBSIMReader
 	case "", DeviceTypePCIeEC20EC25:
 		return DeviceTypePCIeEC20EC25
 	default:
@@ -132,15 +135,19 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 		value.DeviceBackend = "at"
 	}
 	value.DeviceBackend = strings.ToLower(strings.TrimSpace(value.DeviceBackend))
-	if value.DeviceBackend != "at" && value.DeviceBackend != "qmi" {
+	if value.DeviceBackend != "at" && value.DeviceBackend != "qmi" && value.DeviceBackend != "pcsc" {
 		return fmt.Errorf("unsupported device backend %q", value.DeviceBackend)
 	}
 	if value.ESIMTransport == "" {
 		value.ESIMTransport = "at"
 	}
 	value.ESIMTransport = strings.ToLower(strings.TrimSpace(value.ESIMTransport))
-	if value.ESIMTransport != "at" && value.ESIMTransport != "qmi" {
+	if value.ESIMTransport != "at" && value.ESIMTransport != "qmi" && value.ESIMTransport != "pcsc" && value.ESIMTransport != "none" {
 		return fmt.Errorf("unsupported eSIM transport %q", value.ESIMTransport)
+	}
+	value.SIMPIN = strings.TrimSpace(value.SIMPIN)
+	if value.SIMPIN != "" && (len(value.SIMPIN) < 4 || len(value.SIMPIN) > 8 || strings.Trim(value.SIMPIN, "0123456789") != "") {
+		return errors.New("SIM PIN must contain 4 to 8 digits")
 	}
 	carrierProfileUnset := strings.TrimSpace(value.IMSAPN) == "" &&
 		strings.TrimSpace(value.IMSPrivateIdentity) == "" &&
@@ -192,6 +199,13 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 	if value.VoWiFiEAPMethod != "aka" && value.VoWiFiEAPMethod != "aka-prime" {
 		return fmt.Errorf("unsupported VoWiFi EAP method %q", value.VoWiFiEAPMethod)
 	}
+	if value.DeviceType == DeviceTypeUSBSIMReader {
+		value.DeviceBackend = "pcsc"
+		value.ESIMTransport = "pcsc"
+		value.NetworkEnabled = false
+		value.SMSEnabled = true
+		value.VoWiFiEnabled = true
+	}
 	extra, err := normalizeJSONObject(value.Extra)
 	if err != nil {
 		return fmt.Errorf("normalize device extra data: %w", err)
@@ -209,7 +223,7 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 	_, err = executor.ExecContext(ctx, `
 		INSERT INTO devices (
 			id, name, device_type, interface, control_device, at_port, usb_path,
-			audio_device, modem_imei, apn, ims_apn, ims_private_identity,
+			audio_device, modem_imei, sim_pin, apn, ims_apn, ims_private_identity,
 			ims_public_identity, ims_sms_center, ims_transport,
 			ims_allow_imsi_derived_identity, vowifi_eap_method,
 			vowifi_allow_sha1, vowifi_use_modp1024, proxy_port, baud_rate,
@@ -217,7 +231,7 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 			qmi_use_proxy, qmi_proxy_path, qmi_proxy_executable,
 			network_enabled, sms_enabled, vowifi_enabled, extra_json,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name = excluded.name,
 			device_type = excluded.device_type,
@@ -227,6 +241,7 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 			usb_path = excluded.usb_path,
 			audio_device = excluded.audio_device,
 			modem_imei = excluded.modem_imei,
+			sim_pin = excluded.sim_pin,
 			apn = excluded.apn,
 			ims_apn = excluded.ims_apn,
 			ims_private_identity = excluded.ims_private_identity,
@@ -254,7 +269,7 @@ func upsertDevice(ctx context.Context, executor contextExecer, value Device) err
 			updated_at = excluded.updated_at
 	`,
 		value.ID, value.Name, value.DeviceType, value.Interface, value.ControlDevice, value.ATPort,
-		value.USBPath, value.AudioDevice, value.ModemIMEI, value.APN, value.IMSAPN,
+		value.USBPath, value.AudioDevice, value.ModemIMEI, value.SIMPIN, value.APN, value.IMSAPN,
 		value.IMSPrivateIdentity, value.IMSPublicIdentity, value.IMSSMSCenter, value.IMSTransport,
 		boolInt(value.IMSAllowIMSIDerivedIdentity), value.VoWiFiEAPMethod,
 		boolInt(value.VoWiFiAllowSHA1), boolInt(value.VoWiFiUseMODP1024),
@@ -347,7 +362,7 @@ func (s *Store) DeleteDevice(ctx context.Context, id string) error {
 
 const deviceSelect = `
 	SELECT id, name, device_type, interface, control_device, at_port, usb_path,
-		audio_device, modem_imei, apn, ims_apn, ims_private_identity,
+		audio_device, modem_imei, sim_pin, apn, ims_apn, ims_private_identity,
 		ims_public_identity, ims_sms_center, ims_transport,
 		ims_allow_imsi_derived_identity, vowifi_eap_method,
 		vowifi_allow_sha1, vowifi_use_modp1024, proxy_port, baud_rate, data_bits,
@@ -363,7 +378,7 @@ func scanDevice(row rowScanner) (Device, error) {
 	var createdAt, updatedAt int64
 	err := row.Scan(
 		&value.ID, &value.Name, &value.DeviceType, &value.Interface, &value.ControlDevice,
-		&value.ATPort, &value.USBPath, &value.AudioDevice, &value.ModemIMEI,
+		&value.ATPort, &value.USBPath, &value.AudioDevice, &value.ModemIMEI, &value.SIMPIN,
 		&value.APN, &value.IMSAPN, &value.IMSPrivateIdentity, &value.IMSPublicIdentity,
 		&value.IMSSMSCenter, &value.IMSTransport, &imsAllowDerived, &value.VoWiFiEAPMethod,
 		&vowifiAllowSHA1, &vowifiUseMODP1024,

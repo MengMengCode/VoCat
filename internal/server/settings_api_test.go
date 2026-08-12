@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -131,6 +132,103 @@ func TestNotificationSettingsAlwaysReturnsFiveChannelsAndPreservesSecrets(t *tes
 	if storedConfig["bot_token"] != "123456:abcdefghijklmnopqrstuvwxyz" ||
 		storedConfig["chat_id"] != "2" {
 		t.Fatalf("stored Telegram config = %#v", storedConfig)
+	}
+}
+
+func TestWecomNotificationSettingsPreserveWebhookURLs(t *testing.T) {
+	test := newSettingsAPITest(t)
+	webhookURL := "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wecom-secret"
+	template := `{"msgtype":"text","text":{"content":{{message}}}}`
+	first, err := json.Marshal(map[string]any{
+		"wecom": map[string]any{
+			"enabled": true, "urls": []string{webhookURL}, "payload_template": template,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := test.request(t, http.MethodPut, "/api/settings/notifications", string(first))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("first PUT status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	if bytes.Contains(recorder.Body.Bytes(), []byte("wecom-secret")) {
+		t.Fatalf("PUT response leaked webhook URL: %s", recorder.Body)
+	}
+	response := decodeSettingsResponse(t, recorder)
+	wecom := response["data"].(map[string]any)["wecom"].(map[string]any)
+	urls, ok := wecom["urls"].([]any)
+	if !ok || len(urls) != 1 || urls[0] != store.SecretMask {
+		t.Fatalf("redacted WeCom URLs = %#v", wecom["urls"])
+	}
+
+	second, err := json.Marshal(map[string]any{
+		"wecom": map[string]any{
+			"enabled": true, "urls": []string{store.SecretMask}, "payload_template": template,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder = test.request(t, http.MethodPut, "/api/settings/notifications", string(second))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("masked PUT status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	stored, err := test.database.NotificationSetting(context.Background(), "wecom")
+	if err != nil || !bytes.Contains(stored.Config, []byte("wecom-secret")) {
+		t.Fatalf("stored WeCom config = %s, err = %v", stored.Config, err)
+	}
+}
+
+func TestResolveWecomNotificationTestConfigAcceptsUnsavedWebhookURLs(t *testing.T) {
+	test := newSettingsAPITest(t)
+	raw, err := json.Marshal(map[string]any{
+		"urls":             []string{"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=unsaved"},
+		"payload_template": `{"msgtype":"text","text":{"content":{{message}}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _, err := test.server.resolveNotificationTestConfig(context.Background(), "wecom", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	urls, ok := resolved["urls"].([]any)
+	if !ok || len(urls) != 1 || urls[0] != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=unsaved" {
+		t.Fatalf("resolved URLs = %#v", resolved["urls"])
+	}
+}
+
+func TestResolveWecomNotificationTestConfigMergesMaskedAndUnsavedWebhookURLs(t *testing.T) {
+	test := newSettingsAPITest(t)
+	storedURL := "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=stored"
+	unsavedURL := "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=unsaved"
+	storedConfig, err := json.Marshal(map[string]any{
+		"urls":             []string{storedURL},
+		"payload_template": `{"msgtype":"text","text":{"content":{{message}}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := test.database.UpsertNotificationSetting(context.Background(), store.NotificationSetting{
+		Channel: "wecom",
+		Config:  storedConfig,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"urls":             []string{store.SecretMask, unsavedURL},
+		"payload_template": `{"msgtype":"text","text":{"content":{{message}}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _, err := test.server.resolveNotificationTestConfig(context.Background(), "wecom", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	urls, ok := resolved["urls"].([]any)
+	if !ok || len(urls) != 2 || urls[0] != storedURL || urls[1] != unsavedURL {
+		t.Fatalf("resolved URLs = %#v", resolved["urls"])
 	}
 }
 
@@ -424,8 +522,34 @@ func TestCardPolicyDefaultValidationAndPersistence(t *testing.T) {
 	response := decodeSettingsResponse(t, recorder)
 	policy := response["data"].(map[string]any)
 	if policy["iccid"] != iccid || policy["source"] != "default" ||
-		policy["ip_version"] != "IPV4V6" {
+		policy["ip_version"] != "IPV4V6" || policy["vowifi_enabled"] != true ||
+		policy["airplane_enabled"] != true || policy["custom_phone_number"] != "" {
 		t.Fatalf("default policy = %#v", policy)
+	}
+
+	recorder = test.request(
+		t,
+		http.MethodPut,
+		"/api/cards/"+iccid+"/policy",
+		`{"custom_phone_number":"+86 (138) 0013-8000"}`,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("custom phone policy status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	response = decodeSettingsResponse(t, recorder)
+	policy = response["data"].(map[string]any)
+	if policy["custom_phone_number"] != "+8613800138000" {
+		t.Fatalf("normalized custom phone number = %#v", policy)
+	}
+
+	recorder = test.request(
+		t,
+		http.MethodPut,
+		"/api/cards/"+iccid+"/policy",
+		`{"custom_phone_number":"+86-CALL-ME"}`,
+	)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid custom phone status = %d, body = %s", recorder.Code, recorder.Body)
 	}
 
 	recorder = test.request(
@@ -434,8 +558,8 @@ func TestCardPolicyDefaultValidationAndPersistence(t *testing.T) {
 		"/api/cards/"+iccid+"/policy",
 		`{"vowifi_enabled":true,"airplane_enabled":true,"apn":"ims","ip_version":"IPV4V6"}`,
 	)
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("conflicting policy status = %d, body = %s", recorder.Code, recorder.Body)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("RF-safe policy status = %d, body = %s", recorder.Code, recorder.Body)
 	}
 
 	recorder = test.request(
@@ -450,12 +574,118 @@ func TestCardPolicyDefaultValidationAndPersistence(t *testing.T) {
 	response = decodeSettingsResponse(t, recorder)
 	policy = response["data"].(map[string]any)
 	if policy["source"] != "manual" || policy["vowifi_enabled"] != true ||
-		policy["ip_version"] != "IPV4V6" {
+		policy["airplane_enabled"] != true || policy["ip_version"] != "IPV4V6" {
 		t.Fatalf("saved policy = %#v", policy)
 	}
 	stored, err := test.database.CardPolicy(context.Background(), iccid)
-	if err != nil || !stored.VoWiFiEnabled || stored.APN != "ims" {
+	if err != nil || !stored.VoWiFiEnabled || !stored.AirplaneEnabled || stored.APN != "ims" || stored.CustomPhoneNumber != "+8613800138000" {
 		t.Fatalf("stored policy = %+v, %v", stored, err)
+	}
+
+	// Updating only the switches must preserve the ICCID-specific APN.
+	recorder = test.request(
+		t,
+		http.MethodPut,
+		"/api/cards/"+iccid+"/policy",
+		`{"vowifi_enabled":false,"airplane_enabled":false}`,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("partial policy status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	stored, err = test.database.CardPolicy(context.Background(), iccid)
+	if err != nil || stored.VoWiFiEnabled || stored.AirplaneEnabled || stored.APN != "ims" || stored.CustomPhoneNumber != "+8613800138000" {
+		t.Fatalf("partially updated policy = %+v, %v", stored, err)
+	}
+
+	// Clearing the override restores system-number display without affecting the
+	// rest of this ICCID's policy.
+	recorder = test.request(t, http.MethodPut, "/api/cards/"+iccid+"/policy", `{"custom_phone_number":""}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("clear custom phone status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	stored, err = test.database.CardPolicy(context.Background(), iccid)
+	if err != nil || stored.CustomPhoneNumber != "" || stored.APN != "ims" {
+		t.Fatalf("cleared custom phone policy = %+v, %v", stored, err)
+	}
+
+	// APN-only updates are accepted without changing either switch.
+	recorder = test.request(t, http.MethodPut, "/api/cards/"+iccid+"/policy", `{"apn":"mobile.example","ip_version":"ip"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("APN-only policy status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	stored, err = test.database.CardPolicy(context.Background(), iccid)
+	if err != nil || stored.VoWiFiEnabled || stored.AirplaneEnabled || stored.APN != "mobile.example" || stored.IPVersion != "IP" {
+		t.Fatalf("APN-only updated policy = %+v, %v", stored, err)
+	}
+
+	// A profile can keep multiple custom APNs independently of the active APN.
+	recorder = test.request(t, http.MethodPost, "/api/cards/"+iccid+"/apns", `{
+		"apn":"custom.table","username":"gg","password":"p","proxy":"",
+		"mcc":"234","mnc":"10","ip_version":"IPV4V6",
+		"roaming_ip_version":"IP","auth_type":"PAP"
+	}`)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create custom APN status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	response = decodeSettingsResponse(t, recorder)
+	custom := response["data"].(map[string]any)
+	customID := int64(custom["id"].(float64))
+	recorder = test.request(t, http.MethodGet, "/api/cards/"+iccid+"/apns", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("list custom APNs status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	response = decodeSettingsResponse(t, recorder)
+	items := response["data"].(map[string]any)["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("custom APNs = %#v", items)
+	}
+	listed := items[0].(map[string]any)
+	if listed["apn"] != "custom.table" || listed["username"] != "gg" ||
+		listed["has_password"] != true || listed["mcc"] != "234" || listed["mnc"] != "10" ||
+		listed["roaming_ip_version"] != "IP" || listed["auth_type"] != "PAP" {
+		t.Fatalf("custom APNs = %#v", items)
+	}
+	if _, exposed := listed["password"]; exposed {
+		t.Fatalf("custom APN API exposed stored password: %#v", listed)
+	}
+	storedAPN, err := test.database.CardAPNProfileByAPN(context.Background(), iccid, "custom.table", "IPV4V6")
+	if err != nil || storedAPN.Username != "gg" || storedAPN.Password != "p" || storedAPN.AuthType != "PAP" {
+		t.Fatalf("stored custom APN = %#v, %v", storedAPN, err)
+	}
+	recorder = test.request(t, http.MethodPatch, "/api/cards/"+iccid+"/apns/"+strconv.FormatInt(customID, 10), `{
+		"apn":"custom.edited","username":"gg2","proxy":"","mcc":"234","mnc":"10",
+		"ip_version":"IPV4V6","roaming_ip_version":"IP","auth_type":"PAP"
+	}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("edit custom APN status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	storedAPN, err = test.database.CardAPNProfileByAPN(context.Background(), iccid, "custom.edited", "IPV4V6")
+	if err != nil || storedAPN.Username != "gg2" || storedAPN.Password != "p" {
+		t.Fatalf("editing custom APN did not preserve password: %#v, %v", storedAPN, err)
+	}
+	recorder = test.request(t, http.MethodPut, "/api/cards/"+iccid+"/policy", `{"apn":"custom.edited","ip_version":"IPV4V6"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("activate custom APN status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	recorder = test.request(t, http.MethodPatch, "/api/cards/"+iccid+"/apns/"+strconv.FormatInt(customID, 10), `{
+		"apn":"custom.final","username":"gg2","clear_password":true,"proxy":"",
+		"mcc":"234","mnc":"10","ip_version":"IP","roaming_ip_version":"IPV4V6","auth_type":"CHAP"
+	}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("edit active custom APN status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	stored, err = test.database.CardPolicy(context.Background(), iccid)
+	storedAPN, profileErr := test.database.CardAPNProfileByAPN(context.Background(), iccid, "custom.final", "IP")
+	if err != nil || profileErr != nil || stored.APN != "custom.final" || stored.IPVersion != "IP" || storedAPN.Password != "" {
+		t.Fatalf("active APN edit was not synchronized: policy=%#v profile=%#v errors=%v/%v", stored, storedAPN, err, profileErr)
+	}
+	recorder = test.request(t, http.MethodDelete, "/api/cards/"+iccid+"/apns/"+strconv.FormatInt(customID, 10), "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("delete custom APN status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	stored, err = test.database.CardPolicy(context.Background(), iccid)
+	if err != nil || stored.APN != "" || stored.IPVersion != "IPV4V6" {
+		t.Fatalf("deleting active custom APN did not restore automatic mode: %+v, %v", stored, err)
 	}
 
 	recorder = test.request(t, http.MethodGet, "/api/cards/not-an-iccid/policy", "")
@@ -580,5 +810,25 @@ func TestRouteSettingsAPIReturnsFalseForUnknownPath(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/not-settings", nil)
 	if test.server.routeSettingsAPI(httptest.NewRecorder(), request, "not-settings") {
 		t.Fatal("unknown path was claimed by settings router")
+	}
+}
+
+func TestParseMailAddressRejectsHeaderInjection(t *testing.T) {
+	for _, value := range []string{
+		"sender@example.com\r\nBcc: victim@example.com",
+		"recipient@example.com\nX-Test: injected",
+		"display\x00name <sender@example.com>",
+	} {
+		if _, err := parseMailAddress(value); err == nil {
+			t.Errorf("parseMailAddress(%q) accepted header injection", value)
+		}
+	}
+	address, err := parseMailAddress("Vocat Alerts <alerts@example.com>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := formatMailAddress(address)
+	if strings.ContainsAny(header, "\r\n") {
+		t.Fatalf("formatted address contains a line break: %q", header)
 	}
 }

@@ -87,6 +87,59 @@ func TestValidTelegramDialNumber(t *testing.T) {
 	}
 }
 
+func TestResolveTelegramPhoneNumberPrefersCurrentSIMAssociation(t *testing.T) {
+	snapshot := &device.Snapshot{
+		ICCID: "89441000400128013903",
+		Phone: device.PhoneNumber{Number: "00000000000"},
+	}
+	state := &vowifi.State{
+		ICCID:       snapshot.ICCID,
+		PhoneNumber: "+447386125520",
+	}
+	if got := resolveTelegramPhoneNumber("+447700900123", state, snapshot); got != "+447700900123" {
+		t.Fatalf("resolved association number = %q", got)
+	}
+	if got := resolveTelegramPhoneNumber("", state, snapshot); got != "+447386125520" {
+		t.Fatalf("resolved IMS number = %q", got)
+	}
+}
+
+func TestResolveTelegramPhoneNumberRejectsPlaceholderAndStaleRuntime(t *testing.T) {
+	snapshot := &device.Snapshot{
+		ICCID: "current-card",
+		Phone: device.PhoneNumber{Number: "00000000000"},
+	}
+	state := &vowifi.State{
+		ICCID:       "previous-card",
+		PhoneNumber: "+447386083638",
+	}
+	if got := resolveTelegramPhoneNumber("", state, snapshot); got != "--" {
+		t.Fatalf("stale or placeholder number leaked as %q", got)
+	}
+	for _, placeholder := range []string{"00000000000", "1111111111", "+0000000000", "not-a-number"} {
+		if usableTelegramPhoneNumber(placeholder) {
+			t.Errorf("placeholder %q was accepted", placeholder)
+		}
+	}
+}
+
+func TestTelegramCarrierPresentationSeparatesHomeAndServingNetworks(t *testing.T) {
+	if got := telegramHomeCarrier("234336570710174"); !strings.Contains(got, "🇬🇧") || !strings.Contains(got, "23433") {
+		t.Fatalf("home carrier = %q", got)
+	}
+	if got := telegramHomeCarrier("204040123456789", "Lebara"); !strings.Contains(got, "Lebara") || !strings.Contains(got, "20404") || !strings.Contains(got, "🇬🇧") || strings.Contains(got, "🇳🇱") {
+		t.Fatalf("branded foreign-core carrier = %q", got)
+	}
+	flight := &device.Snapshot{FlightMode: true, OperatorName: "stale network", RegistrationStatus: 1}
+	if got := telegramCurrentNetwork(flight); got != "--（飞行模式）" {
+		t.Fatalf("flight-mode serving network = %q", got)
+	}
+	serving := &device.Snapshot{OperatorCode: "46001", RegistrationStatus: 5, AccessTech: "LTE", Band: "B3"}
+	if got := telegramCurrentNetwork(serving); !strings.Contains(got, "🇨🇳") || !strings.Contains(got, "已驻网（漫游）") {
+		t.Fatalf("serving network = %q", got)
+	}
+}
+
 func TestTelegramPendingActionIsAuthorizedOneShot(t *testing.T) {
 	bot := &telegramBot{pending: make(map[string]telegramPendingAction)}
 	action := telegramPendingAction{Kind: "call", ChatID: -1001, AdminID: 42, CreatedAt: time.Now()}
@@ -99,6 +152,61 @@ func TestTelegramPendingActionIsAuthorizedOneShot(t *testing.T) {
 	}
 	if _, ok := bot.takePending(token, -1001, 42); ok {
 		t.Fatal("an unauthorized attempt must invalidate the one-time action")
+	}
+}
+
+func TestTelegramMenuCallbackParsing(t *testing.T) {
+	prefix, token, operation, ok := parseTelegramMenuCallback("call:0123456789abcdef:answer")
+	if !ok || prefix != "call" || token != "0123456789abcdef" || operation != "answer" {
+		t.Fatalf("parsed callback = %q %q %q %t", prefix, token, operation, ok)
+	}
+	for _, invalid := range []string{"", "call:token", "unknown:token:op", "d::status"} {
+		if _, _, _, ok := parseTelegramMenuCallback(invalid); ok {
+			t.Fatalf("invalid callback %q was accepted", invalid)
+		}
+	}
+}
+
+func TestTelegramMenuPendingCanBeReusedButConfirmationCannot(t *testing.T) {
+	bot := &telegramBot{pending: make(map[string]telegramPendingAction)}
+	menuToken, err := bot.putPending(telegramPendingAction{
+		Kind: "menu_device", DeviceID: "EC20", ChatID: 1, AdminID: 2, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bot.getPending(menuToken, 1, 2); !ok {
+		t.Fatal("first menu lookup failed")
+	}
+	if _, ok := bot.getPending(menuToken, 1, 2); !ok {
+		t.Fatal("menu token was unexpectedly consumed")
+	}
+	confirmToken, err := bot.putPending(telegramPendingAction{
+		Kind: "sms", ChatID: 1, AdminID: 2, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := bot.takePending(confirmToken, 1, 2); !ok {
+		t.Fatal("confirmation token lookup failed")
+	}
+	if _, ok := bot.takePending(confirmToken, 1, 2); ok {
+		t.Fatal("confirmation token was reusable")
+	}
+}
+
+func TestTelegramInputStateIsScopedAndCancelable(t *testing.T) {
+	bot := &telegramBot{inputs: make(map[string]telegramInputState)}
+	bot.setInput(telegramInputState{Kind: "sms_phone", DeviceID: "EC20", ChatID: 10, AdminID: 20})
+	if state, ok := bot.input(10, 20); !ok || state.DeviceID != "EC20" || state.Kind != "sms_phone" {
+		t.Fatalf("input state = %#v, %t", state, ok)
+	}
+	if _, ok := bot.input(10, 21); ok {
+		t.Fatal("another administrator read the input state")
+	}
+	bot.clearInput(10, 20)
+	if _, ok := bot.input(10, 20); ok {
+		t.Fatal("cleared input state remained available")
 	}
 }
 
@@ -166,7 +274,7 @@ func TestTelegramExecutesInteractiveUSSDForConfiguredDevice(t *testing.T) {
 	}
 	formatted := formatTelegramUSSD("EC20", result)
 	for _, expected := range []string{
-		"设备：EC20", "状态：awaiting_input", "1. Balance", "/ussd_reply 0123456789abcdef", "/ussd_cancel 0123456789abcdef",
+		"设备：EC20", "状态：awaiting_input", "1. Balance", "请直接发送回复内容",
 	} {
 		if !strings.Contains(formatted, expected) {
 			t.Fatalf("USSD result %q does not contain %q", formatted, expected)

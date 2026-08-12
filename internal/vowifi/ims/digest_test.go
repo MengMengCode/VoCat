@@ -64,8 +64,8 @@ func TestAuthenticateAKAMapsNonceToTypedChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticateAKA() error = %v", err)
 	}
-	if !reflect.DeepEqual(material.password, []byte{0xde, 0xad, 0xbe, 0xef}) {
-		t.Fatalf("password = %x, want deadbeef", material.password)
+	if !reflect.DeepEqual(material.response, []byte{0xde, 0xad, 0xbe, 0xef}) {
+		t.Fatalf("response = %x, want deadbeef", material.response)
 	}
 	if len(aka.challenges) != 1 {
 		t.Fatalf("challenge count = %d, want 1", len(aka.challenges))
@@ -97,12 +97,12 @@ func TestAuthenticateAKAReturnsSynchronizationEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticateAKA() error = %v", err)
 	}
-	if !reflect.DeepEqual(material.auts, auts) || len(material.password) != 0 {
+	if !reflect.DeepEqual(material.auts, auts) || len(material.response) != 0 {
 		t.Fatalf("material = %#v", material)
 	}
 }
 
-func TestBuildDigestAuthorizationCarriesAUTSWithEmptyPassword(t *testing.T) {
+func TestBuildDigestAuthorizationCarriesAUTSWithEmptyResponse(t *testing.T) {
 	authorization := buildDigestAuthorization(
 		digestChallenge{
 			Realm:     "ims.example",
@@ -111,13 +111,13 @@ func TestBuildDigestAuthorizationCarriesAUTSWithEmptyPassword(t *testing.T) {
 			QOP:       "auth",
 		},
 		digestCredentials{
-			Username: "private@ims.example",
-			Password: nil,
-			AUTS:     "AAECAwQFBgcICQoLDA0=",
-			URI:      "sip:ims.example",
-			Method:   "REGISTER",
-			CNonce:   "cnonce",
-			NC:       1,
+			Username:    "private@ims.example",
+			AKAResponse: nil,
+			AUTS:        "AAECAwQFBgcICQoLDA0=",
+			URI:         "sip:ims.example",
+			Method:      "REGISTER",
+			CNonce:      "cnonce",
+			NC:          1,
 		},
 	)
 	directives, err := parseAuthDirectives(strings.TrimPrefix(authorization, "Digest "))

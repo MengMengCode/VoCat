@@ -52,7 +52,7 @@ func (channel *euiccChannel) storeDataChained(ctx context.Context, derRequest []
 		if err != nil {
 			return nil, err
 		}
-		if sw != 0x9000 {
+		if !es10StatusOK(sw) {
 			return nil, fmt.Errorf("%w: SW=%04X", errESIMSW, sw)
 		}
 		assembled = append(assembled, payload...)
@@ -60,6 +60,14 @@ func (channel *euiccChannel) storeDataChained(ctx context.Context, derRequest []
 		sequence++
 	}
 	return assembled, nil
+}
+
+// 91xx is a successful UICC result with a proactive SIM Toolkit command
+// pending. EnableProfile commonly returns it on direct PC/SC transports because
+// the requested refresh is delivered to the terminal rather than consumed by
+// modem firmware. Resetting the card after the operation applies that refresh.
+func es10StatusOK(sw int) bool {
+	return sw == 0x9000 || sw>>8 == 0x91
 }
 
 // getEUICCChallenge (ES10c, BF2E) returns the eUICC challenge bytes.

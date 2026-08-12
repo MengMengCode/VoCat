@@ -205,8 +205,13 @@ func (relay *sessionRelay) terminalError() error {
 
 func (relay *sessionRelay) Close() error {
 	relay.cancel()
+	// ReceiveSessionPacket implementations normally observe the canceled
+	// context through a short read deadline. Close the transport as an explicit
+	// wake-up as well: a socket implementation that is stuck in Read must not
+	// hold teardown (and the associated TUN interface) indefinitely.
+	transportErr := relay.transport.Close()
 	<-relay.done
-	return relay.terminalErrorIfFailure()
+	return errors.Join(relay.terminalErrorIfFailure(), transportErr)
 }
 
 func (relay *sessionRelay) terminalErrorIfFailure() error {

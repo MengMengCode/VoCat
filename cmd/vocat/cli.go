@@ -32,8 +32,8 @@ Usage:
                        GITHUB_TOKEN      Optional bearer token for private repos
                                          or higher rate limits.
   vocat menu         Interactive lifecycle menu (root on the host):
-                       toggle language, change password, restart, update,
-                       uninstall.
+                       toggle language, change password, change the Web port,
+                       restart, update, uninstall.
   vocat help         Show this help message.
 
 When run without a subcommand on a non-TTY (e.g. systemd), vocat starts the

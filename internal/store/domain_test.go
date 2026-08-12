@@ -58,7 +58,8 @@ func TestMigrationFromAuthenticationSchema(t *testing.T) {
 		"local_proxy_config", "upstream_proxies", "country_rules",
 		"device_proxy_bindings",
 		"notification_settings", "app_settings", "audit_events",
-		"log_events", "card_policies", "traffic_buckets",
+		"log_events", "card_policies", "card_apn_profiles", "traffic_buckets",
+		"sms_send_attempts",
 	} {
 		var found string
 		err := database.db.QueryRowContext(ctx, `
@@ -102,6 +103,85 @@ func TestMigration7BackfillsSMSModemIMEI(t *testing.T) {
 	messages, err := database.ListSMSMessages(ctx, SMSFilter{ModemIMEI: "867394042309830"})
 	if err != nil || len(messages) != 1 || messages[0].DeviceID != "ec20_1" {
 		t.Fatalf("migrated SMS = %#v, %v", messages, err)
+	}
+}
+
+func TestMigration12ConvertsOnlyKnownActiveDeviceBindingToICCID(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "profile-proxy-binding.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 11; version++ {
+		for _, statement := range migrationStatements(version) {
+			if _, err := raw.ExecContext(ctx, statement); err != nil {
+				t.Fatalf("create v%d schema: %v", version, err)
+			}
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `
+		INSERT INTO devices (id, name, created_at, updated_at) VALUES
+			('known', 'Known', 100, 100), ('unknown', 'Unknown', 100, 100);
+		INSERT INTO upstream_proxies (id, name, addr, created_at, updated_at)
+			VALUES ('route', 'Route', '127.0.0.1:1080', 100, 100);
+		INSERT INTO device_proxy_bindings (device_id, upstream_proxy_id, created_at, updated_at) VALUES
+			('known', 'route', 100, 100), ('unknown', 'route', 100, 100);
+		INSERT INTO vowifi_runtime (device_id, iccid, updated_at)
+			VALUES ('known', '89441000400128014257', 100);
+		PRAGMA user_version = 11;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestStore(t, path)
+	binding, err := database.DeviceProxyBinding(ctx, "89441000400128014257")
+	if err != nil || binding.DeviceID != "known" || binding.UpstreamProxyID != "route" {
+		t.Fatalf("migrated binding = %+v, %v", binding, err)
+	}
+	bindings, err := database.ListDeviceProxyBindings(ctx)
+	if err != nil || len(bindings) != 1 {
+		t.Fatalf("migrated bindings = %+v, %v; unknown ICCID binding must be dropped", bindings, err)
+	}
+}
+
+func TestMigration9NormalizesVoWiFiAirplanePolicy(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rf-safe-policy.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 8; version++ {
+		for _, statement := range migrationStatements(version) {
+			if _, err := raw.ExecContext(ctx, statement); err != nil {
+				t.Fatalf("create v%d schema: %v", version, err)
+			}
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `
+		INSERT INTO card_policies (
+			iccid, network_enabled, vowifi_enabled, airplane_enabled,
+			created_at, updated_at
+		) VALUES ('8900000000000000001', 0, 1, 0, 100, 100);
+		PRAGMA user_version = 8;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestStore(t, path)
+	policy, err := database.CardPolicy(ctx, "8900000000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.VoWiFiEnabled || !policy.AirplaneEnabled || policy.NetworkEnabled {
+		t.Fatalf("migrated policy = %#v, want VoWiFi+airplane with data off", policy)
 	}
 }
 
@@ -413,6 +493,31 @@ func TestDeviceStateRoundTripAndCascade(t *testing.T) {
 	}
 	if _, err := database.VoWiFiRuntime(ctx, device.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("VoWiFi runtime should cascade on device deletion, got %v", err)
+	}
+}
+
+func TestUSBSIMReaderConfigurationIsWiFiCallingOnly(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t, ":memory:")
+	err := database.UpsertDevice(ctx, Device{
+		ID: "reader-1", Name: "USB SIM", DeviceType: DeviceTypeUSBSIMReader,
+		USBPath: "1-3", ControlDevice: "Reader 00 00", SIMPIN: "1234",
+		DeviceBackend: "at", ESIMTransport: "at", NetworkEnabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := database.Device(ctx, "reader-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeviceBackend != "pcsc" || got.ESIMTransport != "pcsc" || got.NetworkEnabled || !got.SMSEnabled || !got.VoWiFiEnabled || got.SIMPIN != "1234" {
+		t.Fatalf("reader config = %+v", got)
+	}
+	bad := got
+	bad.SIMPIN = "12x4"
+	if err := database.UpsertDevice(ctx, bad); err == nil {
+		t.Fatal("non-numeric SIM PIN was accepted")
 	}
 }
 
@@ -1013,12 +1118,12 @@ func TestProxyCredentialsAndCountryRules(t *testing.T) {
 		t.Fatalf("CountryRule() = %+v, %v", rule, err)
 	}
 	if err := database.UpsertDeviceProxyBinding(ctx, DeviceProxyBinding{
-		DeviceID: "ec20-1", UpstreamProxyID: "up-1",
+		DeviceID: "ec20-1", ICCID: "89441000400128014257", ProfileName: "Vodafone", UpstreamProxyID: "up-1",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	binding, err := database.DeviceProxyBinding(ctx, "ec20-1")
-	if err != nil || binding.UpstreamProxyID != "up-1" {
+	binding, err := database.DeviceProxyBinding(ctx, "89441000400128014257")
+	if err != nil || binding.UpstreamProxyID != "up-1" || binding.DeviceID != "ec20-1" || binding.ProfileName != "Vodafone" {
 		t.Fatalf("DeviceProxyBinding() = %+v, %v", binding, err)
 	}
 	if err := database.DeleteUpstreamProxy(ctx, "up-1"); err != nil {
@@ -1027,7 +1132,7 @@ func TestProxyCredentialsAndCountryRules(t *testing.T) {
 	if _, err := database.CountryRule(ctx, "CN"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("country rule should cascade with upstream deletion, got %v", err)
 	}
-	if _, err := database.DeviceProxyBinding(ctx, "ec20-1"); !errors.Is(err, ErrNotFound) {
+	if _, err := database.DeviceProxyBinding(ctx, "89441000400128014257"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("device binding should cascade with upstream deletion, got %v", err)
 	}
 }
@@ -1104,6 +1209,43 @@ func TestNotificationAndAppSecretPreservation(t *testing.T) {
 	}
 }
 
+func TestNotificationArraySecretPreservation(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t, ":memory:")
+	originalURL := "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=first-secret"
+	if err := database.UpsertNotificationSetting(ctx, NotificationSetting{
+		Channel: "wecom", Enabled: true,
+		Config: json.RawMessage(`{"urls":["` + originalURL + `"]}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setting, err := database.NotificationSetting(ctx, "wecom")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var redacted map[string]any
+	if err := json.Unmarshal(setting.Redacted().Config, &redacted); err != nil {
+		t.Fatal(err)
+	}
+	urls, ok := redacted["urls"].([]any)
+	if !ok || len(urls) != 1 || urls[0] != SecretMask {
+		t.Fatalf("redacted URLs = %#v", redacted["urls"])
+	}
+	if err := database.UpsertNotificationSetting(ctx, NotificationSetting{
+		Channel: "wecom", Enabled: true,
+		Config: json.RawMessage(`{"urls":["` + SecretMask + `","https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=second-secret"]}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setting, err = database.NotificationSetting(ctx, "wecom")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(setting.Config, []byte(originalURL)) || !bytes.Contains(setting.Config, []byte("second-secret")) {
+		t.Fatalf("stored URLs = %s", setting.Config)
+	}
+}
+
 func TestEventsPoliciesAndTraffic(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t, ":memory:")
@@ -1151,18 +1293,22 @@ func TestEventsPoliciesAndTraffic(t *testing.T) {
 
 	if err := database.UpsertCardPolicy(ctx, CardPolicy{
 		ICCID: "89860001", NetworkEnabled: true, VoWiFiEnabled: true,
-		APN: "ims", IPVersion: "ipv4v6",
+		APN: "ims", IPVersion: "ipv4v6", CustomPhoneNumber: "+8613800138000",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.UpsertCardPolicy(ctx, CardPolicy{
-		ICCID: "invalid", VoWiFiEnabled: true, AirplaneEnabled: true,
-	}); err == nil {
-		t.Fatal("invalid mutually exclusive card policy was accepted")
+		ICCID: "89860002", VoWiFiEnabled: true, AirplaneEnabled: true,
+	}); err != nil {
+		t.Fatalf("RF-safe VoWiFi policy was rejected: %v", err)
 	}
 	policy, err := database.CardPolicy(ctx, "89860001")
-	if err != nil || !policy.VoWiFiEnabled {
+	if err != nil || !policy.VoWiFiEnabled || policy.CustomPhoneNumber != "+8613800138000" {
 		t.Fatalf("CardPolicy() = %+v, %v", policy, err)
+	}
+	safePolicy, err := database.CardPolicy(ctx, "89860002")
+	if err != nil || !safePolicy.VoWiFiEnabled || !safePolicy.AirplaneEnabled {
+		t.Fatalf("safe CardPolicy() = %+v, %v", safePolicy, err)
 	}
 
 	period := old.Truncate(time.Hour)

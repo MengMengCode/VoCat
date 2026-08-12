@@ -281,7 +281,6 @@ User=root
 Group=root
 WorkingDirectory=/opt/vocat
 EnvironmentFile=${ENV_FILE}
-Environment=VOCAT_ADDR=0.0.0.0:7575
 Environment=VOCAT_DATABASE_PATH=/opt/vocat/data/vocat.db
 # Fail before starting the service if the external networking/QMI helpers are
 # missing. This prevents a healthy-looking UI with unusable modem controls.

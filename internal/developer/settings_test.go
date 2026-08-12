@@ -22,6 +22,9 @@ func TestResetExperimentalRestoresDefaults(t *testing.T) {
 	if err := SetDeviceLimit(ctx, database, 24); err != nil {
 		t.Fatal(err)
 	}
+	if err := SetSMSHourlyLimit(ctx, database, 42); err != nil {
+		t.Fatal(err)
+	}
 	enabled, _ := json.Marshal(map[string]bool{"enabled": true})
 	if err := database.UpsertAppSetting(ctx, store.AppSetting{Key: httpsmode.SettingKey, Value: enabled}); err != nil {
 		t.Fatal(err)
@@ -40,6 +43,9 @@ func TestResetExperimentalRestoresDefaults(t *testing.T) {
 	}
 	if limit := DeviceLimit(ctx, database, true); limit != DefaultDeviceLimit {
 		t.Fatalf("device limit = %d, want %d", limit, DefaultDeviceLimit)
+	}
+	if limit := SMSHourlyLimit(ctx, database); limit != DefaultSMSHourlyLimit {
+		t.Fatalf("SMS hourly limit = %d, want %d", limit, DefaultSMSHourlyLimit)
 	}
 	setting, err := database.AppSetting(ctx, httpsmode.SettingKey)
 	if err != nil {
@@ -73,5 +79,23 @@ func TestSetDeviceLimitValidatesRange(t *testing.T) {
 	defer database.Close()
 	if SetDeviceLimit(ctx, database, 0) == nil || SetDeviceLimit(ctx, database, MaxDeviceLimit+1) == nil {
 		t.Fatal("out-of-range device limit was accepted")
+	}
+}
+
+func TestSetSMSHourlyLimitValidatesRange(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "vocat.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if SetSMSHourlyLimit(ctx, database, 0) == nil || SetSMSHourlyLimit(ctx, database, MaxSMSHourlyLimit+1) == nil {
+		t.Fatal("out-of-range SMS hourly limit was accepted")
+	}
+	if err := SetSMSHourlyLimit(ctx, database, 25); err != nil {
+		t.Fatal(err)
+	}
+	if got := SMSHourlyLimit(ctx, database); got != 25 {
+		t.Fatalf("SMS hourly limit = %d, want 25", got)
 	}
 }

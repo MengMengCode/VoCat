@@ -343,7 +343,13 @@ func readSerialAliases(root string) map[string]string {
 func candidateID(productID, serialNumber, usbName string) string {
 	serialNumber = strings.TrimSpace(serialNumber)
 	if serialNumber != "" && !strings.EqualFold(serialNumber, "android") {
-		return "quectel-" + sanitizeID(serialNumber)
+		// A surprising number of EC20/EC25 carrier boards expose the same
+		// factory/default USB serial number.  The device manager is keyed by this
+		// value, so using the serial alone silently collapsed two modems connected
+		// to the same hub into one entry.  Include the physical USB topology in the
+		// discovery key; configured devices remain stable through ATMapper's
+		// USB-path/IMEI matching even when Linux renumbers ttyUSB nodes.
+		return "quectel-" + sanitizeID(serialNumber+"-"+usbName)
 	}
 	return "quectel-" + sanitizeID(productID+"-"+usbName)
 }

@@ -47,18 +47,32 @@ export interface EmailForm {
 }
 
 export interface PushplusForm {
-  enabled: boolean;
-  token: string;
-  topic: string;
-  channel: string;
+	enabled: boolean;
+	token: string;
+	topic: string;
+	channel: string;
 }
+
+export interface WecomForm {
+	enabled: boolean;
+	urls: string[];
+	payloadTemplate: string;
+}
+
+export const DEFAULT_WECOM_PAYLOAD_TEMPLATE = `{
+  "msgtype": "text",
+  "text": {
+    "content": {{message}}
+  }
+}`;
 
 export interface NotifyForms {
   telegram: TelegramForm;
   webhook: WebhookForm;
   bark: BarkForm;
-  email: EmailForm;
-  pushplus: PushplusForm;
+	email: EmailForm;
+	pushplus: PushplusForm;
+	wecom: WecomForm;
 }
 
 // 系统保留头，自定义同名头会被忽略（品牌 vocat）
@@ -131,8 +145,9 @@ export function formsFromNotifications(data: Partial<NotificationSettings>): Not
   const telegram = asRecord(data.telegram);
   const webhook = asRecord(data.webhook);
   const bark = asRecord(data.bark);
-  const email = asRecord(data.email);
-  const pushplus = asRecord(data.pushplus);
+	const email = asRecord(data.email);
+	const pushplus = asRecord(data.pushplus);
+	const wecom = asRecord(data.wecom);
   return {
     telegram: {
       enabled: !!telegram.enabled,
@@ -171,13 +186,18 @@ export function formsFromNotifications(data: Partial<NotificationSettings>): Not
       fromAddress: str(email.fromAddress),
       toAddresses: joinList(email.toAddresses),
     },
-    pushplus: {
-      enabled: !!pushplus.enabled,
-      token: str(pushplus.token),
-      topic: str(pushplus.topic),
-      channel: str(pushplus.channel) || "wechat",
-    },
-  };
+		pushplus: {
+			enabled: !!pushplus.enabled,
+			token: str(pushplus.token),
+			topic: str(pushplus.topic),
+			channel: str(pushplus.channel) || "wechat",
+		},
+		wecom: {
+			enabled: !!wecom.enabled,
+			urls: strList(wecom.urls),
+			payloadTemplate: str(wecom.payloadTemplate ?? wecom.payload_template) || DEFAULT_WECOM_PAYLOAD_TEMPLATE,
+		},
+	};
 }
 
 function splitList(value: string): string[] {
@@ -226,6 +246,15 @@ export function buildEmailPayload(form: EmailForm, forTest = false) {
   };
 }
 
+export function buildWecomPayload(form: WecomForm, forTest = false) {
+	const urls = Array.isArray(form.urls) ? form.urls : [];
+	return {
+		enabled: !!form.enabled,
+		urls: forTest ? urls.map((url) => String(url || "").trim()).filter(Boolean) : urls,
+		payload_template: String(form.payloadTemplate || ""),
+	};
+}
+
 export function buildNotificationsPayload(forms: NotifyForms) {
   return {
     telegram: {
@@ -245,6 +274,7 @@ export function buildNotificationsPayload(forms: NotifyForms) {
       channel: forms.pushplus.channel || "",
     },
     webhook: buildWebhookPayload(forms.webhook),
-    bark: buildBarkPayload(forms.bark),
-  };
+		bark: buildBarkPayload(forms.bark),
+		wecom: buildWecomPayload(forms.wecom),
+	};
 }

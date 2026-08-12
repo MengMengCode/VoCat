@@ -4,7 +4,7 @@ import type { DeviceDetail } from "./types";
 import { useI18n } from "../../lib/i18n";
 import { api, apiMessage } from "../../api";
 import { Button, message } from "../ui";
-import { flagEmoji } from "../../lib/carrier";
+import { CountryFlag } from "../CountryFlag";
 
 interface PublicIPInfo {
   detected?: boolean;
@@ -95,7 +95,11 @@ export function OverviewNetworkPanel({ device, trafficMinuteRx, trafficMinuteTx,
             <Button size="small" loading={detectingIP} disabled={off} onClick={() => void detectPublicIP()}>{t("检测")}</Button>
           </div>
         </div>
-        <FieldRow label={t("国家/地区")} value={publicIP ? `${flagEmoji(publicIP.countryCode)} ${location}`.trim() : "-"} />
+        <FieldRow
+          label={t("国家/地区")}
+          value={publicIP ? location : "-"}
+          prefix={publicIP ? <CountryFlag countryCode={publicIP.countryCode} /> : null}
+        />
         {off ? (
           <div className="flex items-center justify-center p-6 text-sm text-gray-400">{t("数据未开启")}</div>
         ) : (

@@ -386,12 +386,26 @@ func (manager *Manager) RequestEnabled(deviceID string, enabled bool) (vowifi.St
 		return vowifi.State{}, err
 	}
 	item.desiredEnabled = enabled
-	if !enabled && item.busy {
-		item.disablePending = true
+	if item.busy {
+		manager.logger.Info(
+			"VoWiFi desired state updated while lifecycle operation is active",
+			"device_id", deviceID,
+			"enabled", enabled,
+		)
+		// The switch is a desired-state control, not a one-shot command. A user
+		// can change it again while a slow IKE/IMS transaction is still winding
+		// down. Accept the newest value and let runOperations reconcile the
+		// runtime after the current operation completes. Returning busy here used
+		// to let the database and runtime diverge (configured on, runtime idle).
+		if enabled {
+			item.disablePending = false
+		} else {
+			item.disablePending = true
+		}
 		cancel := item.operationCancel
 		state := item.orchestrator.State()
 		manager.mu.Unlock()
-		if cancel != nil {
+		if !enabled && cancel != nil {
 			cancel()
 		}
 		return state, nil
@@ -583,6 +597,7 @@ func (manager *Manager) startOperation(
 	manager.wg.Add(1)
 	manager.mu.Unlock()
 
+	manager.logger.Debug("VoWiFi lifecycle operation queued", "device_id", deviceID)
 	go manager.runOperations(deviceID, item, operation)
 	return item.orchestrator.State(), nil
 }
@@ -593,6 +608,7 @@ func (manager *Manager) runOperations(
 	operation func(context.Context, *vowifi.Orchestrator) error,
 ) {
 	defer manager.wg.Done()
+	manager.logger.Debug("VoWiFi lifecycle worker started", "device_id", deviceID)
 	for {
 		ctx, cancel := context.WithTimeout(manager.ctx, manager.operationTimeout)
 		manager.mu.Lock()
@@ -606,6 +622,7 @@ func (manager *Manager) runOperations(
 		}
 		item.operationCancel = cancel
 		manager.mu.Unlock()
+		manager.logger.Debug("VoWiFi lifecycle operation executing", "device_id", deviceID)
 		err := operation(ctx, item.orchestrator)
 		cancel()
 		if err != nil &&
@@ -644,6 +661,25 @@ func (manager *Manager) runOperations(
 			// binding instead of replaying stale intermediate routes.
 			operation = func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
 				_, err := orchestrator.Reconnect(ctx)
+				return err
+			}
+			continue
+		}
+		// Reconcile a switch change that arrived while the previous lifecycle
+		// operation was busy. Keep using the same worker so enable/disable can
+		// never overlap on the modem or tunnel resources.
+		if item.desiredEnabled && !state.Enabled {
+			manager.mu.Unlock()
+			operation = func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
+				_, err := orchestrator.Enable(ctx)
+				return err
+			}
+			continue
+		}
+		if !item.desiredEnabled && state.Enabled {
+			manager.mu.Unlock()
+			operation = func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
+				_, err := orchestrator.Disable(ctx)
 				return err
 			}
 			continue

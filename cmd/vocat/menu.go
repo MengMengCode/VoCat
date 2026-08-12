@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +26,11 @@ import (
 // EnsureAdmin reseeds the DB from it on every start, so change-password must
 // rewrite it or the next restart reverts the password.
 const envFilePath = "/etc/vocat/env"
+
+// legacyEnvFilePath was used by the standalone deploy/vocat.service. Keep it
+// discoverable so the menu works on installations made before the installer
+// and service template converged on /etc/vocat/env.
+const legacyEnvFilePath = "/etc/vocat/vocat.env"
 
 const systemdUnitPath = "/etc/systemd/system/vocat.service"
 
@@ -50,7 +57,7 @@ func loadMenuEnv() {
 	if _, ok := os.LookupEnv("VOCAT_DATABASE_PATH"); !ok {
 		_ = os.Setenv("VOCAT_DATABASE_PATH", defaultDatabasePath)
 	}
-	if data, err := os.ReadFile(envFilePath); err == nil {
+	if data, err := os.ReadFile(menuEnvFilePath()); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") {
@@ -69,10 +76,20 @@ func loadMenuEnv() {
 	}
 }
 
+func menuEnvFilePath() string {
+	if _, err := os.Stat(envFilePath); err == nil {
+		return envFilePath
+	}
+	if _, err := os.Stat(legacyEnvFilePath); err == nil {
+		return legacyEnvFilePath
+	}
+	return envFilePath
+}
+
 // runMenu is the interactive lifecycle menu: toggle language, change password,
-// restart the systemd unit, self-update, or fully uninstall vocat. It must run
-// as root on the host (needs systemctl + the 0600 env file). Docker deployments
-// do not use it.
+// change the Web listener port, restart the systemd unit, self-update, or fully
+// uninstall vocat. It must run as root on the host (needs systemctl + the 0600
+// env file). Docker deployments do not use it.
 func runMenu(logger *slog.Logger) error {
 	if os.Geteuid() != 0 {
 		return errors.New("vocat menu must run as root (needs systemctl and /etc/vocat/env)")
@@ -113,10 +130,14 @@ func runMenu(logger *slog.Logger) error {
 				fmt.Println(menu.errorPrefix(err))
 			}
 		case "3":
-			if err := menuRestart(menu); err != nil {
+			if err := menuChangeWebPort(reader, menu); err != nil {
 				fmt.Println(menu.errorPrefix(err))
 			}
 		case "4":
+			if err := menuRestart(menu); err != nil {
+				fmt.Println(menu.errorPrefix(err))
+			}
+		case "5":
 			if err := menuUpdate(menu, logger); err != nil {
 				fmt.Println(menu.errorPrefix(err))
 			}
@@ -242,9 +263,18 @@ func readPasswordMasked() (string, error) {
 // the temp file lives in the same directory so os.Rename stays on one
 // filesystem.
 func rewriteEnvPassword(newPassword string) error {
-	const key = "VOCAT_ADMIN_PASSWORD="
+	return rewriteEnvValue(menuEnvFilePath(), "VOCAT_ADMIN_PASSWORD", newPassword)
+}
+
+// rewriteEnvValue replaces or appends one systemd EnvironmentFile value. The
+// write is atomic and rejects line breaks so one setting cannot inject another.
+func rewriteEnvValue(path, name, value string) error {
+	if name == "" || strings.ContainsAny(name, "=\r\n\x00") || strings.ContainsAny(value, "\r\n\x00") {
+		return errors.New("invalid environment setting")
+	}
+	key := name + "="
 	var lines []string
-	if data, err := os.ReadFile(envFilePath); err == nil {
+	if data, err := os.ReadFile(path); err == nil {
 		lines = strings.Split(string(data), "\n")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -253,27 +283,34 @@ func rewriteEnvPassword(newPassword string) error {
 	replaced := false
 	for i, line := range lines {
 		if strings.HasPrefix(line, key) {
-			lines[i] = key + newPassword
+			lines[i] = key + value
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
-		lines = append(lines, key+newPassword)
+		lines = append(lines, key+value)
 	}
 	content := strings.Join(lines, "\n")
 	if !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
+	return writeEnvFileAtomic(path, []byte(content))
+}
 
-	dir := envFilePath[:strings.LastIndex(envFilePath, "/")]
+func writeEnvFileAtomic(path string, content []byte) error {
+	dirIndex := strings.LastIndexAny(path, "/\\")
+	if dirIndex < 0 {
+		return errors.New("environment file path has no directory")
+	}
+	dir := path[:dirIndex]
 	tmp, err := os.CreateTemp(dir, ".vocat-env-*")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if _, err := tmp.WriteString(content); err != nil {
+	if _, err := tmp.Write(content); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -284,7 +321,125 @@ func rewriteEnvPassword(newPassword string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, envFilePath)
+	return os.Rename(tmpName, path)
+}
+
+func menuChangeWebPort(reader *bufio.Reader, m *menu) error {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return errNoSystemctl
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("%w: %v", errMenuConfig, err)
+	}
+	_, currentPortText, err := net.SplitHostPort(strings.TrimSpace(cfg.Address))
+	if err != nil {
+		return fmt.Errorf("%w: %v", errMenuConfig, err)
+	}
+	fmt.Println(m.currentWebAddress(cfg.Address))
+	fmt.Println(m.reverseProxyNotice())
+	fmt.Print(m.newWebPort(currentPortText))
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("read Web port: %w", err)
+	}
+	portText := strings.TrimSpace(line)
+	if portText == "" {
+		fmt.Println(m.webPortCancelled())
+		return nil
+	}
+	newAddress, newPort, err := webAddressWithPort(cfg.Address, portText)
+	if err != nil {
+		return errInvalidWebPort
+	}
+	currentPort, _ := strconv.Atoi(currentPortText)
+	if newPort == currentPort {
+		fmt.Println(m.webPortUnchanged())
+		return nil
+	}
+
+	listener, err := net.Listen("tcp", newAddress)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errWebPortUnavailable, err)
+	}
+	_ = listener.Close()
+
+	environmentPath := menuEnvFilePath()
+	original, readErr := os.ReadFile(environmentPath)
+	originalExisted := readErr == nil
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return fmt.Errorf("%w: %v", errMenuPortWrite, readErr)
+	}
+	if err := rewriteEnvValue(environmentPath, "VOCAT_ADDR", newAddress); err != nil {
+		return fmt.Errorf("%w: %v", errMenuPortWrite, err)
+	}
+	if err := restartVocatService(); err != nil {
+		rollbackErr := restoreMenuEnvFile(environmentPath, original, originalExisted)
+		_ = restartVocatService()
+		if rollbackErr != nil {
+			return fmt.Errorf("%w: %v; rollback failed: %v", errRestartFailed, err, rollbackErr)
+		}
+		return fmt.Errorf("%w: %v", errRestartFailed, err)
+	}
+	if err := waitForWebListener(newAddress, 5*time.Second); err != nil {
+		rollbackErr := restoreMenuEnvFile(environmentPath, original, originalExisted)
+		_ = restartVocatService()
+		if rollbackErr != nil {
+			return fmt.Errorf("%w: %v; rollback failed: %v", errRestartFailed, err, rollbackErr)
+		}
+		return fmt.Errorf("%w: %v", errRestartFailed, err)
+	}
+	_ = os.Setenv("VOCAT_ADDR", newAddress)
+	fmt.Println(m.webPortChanged(newAddress))
+	return nil
+}
+
+func webAddressWithPort(address, portText string) (string, int, error) {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return "", 0, err
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(portText))
+	if err != nil || port < 1 || port > 65535 {
+		return "", 0, errInvalidWebPort
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), port, nil
+}
+
+func waitForWebListener(address string, timeout time.Duration) error {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::":
+		host = "::1"
+	}
+	target := net.JoinHostPort(host, port)
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		connection, dialErr := net.DialTimeout("tcp", target, 500*time.Millisecond)
+		if dialErr == nil {
+			_ = connection.Close()
+			return nil
+		}
+		lastErr = dialErr
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("Web listener %s did not become reachable: %w", target, lastErr)
+}
+
+func restoreMenuEnvFile(path string, content []byte, existed bool) error {
+	if existed {
+		return writeEnvFileAtomic(path, content)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // menuToggleLanguage flips the persisted language preference between "zh" and
@@ -327,6 +482,14 @@ func menuToggleLanguage(m *menu, logger *slog.Logger) error {
 }
 
 func menuRestart(m *menu) error {
+	if err := restartVocatService(); err != nil {
+		return err
+	}
+	fmt.Println(m.restarted())
+	return nil
+}
+
+func restartVocatService() error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return errNoSystemctl
 	}
@@ -334,7 +497,9 @@ func menuRestart(m *menu) error {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w: %s", errRestartFailed, strings.TrimSpace(string(out)))
 	}
-	fmt.Println(m.restarted())
+	if out, err := exec.Command("systemctl", "is-active", "--quiet", "vocat").CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: service is not active: %s", errRestartFailed, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 
@@ -378,6 +543,7 @@ func menuUninstall(reader *bufio.Reader, m *menu) error {
 	_ = os.Remove(systemdUnitPath)
 	_ = os.RemoveAll("/opt/vocat")
 	_ = os.Remove(envFilePath)
+	_ = os.Remove(legacyEnvFilePath)
 	_ = os.Remove("/etc/vocat") // succeeds only when empty
 	runIgnore("systemctl", "daemon-reload")
 	runIgnore("userdel", "vocat")
@@ -388,15 +554,18 @@ func menuUninstall(reader *bufio.Reader, m *menu) error {
 
 // menu-local sentinel errors so callers can map them to localized messages.
 var (
-	errCurrentWrong    = errors.New("menu: current password is incorrect")
-	errPasswordsDiffer = errors.New("menu: passwords do not match")
-	errNoSystemctl     = errors.New("menu: systemctl not found")
-	errRestartFailed   = errors.New("menu: restart failed")
-	errUpdateFailed    = errors.New("menu: update failed")
-	errMenuConfig      = errors.New("menu: load configuration")
-	errMenuStore       = errors.New("menu: open database")
-	errMenuAuth        = errors.New("menu: auth service")
-	errMenuEnvWrite    = errors.New("menu: write env file")
+	errCurrentWrong       = errors.New("menu: current password is incorrect")
+	errPasswordsDiffer    = errors.New("menu: passwords do not match")
+	errNoSystemctl        = errors.New("menu: systemctl not found")
+	errRestartFailed      = errors.New("menu: restart failed")
+	errUpdateFailed       = errors.New("menu: update failed")
+	errMenuConfig         = errors.New("menu: load configuration")
+	errMenuStore          = errors.New("menu: open database")
+	errMenuAuth           = errors.New("menu: auth service")
+	errMenuEnvWrite       = errors.New("menu: write env file")
+	errMenuPortWrite      = errors.New("menu: write Web port")
+	errInvalidWebPort     = errors.New("menu: invalid Web port")
+	errWebPortUnavailable = errors.New("menu: Web port unavailable")
 )
 
 // ---- i18n ----
@@ -409,18 +578,28 @@ func newMenu(lang string) *menu { return &menu{lang: lang} }
 func (m *menu) msg(key string) string {
 	const zh, en = 0, 1
 	table := map[string][2]string{
-		"title":        {"vocat 管理菜单", "vocat management menu"},
-		"opt_lang":     {"1) 切换中英文", "1) Toggle language"},
-		"opt_change":   {"2) 修改账号密码", "2) Change admin password"},
-		"opt_restart":  {"3) 重启软件", "3) Restart software"},
-		"opt_update":   {"4) 更新软件", "4) Update software"},
-		"opt_uninstall": {"0) 卸载软件", "0) Uninstall software"},
-		"prompt":       {"请选择: ", "Select: "},
-		"invalid":      {"无效选项，请重试。按 Ctrl+C 退出。", "Invalid choice, try again. Press Ctrl+C to exit."},
-		"cur_pw":       {"当前密码: ", "Current password: "},
-		"new_pw":       {"新密码 (至少 12 位): ", "New password (min 12 chars): "},
-		"confirm_pw":   {"确认新密码: ", "Confirm new password: "},
-		"pw_changed":   {"密码已修改。重启后仍然有效。", "Password changed. Survives restart."},
+		"title":               {"vocat 管理菜单", "vocat management menu"},
+		"opt_lang":            {"1) 切换中英文", "1) Toggle language"},
+		"opt_change":          {"2) 修改账号密码", "2) Change admin password"},
+		"opt_port":            {"3) 修改 Web 监听端口", "3) Change Web listening port"},
+		"opt_restart":         {"4) 重启软件", "4) Restart software"},
+		"opt_update":          {"5) 更新软件", "5) Update software"},
+		"opt_uninstall":       {"0) 卸载软件", "0) Uninstall software"},
+		"prompt":              {"请选择: ", "Select: "},
+		"invalid":             {"无效选项，请重试。按 Ctrl+C 退出。", "Invalid choice, try again. Press Ctrl+C to exit."},
+		"cur_pw":              {"当前密码: ", "Current password: "},
+		"new_pw":              {"新密码 (至少 12 位): ", "New password (min 12 chars): "},
+		"confirm_pw":          {"确认新密码: ", "Confirm new password: "},
+		"pw_changed":          {"密码已修改。重启后仍然有效。", "Password changed. Survives restart."},
+		"current_web_address": {"当前 Web 监听地址: %s", "Current Web listening address: %s"},
+		"new_web_port":        {"新端口 (1-65535，直接回车取消，当前 %s): ", "New port (1-65535, Enter to cancel, current %s): "},
+		"web_port_cancelled":  {"已取消修改端口。", "Web port change cancelled."},
+		"web_port_unchanged":  {"端口未改变。", "Web port is unchanged."},
+		"web_port_changed":    {"Web 监听地址已改为 %s，软件已重启。", "Web listening address changed to %s; software restarted."},
+		"reverse_proxy_notice": {
+			"如使用 Nginx/Caddy 等反向代理，请同步修改其上游端口。",
+			"If you use Nginx, Caddy, or another reverse proxy, update its upstream port too.",
+		},
 		"lang_switched": {
 			"语言已切换。Web 界面下次刷新后同步。",
 			"Language switched. The web UI syncs on next refresh.",
@@ -431,9 +610,9 @@ func (m *menu) msg(key string) string {
 			"警告: 将删除程序、数据与配置,且不可恢复!",
 			"WARNING: removes the program, data and config. Irreversible!",
 		},
-		"uninstall_confirm": {"输入 yes 确认卸载: ", "Type yes to confirm uninstall: "},
+		"uninstall_confirm":   {"输入 yes 确认卸载: ", "Type yes to confirm uninstall: "},
 		"uninstall_cancelled": {"已取消卸载。", "Uninstall cancelled."},
-		"uninstalled": {"vocat 已卸载。", "vocat uninstalled."},
+		"uninstalled":         {"vocat 已卸载。", "vocat uninstalled."},
 	}
 	entry, ok := table[key]
 	if !ok {
@@ -445,25 +624,36 @@ func (m *menu) msg(key string) string {
 	return entry[zh]
 }
 
-func (m *menu) title() string      { return m.msg("title") }
-func (m *menu) prompt() string     { return m.msg("prompt") }
-func (m *menu) invalid() string    { return m.msg("invalid") }
-func (m *menu) currentPassword() string  { return m.msg("cur_pw") }
-func (m *menu) newPassword() string      { return m.msg("new_pw") }
-func (m *menu) confirmPassword() string  { return m.msg("confirm_pw") }
-func (m *menu) passwordChanged() string  { return m.msg("pw_changed") }
-func (m *menu) languageSwitched() string { return m.msg("lang_switched") }
-func (m *menu) updateChecking() string   { return m.msg("upd_checking") }
-func (m *menu) restarted() string        { return m.msg("restarted") }
-func (m *menu) uninstallWarn() string    { return m.msg("uninstall_warn") }
-func (m *menu) uninstallConfirm() string { return m.msg("uninstall_confirm") }
+func (m *menu) title() string           { return m.msg("title") }
+func (m *menu) prompt() string          { return m.msg("prompt") }
+func (m *menu) invalid() string         { return m.msg("invalid") }
+func (m *menu) currentPassword() string { return m.msg("cur_pw") }
+func (m *menu) newPassword() string     { return m.msg("new_pw") }
+func (m *menu) confirmPassword() string { return m.msg("confirm_pw") }
+func (m *menu) passwordChanged() string { return m.msg("pw_changed") }
+func (m *menu) currentWebAddress(address string) string {
+	return fmt.Sprintf(m.msg("current_web_address"), address)
+}
+func (m *menu) newWebPort(port string) string { return fmt.Sprintf(m.msg("new_web_port"), port) }
+func (m *menu) webPortCancelled() string      { return m.msg("web_port_cancelled") }
+func (m *menu) webPortUnchanged() string      { return m.msg("web_port_unchanged") }
+func (m *menu) webPortChanged(address string) string {
+	return fmt.Sprintf(m.msg("web_port_changed"), address)
+}
+func (m *menu) reverseProxyNotice() string { return m.msg("reverse_proxy_notice") }
+func (m *menu) languageSwitched() string   { return m.msg("lang_switched") }
+func (m *menu) updateChecking() string     { return m.msg("upd_checking") }
+func (m *menu) restarted() string          { return m.msg("restarted") }
+func (m *menu) uninstallWarn() string      { return m.msg("uninstall_warn") }
+func (m *menu) uninstallConfirm() string   { return m.msg("uninstall_confirm") }
 func (m *menu) uninstallCancelled() string { return m.msg("uninstall_cancelled") }
-func (m *menu) uninstalled() string      { return m.msg("uninstalled") }
+func (m *menu) uninstalled() string        { return m.msg("uninstalled") }
 
 func (m *menu) options() []string {
 	return []string{
 		m.msg("opt_lang"),
 		m.msg("opt_change"),
+		m.msg("opt_port"),
 		m.msg("opt_restart"),
 		m.msg("opt_update"),
 		m.msg("opt_uninstall"),
@@ -514,9 +704,24 @@ func (m *menu) errorPrefix(err error) string {
 		return "认证服务错误。"
 	case errors.Is(err, errMenuEnvWrite):
 		if m.lang == "en" {
-			return "Password changed in DB, but the env file rewrite failed — restart will revert it. Check " + envFilePath + "."
+			return "Password changed in DB, but the env file rewrite failed — restart will revert it. Check " + menuEnvFilePath() + "."
 		}
-		return "数据库密码已修改，但环境变量文件写入失败——重启后将回滚。请检查 " + envFilePath + "。"
+		return "数据库密码已修改，但环境变量文件写入失败——重启后将回滚。请检查 " + menuEnvFilePath() + "。"
+	case errors.Is(err, errInvalidWebPort):
+		if m.lang == "en" {
+			return "Invalid port. Enter a number from 1 to 65535."
+		}
+		return "端口无效，请输入 1 到 65535。"
+	case errors.Is(err, errWebPortUnavailable):
+		if m.lang == "en" {
+			return "The new Web port is unavailable or already in use."
+		}
+		return "新的 Web 端口不可用或已被占用。"
+	case errors.Is(err, errMenuPortWrite):
+		if m.lang == "en" {
+			return "Failed to save the Web listening port to " + menuEnvFilePath() + "."
+		}
+		return "无法将 Web 监听端口保存到 " + menuEnvFilePath() + "。"
 	default:
 		if m.lang == "en" {
 			return "Error: " + err.Error()

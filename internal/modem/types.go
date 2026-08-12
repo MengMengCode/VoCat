@@ -44,6 +44,8 @@ func (p Port) OpenPath() string {
 }
 
 type Candidate struct {
+	HardwareKind     string `json:"hardwareKind,omitempty"`
+	ReaderName       string `json:"readerName,omitempty"`
 	ID               string `json:"id"`
 	VendorID         string `json:"vendorId"`
 	ProductID        string `json:"productId"`

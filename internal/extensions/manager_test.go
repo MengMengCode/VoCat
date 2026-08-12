@@ -3,11 +3,31 @@ package extensions
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
 )
+
+func TestInstallURLRejectsNonHTTPSAndPrivateDestinations(t *testing.T) {
+	manager, err := NewManager(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	for _, raw := range []string{
+		"http://example.com/plugin.zip",
+		"https://user@example.com/plugin.zip",
+		"https://example.com/plugin.zip\r\nX-Injected: yes",
+		"https://127.0.0.1/plugin.zip",
+		"https://169.254.169.254/latest/meta-data/",
+	} {
+		if _, err := manager.InstallURL(context.Background(), raw, ""); err == nil {
+			t.Errorf("InstallURL(%q) accepted an unsafe destination", raw)
+		}
+	}
+}
 
 func TestInstallListDisableAndUninstall(t *testing.T) {
 	manager, err := NewManager(t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))

@@ -11,6 +11,7 @@ var (
 	ErrNotStarted              = errors.New("device manager is not started")
 	ErrNotFound                = errors.New("device not found")
 	ErrNoATPort                = errors.New("device has no usable AT port")
+	ErrUnsupportedCapability   = errors.New("device does not support this capability")
 	ErrSMSPromptUnsupported    = errors.New("device AT client does not support SMS prompt mode")
 	ErrSMSInvalidRecipient     = errors.New("invalid SMS recipient")
 	ErrSMSEmpty                = errors.New("SMS text is empty")
@@ -26,9 +27,13 @@ var (
 )
 
 type NetworkRequest struct {
-	Enabled   bool   `json:"enabled"`
-	APN       string `json:"apn"`
-	IPVersion string `json:"ipVersion"`
+	Enabled        bool   `json:"enabled"`
+	APN            string `json:"apn"`
+	IPVersion      string `json:"ipVersion"`
+	Username       string `json:"username,omitempty"`
+	Password       string `json:"password,omitempty"`
+	Authentication string `json:"authentication,omitempty"`
+	Backend        string `json:"backend,omitempty"`
 }
 
 type NetworkResult struct {
@@ -85,6 +90,7 @@ type Snapshot struct {
 	Firmware           string      `json:"firmware"`
 	SIMStatus          string      `json:"simStatus"`
 	SIMReady           bool        `json:"simReady"`
+	SIMChanged         bool        `json:"simChanged,omitempty"`
 	SignalRaw          *int        `json:"signalRaw,omitempty"`
 	SignalPercent      *int        `json:"signalPercent,omitempty"`
 	RSSIDBm            *int        `json:"rssiDbm,omitempty"`
@@ -102,6 +108,7 @@ type Snapshot struct {
 	IMEI               string      `json:"imei"`
 	ICCID              string      `json:"iccid"`
 	IMSI               string      `json:"imsi"`
+	SPN                string      `json:"spn,omitempty"`
 	OperatingMode      int         `json:"operatingMode"`
 	ModeKnown          bool        `json:"modeKnown"`
 	FlightMode         bool        `json:"flightMode"`
@@ -136,19 +143,17 @@ type FlightResult struct {
 type SMSEncoding string
 
 const (
+	// Cellular SMS transports name VoCAT's host-side modem backend.
+	SMSTransportCellularAT  = "cellular_at"
+	SMSTransportCellularQMI = "cellular_qmi"
+)
+
+const (
 	SMSEncodingGSM7Text SMSEncoding = "gsm7_text"
 	SMSEncodingGSM7PDU  SMSEncoding = "gsm7_pdu"
 	SMSEncodingUCS2PDU  SMSEncoding = "ucs2_pdu"
 	SMSEncoding8BitPDU  SMSEncoding = "8bit_pdu"
 	SMSEncodingUnknown  SMSEncoding = "unknown"
-)
-
-const (
-	// Cellular SMS transports name VoCAT's host-side modem backend. In
-	// particular, cellular_qmi does not assert the modem's internal WMS bearer;
-	// existing modem routes may still carry the message over CS or IMS.
-	SMSTransportCellularAT  = "cellular_at"
-	SMSTransportCellularQMI = "cellular_qmi"
 )
 
 type SMSStorageStatus string

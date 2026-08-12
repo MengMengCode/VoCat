@@ -416,6 +416,20 @@ func TestEC20AdapterReadsExplicitHomePLMNAndKnownAssignmentFallback(
 	}
 }
 
+func TestAssignedHomePLMNIncludesLebaraUKCores(t *testing.T) {
+	tests := map[string]string{
+		"204040123456789": "204/04",
+		"234150123456789": "234/15",
+		"234870123456789": "234/87",
+	}
+	for imsi, want := range tests {
+		mcc, mnc, ok := assignedHomePLMN(imsi)
+		if got := mcc + "/" + mnc; !ok || got != want {
+			t.Errorf("assignedHomePLMN(%q) = %q, %v; want %q", imsi, got, ok, want)
+		}
+	}
+}
+
 func TestEC20AdapterRadioTransactionRestoresCFUNAndPDPContexts(
 	t *testing.T,
 ) {
@@ -440,16 +454,14 @@ func TestEC20AdapterRadioTransactionRestoresCFUNAndPDPContexts(
 				lines:   []string{"+CGACT: 1,0", "+CGACT: 2,0"},
 			},
 			{command: "AT+CFUN?", lines: []string{"+CFUN: 4"}},
-			{command: "AT+CFUN=1"},
-			{command: "AT+CFUN?", lines: []string{"+CFUN: 1"}},
+			{command: "AT+CFUN?", lines: []string{"+CFUN: 4"}},
 			{
 				command: "AT+CGACT?",
 				lines:   []string{"+CGACT: 1,0", "+CGACT: 2,0"},
 			},
-			{command: "AT+CGACT=1,1"},
 			{
 				command: "AT+CGACT?",
-				lines:   []string{"+CGACT: 1,1", "+CGACT: 2,0"},
+				lines:   []string{"+CGACT: 1,0", "+CGACT: 2,0"},
 			},
 		},
 	}

@@ -244,6 +244,45 @@ func TestTransientEuiccCMEClassification(t *testing.T) {
 	}
 }
 
+func TestDiscoverEuiccAIDsFindsXeSIMAlternateISDR(t *testing.T) {
+	manageChannel := clientStep{
+		command:  `AT+CSIM=10,"0070000001"`,
+		response: okResponse(`+CSIM: 6,"019000"`),
+	}
+	closeChannel := clientStep{
+		command:  `AT+CSIM=10,"0070800100"`,
+		response: okResponse(`+CSIM: 4,"9000"`),
+	}
+	selectStep := func(aid, response string) clientStep {
+		return clientStep{
+			command:  fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, aid),
+			response: okResponse(fmt.Sprintf(`+CSIM: 4,"%s"`, response)),
+		}
+	}
+
+	client := &transcriptClient{steps: []clientStep{
+		// No eSTK product applet on this card.
+		manageChannel,
+		selectStep(estkProductAID, "6A82"),
+		closeChannel,
+		// XeSIM does not expose the standard GSMA ...0100 application.
+		manageChannel,
+		selectStep(isdRAID, "6A82"),
+		closeChannel,
+		// Its dedicated ...0177 ISD-R is selectable.
+		manageChannel,
+		selectStep(xesimISDRAID, "9000"),
+		closeChannel,
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	aids := manager.discoverEuiccAIDs(context.Background(), id)
+	if len(aids) != 1 || aids[0] != xesimISDRAID {
+		t.Fatalf("discovered AIDs = %#v, want XeSIM %s", aids, xesimISDRAID)
+	}
+	client.assertDone(t)
+}
+
 func TestEUICCChannelStuckWrapsTransientCME(t *testing.T) {
 	cause := &modem.CommandError{
 		Command: `AT+CSIM=10,"0070000001"`,

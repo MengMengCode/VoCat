@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 )
 
 type Options struct {
@@ -19,6 +20,7 @@ type Options struct {
 	LongTimeout    time.Duration
 	SMSTimeout     time.Duration
 	ScanTimeout    time.Duration
+	CardReaders    *pcsc.Service
 }
 
 type Manager struct {
@@ -38,6 +40,7 @@ type Manager struct {
 	qmiEUICCOpener                qmiEUICCSessionOpener
 	qmiRadioOpener                qmiRadioSessionOpener
 	qmiSMSOpener                  qmiSMSSessionOpener
+	cardReaders                   *pcsc.Service
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
 	started                       bool
@@ -97,6 +100,7 @@ func NewManager(options Options) (*Manager, error) {
 		qmiEUICCOpener:                openQMIEUICCSession,
 		qmiRadioOpener:                openQMIRadioSession,
 		qmiSMSOpener:                  openQMISMSSession,
+		cardReaders:                   options.CardReaders,
 		nativeQMIRegistrationInFlight: make(map[string]struct{}),
 		devices:                       make(map[string]*managedDevice),
 		ussdSessions:                  make(map[string]ussdSession),

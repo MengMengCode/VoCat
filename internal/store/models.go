@@ -24,6 +24,7 @@ type Device struct {
 	USBPath                     string
 	AudioDevice                 string
 	ModemIMEI                   string
+	SIMPIN                      string
 	APN                         string
 	IMSAPN                      string
 	IMSPrivateIdentity          string
@@ -131,6 +132,45 @@ type PhoneAssociation struct {
 	Source    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+type AutomaticTask struct {
+	ID           int64           `json:"id"`
+	Name         string          `json:"name"`
+	Enabled      bool            `json:"enabled"`
+	DeviceID     string          `json:"device_id"`
+	ProfileICCID string          `json:"profile_iccid"`
+	ProfileAID   string          `json:"profile_aid"`
+	TaskType     string          `json:"task_type"`
+	Environment  string          `json:"environment"`
+	IntervalDays int             `json:"interval_days"`
+	StartDate    string          `json:"start_date"`
+	RunTime      string          `json:"run_time"`
+	Timezone     string          `json:"timezone"`
+	Payload      json.RawMessage `json:"payload"`
+	RetryCount   int             `json:"retry_count"`
+	Notify       bool            `json:"notify"`
+	NextRunAt    time.Time       `json:"next_run_at"`
+	LastRunAt    time.Time       `json:"last_run_at,omitempty"`
+	LastStatus   string          `json:"last_status"`
+	LastError    string          `json:"last_error"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
+
+type AutomaticTaskRun struct {
+	ID          int64     `json:"id"`
+	TaskID      int64     `json:"task_id"`
+	DeviceID    string    `json:"device_id"`
+	ScheduledAt time.Time `json:"scheduled_at"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	FinishedAt  time.Time `json:"finished_at,omitempty"`
+	Status      string    `json:"status"`
+	Attempts    int       `json:"attempts"`
+	Output      string    `json:"output"`
+	Error       string    `json:"error"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type SMSMessage struct {
@@ -279,6 +319,8 @@ type CountryRule struct {
 // travel inside that tunnel.
 type DeviceProxyBinding struct {
 	DeviceID        string
+	ICCID           string
+	ProfileName     string
 	UpstreamProxyID string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
@@ -310,12 +352,9 @@ func (value NotificationSetting) SensitiveValues() []string {
 	}
 	values := make([]string, 0, len(value.SensitiveFields))
 	for _, field := range value.SensitiveFields {
-		if secret, ok := getJSONPath(document, field).(string); ok &&
-			secret != "" && secret != SecretMask {
-			values = append(values, secret)
-		}
+		collectJSONStringValues(getJSONPath(document, field), &values)
 	}
-	return values
+	return uniqueNonemptyStrings(values)
 }
 
 type AppSetting struct {
@@ -448,15 +487,32 @@ type LogFilter struct {
 }
 
 type CardPolicy struct {
-	ICCID           string
-	NetworkEnabled  bool
-	VoWiFiEnabled   bool
-	AirplaneEnabled bool
-	APN             string
-	IPVersion       string
-	Source          string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ICCID             string
+	NetworkEnabled    bool
+	VoWiFiEnabled     bool
+	AirplaneEnabled   bool
+	APN               string
+	IPVersion         string
+	CustomPhoneNumber string
+	Source            string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type CardAPNProfile struct {
+	ID               int64
+	ICCID            string
+	APN              string
+	Username         string
+	Password         string
+	Proxy            string
+	MCC              string
+	MNC              string
+	IPVersion        string
+	RoamingIPVersion string
+	AuthType         string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type TrafficBucket struct {
@@ -530,8 +586,8 @@ func redactJSONFields(value json.RawMessage, fields []string, replacement string
 		return json.RawMessage(`{}`)
 	}
 	for _, field := range fields {
-		if getJSONPath(document, field) != nil {
-			setJSONPath(document, field, replacement)
+		if current := getJSONPath(document, field); current != nil {
+			setJSONPath(document, field, redactJSONValue(current, replacement))
 		}
 	}
 	encoded, err := json.Marshal(document)
@@ -556,14 +612,53 @@ func mergeJSONSecrets(
 	}
 	for _, field := range fields {
 		value := getJSONPath(next, field)
-		text, stringValue := value.(string)
-		if value == nil || (stringValue && (text == "" || text == SecretMask)) {
-			if previous := getJSONPath(current, field); previous != nil {
-				setJSONPath(next, field, previous)
-			}
+		if previous := getJSONPath(current, field); previous != nil {
+			setJSONPath(next, field, mergeJSONSecretValue(value, previous))
 		}
 	}
 	return json.Marshal(next)
+}
+
+func redactJSONValue(value any, replacement string) any {
+	switch typed := value.(type) {
+	case string:
+		return replacement
+	case []any:
+		result := make([]any, len(typed))
+		for index, item := range typed {
+			result[index] = redactJSONValue(item, replacement)
+		}
+		return result
+	default:
+		return replacement
+	}
+}
+
+func mergeJSONSecretValue(incoming, existing any) any {
+	if incoming == nil {
+		return existing
+	}
+	switch next := incoming.(type) {
+	case string:
+		if next == "" || next == SecretMask {
+			return existing
+		}
+	case []any:
+		previous, ok := existing.([]any)
+		if !ok {
+			return incoming
+		}
+		merged := make([]any, len(next))
+		for index, value := range next {
+			if index < len(previous) {
+				merged[index] = mergeJSONSecretValue(value, previous[index])
+			} else {
+				merged[index] = value
+			}
+		}
+		return merged
+	}
+	return incoming
 }
 
 func getJSONPath(document map[string]any, path string) any {

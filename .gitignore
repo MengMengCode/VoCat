@@ -55,3 +55,4 @@ Thumbs.db
 
 # ---- Claude Code / agent ----
 .claude/
+.worktrees/

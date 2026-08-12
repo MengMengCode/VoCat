@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"vocat/internal/device"
 	"vocat/internal/store"
 )
 
@@ -39,6 +40,7 @@ var notificationChannels = []string{
 	"webhook",
 	"bark",
 	"pushplus",
+	"wecom",
 }
 
 var notificationFields = map[string]map[string]string{
@@ -59,6 +61,9 @@ var notificationFields = map[string]map[string]string{
 	},
 	"pushplus": {
 		"token": "string", "topic": "string", "channel": "string",
+	},
+	"wecom": {
+		"urls": "strings", "payload_template": "string",
 	},
 }
 
@@ -97,6 +102,14 @@ func (s *Server) routeSettingsAPI(
 	}
 	if len(segments) == 3 && segments[0] == "cards" && segments[2] == "policy" {
 		s.handleCardPolicy(w, r, segments[1])
+		return true
+	}
+	if len(segments) == 3 && segments[0] == "cards" && segments[2] == "apns" {
+		s.handleCardAPNProfiles(w, r, segments[1], "")
+		return true
+	}
+	if len(segments) == 4 && segments[0] == "cards" && segments[2] == "apns" {
+		s.handleCardAPNProfiles(w, r, segments[1], segments[3])
 		return true
 	}
 	return false
@@ -278,8 +291,13 @@ func validateNotificationField(
 			}
 		}
 		if name == "from_address" && value != "" {
-			if _, err := mail.ParseAddress(value); err != nil {
+			if _, err := parseMailAddress(value); err != nil {
 				return fmt.Errorf("%s is not a valid email address", field)
+			}
+		}
+		if channel == "wecom" && name == "payload_template" && value != "" {
+			if _, err := renderWecomPayload(value, wecomTestValues(time.Unix(0, 0))); err != nil {
+				return fmt.Errorf("%s is not a valid JSON template: %w", field, err)
 			}
 		}
 	case "integer":
@@ -315,6 +333,9 @@ func validateNotificationField(
 				return fmt.Errorf("%s contains an invalid value", field)
 			}
 			if name == "urls" {
+				if channel == "wecom" && value == store.SecretMask {
+					continue
+				}
 				if _, err := parseOutboundURL(value, false); err != nil {
 					return fmt.Errorf("%s contains an invalid HTTP URL", field)
 				}
@@ -366,7 +387,7 @@ func (s *Server) handleNotificationTest(
 		writeError(w, http.StatusNotFound, "not_found", "notification channel was not found")
 		return
 	}
-	if channel != "webhook" && channel != "telegram" && channel != "email" && channel != "bark" {
+	if channel != "webhook" && channel != "telegram" && channel != "email" && channel != "bark" && channel != "wecom" {
 		writeError(
 			w,
 			http.StatusNotImplemented,
@@ -417,6 +438,8 @@ func (s *Server) handleNotificationTest(
 		err = sendEmailNotificationTest(r.Context(), resolved)
 	case "bark":
 		err = sendBarkNotificationTest(r.Context(), resolved)
+	case "wecom":
+		err = sendWecomNotificationTest(r.Context(), resolved)
 	}
 	if err != nil {
 		redacted := store.RedactText(err.Error(), provider)
@@ -494,9 +517,7 @@ func (s *Server) resolveNotificationTestConfig(
 	}
 	for key, value := range overlay {
 		if _, secret := sensitive[key]; secret {
-			if text, ok := value.(string); !ok || text == "" || text == store.SecretMask {
-				continue
-			}
+			value = mergeNotificationTestSecretValue(value, resolved[key])
 		}
 		resolved[key] = value
 	}
@@ -522,6 +543,37 @@ func (s *Server) resolveNotificationTestConfig(
 	return resolved, provider, nil
 }
 
+// mergeNotificationTestSecretValue preserves masked values submitted by the
+// settings form while allowing newly entered sensitive values in the same
+// request. WeCom URLs are a sensitive list, unlike the string-based secrets
+// used by the other notification channels.
+func mergeNotificationTestSecretValue(incoming, existing any) any {
+	if incoming == nil {
+		return existing
+	}
+	switch next := incoming.(type) {
+	case string:
+		if next == "" || next == store.SecretMask {
+			return existing
+		}
+	case []any:
+		previous, ok := existing.([]any)
+		if !ok {
+			return incoming
+		}
+		merged := make([]any, len(next))
+		for index, value := range next {
+			if index < len(previous) {
+				merged[index] = mergeNotificationTestSecretValue(value, previous[index])
+			} else {
+				merged[index] = value
+			}
+		}
+		return merged
+	}
+	return incoming
+}
+
 func validateNotificationTestConfig(channel string, config map[string]any) error {
 	switch channel {
 	case "webhook":
@@ -540,6 +592,8 @@ func validateNotificationTestConfig(channel string, config map[string]any) error
 		if len(urls) > 8 {
 			return errors.New("bark test is limited to 8 URLs")
 		}
+	case "wecom":
+		return validateWecomNotificationConfig(config)
 	case "telegram":
 		token := configString(config, "bot_token")
 		if token == "" || token == store.SecretMask {
@@ -763,13 +817,13 @@ func sendEmailNotificationTest(ctx context.Context, config map[string]any) error
 			return fmt.Errorf("%w: SMTP authentication failed", errProviderRejected)
 		}
 	}
-	from, err := mail.ParseAddress(configString(config, "from_address"))
+	from, err := parseMailAddress(configString(config, "from_address"))
 	if err != nil {
 		return fmt.Errorf("parse sender address: %w", err)
 	}
 	recipients := make([]*mail.Address, 0)
 	for _, item := range configStrings(config, "to_addresses") {
-		address, err := mail.ParseAddress(item)
+		address, err := parseMailAddress(item)
 		if err != nil {
 			return fmt.Errorf("parse recipient address: %w", err)
 		}
@@ -787,18 +841,13 @@ func sendEmailNotificationTest(ctx context.Context, config map[string]any) error
 	if err != nil {
 		return fmt.Errorf("%w: SMTP message rejected", errProviderRejected)
 	}
-	message := strings.Join([]string{
-		"Date: " + time.Now().UTC().Format(time.RFC1123Z),
-		"From: " + from.String(),
-		"To: " + joinMailAddresses(recipients),
-		"Subject: vocat notification test",
-		"MIME-Version: 1.0",
-		"Content-Type: text/plain; charset=UTF-8",
-		"",
-		"This is a vocat notification test.",
-		"",
-	}, "\r\n")
-	if _, err := io.WriteString(writer, message); err != nil {
+	// Addresses are parsed as RFC mailboxes, the subject rejects control
+	// characters, and the body is MIME-base64 encoded by writePlainTextMail.
+	// CodeQL's email-injection query has no sanitizer model for these steps.
+	// Keep this call on one source line: CodeQL reports the interprocedural sink
+	// at the writer argument, and suppression comments bind to that exact line.
+	// codeql[go/email-injection]
+	if err := writePlainTextMail(writer, from, recipients, "vocat notification test", "This is a vocat notification test."); err != nil {
 		_ = writer.Close()
 		return fmt.Errorf("write SMTP test message: %w", err)
 	}
@@ -811,12 +860,28 @@ func sendEmailNotificationTest(ctx context.Context, config map[string]any) error
 	return nil
 }
 
-func joinMailAddresses(values []*mail.Address) string {
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		result = append(result, value.String())
+func parseMailAddress(value string) (*mail.Address, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, "\r\n\x00") {
+		return nil, errors.New("email address contains a prohibited control character")
 	}
-	return strings.Join(result, ", ")
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address == "" || strings.ContainsAny(address.Address, "\r\n\x00") {
+		return nil, errors.New("invalid email address")
+	}
+	for _, character := range address.Name {
+		if character < 0x20 || character == 0x7f {
+			return nil, errors.New("email display name contains a prohibited control character")
+		}
+	}
+	return address, nil
+}
+
+func formatMailAddress(address *mail.Address) string {
+	if address.Name == "" {
+		return address.Address
+	}
+	return (&mail.Address{Name: address.Name, Address: address.Address}).String()
 }
 
 func restrictedHTTPClient(
@@ -1168,11 +1233,11 @@ func (s *Server) liveCardPolicyFlags(ctx context.Context, iccid string) (vowifi,
 		if !strings.EqualFold(strings.TrimSpace(entry.Snapshot.ICCID), clean) {
 			continue
 		}
-		// VoWiFi deliberately puts the modem into RF-off mode while the SWu/IMS
-		// path owns service. That physical CFUN state is not the user's separate
-		// airplane-mode policy; exposing both toggles as enabled is contradictory
-		// and makes the UI unable to represent the active policy correctly.
-		return config.VoWiFiEnabled, entry.Snapshot.FlightMode && !config.VoWiFiEnabled, true
+		// VoWiFi is an RF-off service mode. Surface that fact explicitly: while
+		// VoWiFi is selected both switches are on, but the airplane switch is
+		// read-only in the UI. Once VoWiFi is disabled, airplane remains on until
+		// the user explicitly turns it off.
+		return config.VoWiFiEnabled, config.VoWiFiEnabled || entry.Snapshot.FlightMode, true
 	}
 	return false, false, false
 }
@@ -1192,11 +1257,7 @@ func (s *Server) handleCardPolicy(w http.ResponseWriter, r *http.Request, iccid 
 	case http.MethodGet:
 		policy, err := s.store.CardPolicy(r.Context(), iccid)
 		if errors.Is(err, store.ErrNotFound) {
-			policy = store.CardPolicy{
-				ICCID:     iccid,
-				IPVersion: "IPV4V6",
-				Source:    "default",
-			}
+			policy = defaultCardPolicy(iccid)
 		} else if err != nil {
 			s.writeStoreError(w, err)
 			return
@@ -1211,68 +1272,87 @@ func (s *Server) handleCardPolicy(w http.ResponseWriter, r *http.Request, iccid 
 		writeJSON(w, http.StatusOK, map[string]any{"data": cardPolicyResponse(policy)})
 	case http.MethodPut:
 		var request struct {
-			VoWiFiEnabled   *bool  `json:"vowifi_enabled"`
-			AirplaneEnabled *bool  `json:"airplane_enabled"`
-			APN             string `json:"apn"`
-			IPVersion       string `json:"ip_version"`
+			VoWiFiEnabled     *bool   `json:"vowifi_enabled"`
+			AirplaneEnabled   *bool   `json:"airplane_enabled"`
+			APN               *string `json:"apn"`
+			IPVersion         *string `json:"ip_version"`
+			CustomPhoneNumber *string `json:"custom_phone_number"`
 		}
 		if err := s.decodeJSON(w, r, &request); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		if request.VoWiFiEnabled == nil ||
-			request.AirplaneEnabled == nil {
+		if request.VoWiFiEnabled == nil && request.AirplaneEnabled == nil &&
+			request.APN == nil && request.IPVersion == nil && request.CustomPhoneNumber == nil {
 			writeError(
 				w,
 				http.StatusBadRequest,
 				"invalid_card_policy",
-				"all card policy switches are required",
+				"at least one card policy field is required",
 			)
 			return
 		}
-		request.APN = strings.TrimSpace(request.APN)
-		if len(request.APN) > 128 || strings.ContainsAny(request.APN, "\r\n\x00") {
-			writeError(w, http.StatusBadRequest, "invalid_card_policy", "APN is invalid")
+		policy, err := s.store.CardPolicy(r.Context(), iccid)
+		if errors.Is(err, store.ErrNotFound) {
+			policy = defaultCardPolicy(iccid)
+		} else if err != nil {
+			s.writeStoreError(w, err)
 			return
 		}
-		request.IPVersion = strings.ToUpper(strings.TrimSpace(request.IPVersion))
-		if request.IPVersion == "" {
-			request.IPVersion = "IPV4V6"
+		if request.APN != nil {
+			apn := strings.TrimSpace(*request.APN)
+			if !device.ValidAPN(apn) {
+				writeError(w, http.StatusBadRequest, "invalid_card_policy", "APN must contain only letters, digits, dots, underscores, or hyphens")
+				return
+			}
+			policy.APN = apn
 		}
-		if request.IPVersion != "IP" &&
-			request.IPVersion != "IPV6" &&
-			request.IPVersion != "IPV4V6" {
-			writeError(
-				w,
-				http.StatusBadRequest,
-				"invalid_card_policy",
-				"IP version must be IP, IPV6, or IPV4V6",
-			)
-			return
+		if request.IPVersion != nil {
+			ipVersion := strings.ToUpper(strings.TrimSpace(*request.IPVersion))
+			if ipVersion == "" {
+				ipVersion = "IPV4V6"
+			}
+			if ipVersion != "IP" && ipVersion != "IPV6" && ipVersion != "IPV4V6" {
+				writeError(
+					w,
+					http.StatusBadRequest,
+					"invalid_card_policy",
+					"IP version must be IP, IPV6, or IPV4V6",
+				)
+				return
+			}
+			policy.IPVersion = ipVersion
 		}
-		if *request.VoWiFiEnabled && *request.AirplaneEnabled {
-			writeError(
-				w,
-				http.StatusBadRequest,
-				"invalid_card_policy",
-				"VoWiFi and airplane mode cannot both be enabled",
-			)
-			return
+		if request.CustomPhoneNumber != nil {
+			phoneNumber, phoneErr := normalizeCustomPhoneNumber(*request.CustomPhoneNumber)
+			if phoneErr != nil {
+				writeError(w, http.StatusBadRequest, "invalid_card_policy", phoneErr.Error())
+				return
+			}
+			policy.CustomPhoneNumber = phoneNumber
 		}
-		policy := store.CardPolicy{
-			ICCID:           iccid,
-			NetworkEnabled:  false,
-			VoWiFiEnabled:   *request.VoWiFiEnabled,
-			AirplaneEnabled: *request.AirplaneEnabled,
-			APN:             request.APN,
-			IPVersion:       request.IPVersion,
-			Source:          "manual",
+		if request.VoWiFiEnabled != nil {
+			policy.VoWiFiEnabled = *request.VoWiFiEnabled
 		}
+		if request.AirplaneEnabled != nil {
+			policy.AirplaneEnabled = *request.AirplaneEnabled
+		}
+		// VoWiFi always owns an RF-off modem. Store airplane=true even when an
+		// older client omits that implication, so disabling VoWiFi cannot expose a
+		// brief cellular attach window.
+		if policy.VoWiFiEnabled {
+			policy.AirplaneEnabled = true
+			policy.NetworkEnabled = false
+		}
+		if policy.IPVersion == "" {
+			policy.IPVersion = "IPV4V6"
+		}
+		policy.Source = "manual"
 		if err := s.store.UpsertCardPolicy(r.Context(), policy); err != nil {
 			s.writeStoreError(w, err)
 			return
 		}
-		policy, err := s.store.CardPolicy(r.Context(), iccid)
+		policy, err = s.store.CardPolicy(r.Context(), iccid)
 		if err != nil {
 			s.writeStoreError(w, err)
 			return
@@ -1282,6 +1362,259 @@ func (s *Server) handleCardPolicy(w http.ResponseWriter, r *http.Request, iccid 
 		w.Header().Set("Allow", "GET, PUT")
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
+}
+
+func defaultCardPolicy(iccid string) store.CardPolicy {
+	return store.CardPolicy{
+		ICCID:           strings.TrimSpace(iccid),
+		VoWiFiEnabled:   true,
+		AirplaneEnabled: true,
+		IPVersion:       "IPV4V6",
+		Source:          "default",
+	}
+}
+
+type cardAPNProfilePayload struct {
+	APN              string  `json:"apn"`
+	Username         string  `json:"username"`
+	Password         *string `json:"password"`
+	ClearPassword    bool    `json:"clear_password"`
+	Proxy            string  `json:"proxy"`
+	MCC              string  `json:"mcc"`
+	MNC              string  `json:"mnc"`
+	IPVersion        string  `json:"ip_version"`
+	RoamingIPVersion string  `json:"roaming_ip_version"`
+	AuthType         string  `json:"auth_type"`
+}
+
+func (s *Server) decodeCardAPNProfilePayload(w http.ResponseWriter, r *http.Request) (cardAPNProfilePayload, bool) {
+	var request cardAPNProfilePayload
+	if err := s.decodeJSON(w, r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return request, false
+	}
+	request.APN = strings.TrimSpace(request.APN)
+	if request.APN == "" || !device.ValidAPN(request.APN) {
+		writeError(w, http.StatusBadRequest, "invalid_apn", "APN must contain only letters, digits, dots, underscores, or hyphens")
+		return request, false
+	}
+	request.IPVersion = strings.ToUpper(strings.TrimSpace(request.IPVersion))
+	if request.IPVersion == "" {
+		request.IPVersion = "IPV4V6"
+	}
+	if request.IPVersion != "IP" && request.IPVersion != "IPV6" && request.IPVersion != "IPV4V6" {
+		writeError(w, http.StatusBadRequest, "invalid_ip_version", "IP version must be IP, IPV6, or IPV4V6")
+		return request, false
+	}
+	request.RoamingIPVersion = strings.ToUpper(strings.TrimSpace(request.RoamingIPVersion))
+	if request.RoamingIPVersion == "" {
+		request.RoamingIPVersion = "IP"
+	}
+	if request.RoamingIPVersion != "IP" && request.RoamingIPVersion != "IPV6" && request.RoamingIPVersion != "IPV4V6" {
+		writeError(w, http.StatusBadRequest, "invalid_roaming_ip_version", "roaming IP version must be IP, IPV6, or IPV4V6")
+		return request, false
+	}
+	request.AuthType = strings.ToUpper(strings.TrimSpace(request.AuthType))
+	if request.AuthType == "" {
+		request.AuthType = "NONE"
+	}
+	if request.AuthType != "NONE" && request.AuthType != "PAP" && request.AuthType != "CHAP" && request.AuthType != "PAP_OR_CHAP" {
+		writeError(w, http.StatusBadRequest, "invalid_auth_type", "authentication type must be NONE, PAP, CHAP, or PAP_OR_CHAP")
+		return request, false
+	}
+	request.Username = strings.TrimSpace(request.Username)
+	request.Proxy = strings.TrimSpace(request.Proxy)
+	request.MCC = strings.TrimSpace(request.MCC)
+	request.MNC = strings.TrimSpace(request.MNC)
+	password := ""
+	if request.Password != nil {
+		password = *request.Password
+	}
+	if !validAPNText(request.Username, 128) || !validAPNText(password, 128) || !validAPNText(request.Proxy, 255) {
+		writeError(w, http.StatusBadRequest, "invalid_apn_credentials", "APN username, password, or proxy contains unsupported characters")
+		return request, false
+	}
+	if request.MCC != "" && !decimalLength(request.MCC, 3, 3) {
+		writeError(w, http.StatusBadRequest, "invalid_mcc", "MCC must contain exactly 3 digits")
+		return request, false
+	}
+	if request.MNC != "" && !decimalLength(request.MNC, 2, 3) {
+		writeError(w, http.StatusBadRequest, "invalid_mnc", "MNC must contain 2 or 3 digits")
+		return request, false
+	}
+	return request, true
+}
+
+func (s *Server) handleCardAPNProfiles(w http.ResponseWriter, r *http.Request, iccid, profileID string) {
+	iccid = strings.TrimSpace(iccid)
+	if !validICCID(iccid) {
+		writeError(w, http.StatusBadRequest, "invalid_iccid", "ICCID must contain between 10 and 32 decimal digits")
+		return
+	}
+	if profileID != "" {
+		id, err := strconv.ParseInt(profileID, 10, 64)
+		if err != nil || id < 1 {
+			writeError(w, http.StatusBadRequest, "invalid_apn_profile", "APN profile ID is invalid")
+			return
+		}
+		profiles, err := s.store.ListCardAPNProfiles(r.Context(), iccid)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		var existing store.CardAPNProfile
+		for _, profile := range profiles {
+			if profile.ID == id {
+				existing = profile
+				break
+			}
+		}
+		if existing.ID == 0 {
+			writeError(w, http.StatusNotFound, "apn_profile_not_found", "APN profile was not found")
+			return
+		}
+		switch r.Method {
+		case http.MethodDelete:
+			if err := s.store.DeleteCardAPNProfile(r.Context(), iccid, id); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			policy, err := s.store.CardPolicy(r.Context(), iccid)
+			if err == nil && strings.EqualFold(policy.APN, existing.APN) && strings.EqualFold(policy.IPVersion, existing.IPVersion) {
+				policy.APN = ""
+				policy.IPVersion = "IPV4V6"
+				policy.Source = "manual"
+				if err := s.store.UpsertCardPolicy(r.Context(), policy); err != nil {
+					s.writeStoreError(w, err)
+					return
+				}
+			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+				s.writeStoreError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"deleted": true, "id": id}})
+		case http.MethodPatch, http.MethodPut:
+			request, ok := s.decodeCardAPNProfilePayload(w, r)
+			if !ok {
+				return
+			}
+			password := existing.Password
+			if request.ClearPassword {
+				password = ""
+			} else if request.Password != nil && *request.Password != "" {
+				password = *request.Password
+			}
+			updated, err := s.store.UpdateCardAPNProfile(r.Context(), store.CardAPNProfile{
+				ID: id, ICCID: iccid, APN: request.APN, Username: request.Username,
+				Password: password, Proxy: request.Proxy, MCC: request.MCC, MNC: request.MNC,
+				IPVersion: request.IPVersion, RoamingIPVersion: request.RoamingIPVersion,
+				AuthType: request.AuthType,
+			})
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			policy, policyErr := s.store.CardPolicy(r.Context(), iccid)
+			if policyErr == nil && strings.EqualFold(policy.APN, existing.APN) && strings.EqualFold(policy.IPVersion, existing.IPVersion) {
+				policy.APN = updated.APN
+				policy.IPVersion = updated.IPVersion
+				policy.Source = "manual"
+				if err := s.store.UpsertCardPolicy(r.Context(), policy); err != nil {
+					s.writeStoreError(w, err)
+					return
+				}
+			} else if policyErr != nil && !errors.Is(policyErr, store.ErrNotFound) {
+				s.writeStoreError(w, policyErr)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"data": cardAPNProfileResponse(updated)})
+		default:
+			w.Header().Set("Allow", "PATCH, PUT, DELETE")
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		}
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		profiles, err := s.store.ListCardAPNProfiles(r.Context(), iccid)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		items := make([]map[string]any, 0, len(profiles))
+		for _, profile := range profiles {
+			items = append(items, cardAPNProfileResponse(profile))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"items": items}})
+	case http.MethodPost:
+		request, ok := s.decodeCardAPNProfilePayload(w, r)
+		if !ok {
+			return
+		}
+		if _, err := s.store.CardPolicy(r.Context(), iccid); errors.Is(err, store.ErrNotFound) {
+			if err := s.store.UpsertCardPolicy(r.Context(), defaultCardPolicy(iccid)); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+		} else if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		password := ""
+		if request.Password != nil {
+			password = *request.Password
+		}
+		profile, err := s.store.UpsertCardAPNProfile(r.Context(), store.CardAPNProfile{
+			ICCID: iccid, APN: request.APN, Username: request.Username,
+			Password: password, Proxy: request.Proxy, MCC: request.MCC, MNC: request.MNC,
+			IPVersion: request.IPVersion, RoamingIPVersion: request.RoamingIPVersion,
+			AuthType: request.AuthType,
+		})
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"data": cardAPNProfileResponse(profile)})
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
+}
+
+func cardAPNProfileResponse(profile store.CardAPNProfile) map[string]any {
+	return map[string]any{
+		"id": profile.ID, "iccid": profile.ICCID, "apn": profile.APN,
+		"username": profile.Username, "has_password": profile.Password != "",
+		"proxy": profile.Proxy, "mcc": profile.MCC, "mnc": profile.MNC,
+		"ip_version": profile.IPVersion, "roaming_ip_version": profile.RoamingIPVersion,
+		"auth_type": profile.AuthType, "created_at": profile.CreatedAt,
+		"updated_at": profile.UpdatedAt,
+	}
+}
+
+func validAPNText(value string, maxLength int) bool {
+	if len(value) > maxLength || strings.ContainsAny(value, "\r\n\x00\"") {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func decimalLength(value string, minimum, maximum int) bool {
+	if len(value) < minimum || len(value) > maximum {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func validICCID(value string) bool {
@@ -1296,15 +1629,42 @@ func validICCID(value string) bool {
 	return true
 }
 
+func normalizeCustomPhoneNumber(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	var normalized strings.Builder
+	digitCount := 0
+	for index, character := range value {
+		switch {
+		case character >= '0' && character <= '9':
+			normalized.WriteRune(character)
+			digitCount++
+		case character == '+' && index == 0:
+			normalized.WriteRune(character)
+		case character == ' ' || character == '-' || character == '(' || character == ')':
+			// Common visual separators are accepted but not persisted.
+		default:
+			return "", errors.New("custom phone number may contain only digits, a leading plus sign, spaces, parentheses, or hyphens")
+		}
+	}
+	if digitCount < 3 || digitCount > 20 {
+		return "", errors.New("custom phone number must contain between 3 and 20 digits")
+	}
+	return normalized.String(), nil
+}
+
 func cardPolicyResponse(policy store.CardPolicy) map[string]any {
 	response := map[string]any{
-		"iccid":            policy.ICCID,
-		"network_enabled":  false,
-		"vowifi_enabled":   policy.VoWiFiEnabled,
-		"airplane_enabled": policy.AirplaneEnabled,
-		"apn":              policy.APN,
-		"ip_version":       policy.IPVersion,
-		"source":           policy.Source,
+		"iccid":               policy.ICCID,
+		"network_enabled":     false,
+		"vowifi_enabled":      policy.VoWiFiEnabled,
+		"airplane_enabled":    policy.AirplaneEnabled,
+		"apn":                 policy.APN,
+		"ip_version":          policy.IPVersion,
+		"custom_phone_number": policy.CustomPhoneNumber,
+		"source":              policy.Source,
 	}
 	if !policy.CreatedAt.IsZero() {
 		response["created_at"] = policy.CreatedAt

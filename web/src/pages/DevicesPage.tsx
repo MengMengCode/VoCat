@@ -31,6 +31,7 @@ const EMPTY_ADD: AddDeviceForm = {
   atPort: "",
   controlDevice: "",
   deviceBackend: "at",
+	 simPin: "",
 };
 
 export default function DevicesPage() {
@@ -369,7 +370,8 @@ export default function DevicesPage() {
     setAddSelected(d);
     setAddConfig((prev) => {
       const mode = String(d.mode || "").toLowerCase();
-      const backend = mode === "mbim" ? "mbim" : isQmiControl(d.controlPath) || (mode === "qmi" && d.controlPath) ? "qmi" : "at";
+      const isReader = d.hardwareKind === "pcsc" || mode === "pcsc";
+      const backend = isReader ? "pcsc" : mode === "mbim" ? "mbim" : isQmiControl(d.controlPath) || (mode === "qmi" && d.controlPath) ? "qmi" : "at";
       return {
         ...prev,
         interface: d.netInterface || "",
@@ -378,6 +380,8 @@ export default function DevicesPage() {
         modemImei: d.imei || "",
         usbPath: d.usbPath || "",
         deviceBackend: backend,
+		deviceType: isReader ? "usb_sim_reader" : prev.deviceType,
+		esimTransport: isReader ? "pcsc" : backend,
       };
     });
   }, []);
@@ -549,6 +553,10 @@ export default function DevicesPage() {
   const unconfiguredDiscovered = useMemo(() => discovered.filter((d) => !d.configured), [discovered]);
 
   const detailOnline = isDeviceOnline(detail);
+	const isReader = detail?.deviceType === "usb_sim_reader";
+	useEffect(() => {
+		if (isReader && ["at", "ussd"].includes(activeTab)) setActiveTab("overview");
+	}, [isReader, activeTab]);
   const addAtLimit = deviceLimit > 0 && list.length >= deviceLimit;
   const tabItems = [
     { key: "overview", label: t("概览") },
@@ -557,13 +565,14 @@ export default function DevicesPage() {
     { key: "ussd", label: t("USSD") },
     { key: "config", label: t("配置") },
     { key: "card", label: t("卡策略") },
-  ];
+  ].filter((tab) => !isReader || !["at", "ussd"].includes(tab.key));
 
   const overviewNode = detail ? (
     <div className="space-y-4">
       <DeviceOverviewTab
         device={detail}
         simOperatorDisplay={simOperator}
+        customPhoneNumber={cardPolicy?.iccid === detail.modem?.iccid ? cardPolicy.customPhoneNumber : ""}
         trafficSpeedRx={''}
         trafficSpeedTx={''}
         trafficMinuteRx={''}
@@ -645,6 +654,7 @@ export default function DevicesPage() {
                 onReconnectVowifi={handleReconnectVoWiFi}
                 onRebootModem={handleRebootModem}
                 onOpenSms={handleOpenSms}
+				wifiCallingOnly={isReader}
               />
               <div className="device-detail-tabs ui-card p-6">
                 <Tabs tabs={tabItems} value={activeTab} onChange={handleTabChange} />
@@ -669,7 +679,7 @@ export default function DevicesPage() {
                     <DeviceConfigTab editConfig={editConfig} deviceStatus={detail} saving={saving} deleting={deleting} onSave={handleSaveConfig} onDelete={handleDeleteDevice} onEditConfig={setEditConfig} />
                   ) : null}
                   {activeTab === "card" ? (
-                    <CardPolicyPanel deviceId={detail.id} iccid={detail.modem?.iccid} policy={cardPolicy} deviceOnline={detailOnline} onPolicyChanged={handlePolicyChanged} />
+                    <CardPolicyPanel deviceId={detail.id} iccid={detail.modem?.iccid} policy={cardPolicy} deviceOnline={detailOnline} onPolicyChanged={handlePolicyChanged} wifiCallingOnly={isReader} />
                   ) : null}
                 </div>
               </div>

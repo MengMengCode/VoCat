@@ -30,7 +30,7 @@ function isQmiMode(d?: DiscoveredDevice | null): boolean {
 }
 function modeLabel(d?: DiscoveredDevice | null): string {
   const m = String(d?.mode || "unknown").toLowerCase();
-  return m === "qmi" ? "QMI" : m === "mbim" ? "MBIM" : m === "ecm" ? "ECM" : m === "rndis" ? "RNDIS" : m === "ncm" ? "NCM" : "UNKNOWN";
+  return m === "pcsc" ? "PC/SC" : m === "qmi" ? "QMI" : m === "mbim" ? "MBIM" : m === "ecm" ? "ECM" : m === "rndis" ? "RNDIS" : m === "ncm" ? "NCM" : "UNKNOWN";
 }
 
 function Field({ label, children }: { label: ReactNode; children: ReactNode }) {
@@ -47,6 +47,7 @@ export function DeviceAddDialog(props: DeviceAddDialogProps) {
   const { addSelected, addConfig } = props;
   const fixedQmi = isQmiControl(addSelected?.controlPath || addConfig?.controlDevice);
   const isMbim = String(addSelected?.mode || "").toLowerCase() === "mbim";
+	const isReader = addSelected?.hardwareKind === "pcsc" || String(addSelected?.mode || "").toLowerCase() === "pcsc";
 
   useEffect(() => {
     if (fixedQmi && addConfig.deviceBackend !== "qmi") props.onConfigChange({ ...addConfig, deviceBackend: "qmi" });
@@ -57,7 +58,7 @@ export function DeviceAddDialog(props: DeviceAddDialogProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMbim]);
 
-  const backendOptions = [
+  const backendOptions = isReader ? [{ value: "pcsc", label: "PC/SC" }] : [
     ...(isMbim
       ? []
       : [
@@ -161,6 +162,9 @@ export function DeviceAddDialog(props: DeviceAddDialogProps) {
         <Field label={t("控制设备")}>
           <Input value={addConfig.controlDevice} disabled />
         </Field>
+		{isReader ? <Field label="SIM PIN">
+		  <Input type="password" value={addConfig.simPin} onChange={(e) => set({ simPin: e.target.value })} maxLength={8} inputMode="numeric" placeholder={t("仅在 SIM 启用 PIN 时填写")} />
+		</Field> : null}
         <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 p-3">
           <div>
             <div className="text-sm font-bold text-gray-800">{t("设备后端模式")}</div>
@@ -173,7 +177,7 @@ export function DeviceAddDialog(props: DeviceAddDialogProps) {
             onChange={(v) => set({ deviceBackend: v })}
             className="w-[110px]"
             placeholder="AT"
-            disabled={fixedQmi || isMbim}
+			disabled={fixedQmi || isMbim || isReader}
             options={backendOptions}
           />
         </div>

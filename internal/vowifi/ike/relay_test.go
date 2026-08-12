@@ -22,12 +22,13 @@ type fakeSentPacket struct {
 }
 
 type fakeSessionTransport struct {
-	incoming chan fakeSessionPacket
-	sent     chan fakeSentPacket
-	closed   chan struct{}
-	once     sync.Once
-	readers  atomic.Int32
-	maxReads atomic.Int32
+	incoming      chan fakeSessionPacket
+	sent          chan fakeSentPacket
+	closed        chan struct{}
+	ignoreContext bool
+	once          sync.Once
+	readers       atomic.Int32
+	maxReads      atomic.Int32
 }
 
 func newFakeSessionTransport() *fakeSessionTransport {
@@ -81,6 +82,18 @@ func (transport *fakeSessionTransport) ReceiveSessionPacket(
 		}
 	}
 	defer transport.readers.Add(-1)
+	if transport.ignoreContext {
+		select {
+		case packet := <-transport.incoming:
+			if packet.err != nil {
+				return 0, false, packet.err
+			}
+			copy(buffer, packet.data)
+			return len(packet.data), packet.ike, nil
+		case <-transport.closed:
+			return 0, false, net.ErrClosed
+		}
+	}
 	select {
 	case packet := <-transport.incoming:
 		if packet.err != nil {
@@ -94,6 +107,37 @@ func (transport *fakeSessionTransport) ReceiveSessionPacket(
 		return 0, false, ctx.Err()
 	case <-transport.closed:
 		return 0, false, net.ErrClosed
+	}
+}
+
+func TestSessionRelayCloseInterruptsStuckTransportRead(t *testing.T) {
+	transport := newFakeSessionTransport()
+	transport.ignoreContext = true
+	relay := newSessionRelay(
+		transport,
+		legacyTestSuite(),
+		ikeKeys{},
+		[8]byte{1},
+		[8]byte{2},
+		true,
+		time.Hour,
+	)
+	deadline := time.Now().Add(time.Second)
+	for transport.readers.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if transport.readers.Load() == 0 {
+		t.Fatal("relay did not enter the transport read")
+	}
+	done := make(chan error, 1)
+	go func() { done <- relay.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("close relay: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relay Close did not interrupt the transport read")
 	}
 }
 func (transport *fakeSessionTransport) Close() error {

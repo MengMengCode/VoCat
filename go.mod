@@ -3,13 +3,14 @@ module vocat
 go 1.25.0
 
 require (
+	github.com/ElMostafaIdrassi/goscard v1.0.0
 	github.com/coder/websocket v1.8.15
 	github.com/iniwex5/netlink v1.3.3
 	github.com/iniwex5/quectel-qmi-go v0.0.0
 	go.bug.st/serial v1.6.4
-	golang.org/x/crypto v0.41.0
+	golang.org/x/crypto v0.52.0
 	golang.org/x/sys v0.47.0
-	golang.org/x/term v0.34.0
+	golang.org/x/term v0.43.0
 	modernc.org/sqlite v1.38.2
 )
 
@@ -18,6 +19,7 @@ replace github.com/iniwex5/quectel-qmi-go => github.com/GooWen/quectel-qmi-go v0
 require (
 	github.com/creack/goselect v0.1.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/ebitengine/purego v0.8.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect

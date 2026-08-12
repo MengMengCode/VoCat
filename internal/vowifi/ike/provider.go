@@ -642,6 +642,11 @@ func telefonicaGermanySHA1Compatibility(identity vowifi.SIMIdentity) bool {
 	}
 }
 
+func legacyIKEProfile(mcc, mnc string) bool {
+	plmn := strings.TrimSpace(mcc) + strings.TrimLeft(strings.TrimSpace(mnc), "0")
+	return plmn == "23415" || plmn == "2044"
+}
+
 func buildInitialEAPOnlyAuth(
 	idi payload,
 	requestedIDr payload,

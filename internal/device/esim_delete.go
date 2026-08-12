@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var (
@@ -101,13 +102,24 @@ func (manager *Manager) ESIMDeleteProfile(ctx context.Context, id, iccid, aidHex
 	}
 
 	deleted := &EsimDeleteResult{}
+	var warnings []string
 	if info2, infoErr := channel.getEUICCInfo2(ctx); infoErr == nil {
 		if freeAfter, afterKnown := euiccFreeNVRAM(info2); beforeKnown && afterKnown && freeAfter >= freeBefore {
 			deleted.SpaceDelta = int64(freeAfter - freeBefore)
 		}
 	} else {
-		deleted.Warning = "Profile was deleted, but reclaimed storage could not be read"
+		warnings = append(warnings, "Profile 已删除，但无法读取释放的存储空间")
 	}
+	// DeleteProfile creates a signed notification only when the Profile metadata
+	// configured a receiver. Flush all retained notifications so earlier events
+	// for the same receiver cannot be overtaken by this delete event.
+	notifyContext, cancelNotify := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	notifyErr := channel.deliverPendingNotifications(notifyContext)
+	cancelNotify()
+	if notifyErr != nil {
+		warnings = append(warnings, "Profile 已删除，但运营商通知发送失败；通知已保留在 eUICC，可稍后重发")
+	}
+	deleted.Warning = strings.Join(warnings, "；")
 	manager.removeCachedProfile(id, strings.TrimSpace(iccid))
 	return deleted, nil
 }

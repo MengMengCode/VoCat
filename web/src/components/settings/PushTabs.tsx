@@ -6,7 +6,7 @@ import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { ChannelHeader, EmptyLine, Field, UrlListEditor } from "./controls";
 import { HEADER_NAME_SUGGESTIONS, nextHeaderRowId } from "./model";
-import type { BarkForm, EmailForm, HeaderRow, WebhookForm } from "./model";
+import type { BarkForm, EmailForm, HeaderRow, WebhookForm, WecomForm } from "./model";
 
 const HEADER_LIST_ID = "vocat-webhook-header-names";
 
@@ -263,6 +263,56 @@ export function WebhookTab({ value, onChange, testing, onTest }: PushChannelProp
             />
           </Field>
         </div>
+      </div>
+    </div>
+  );
+}
+
+export function WecomTab({ value, onChange, testing, onTest }: PushChannelProps<WecomForm>) {
+  const { t, lang } = useI18n();
+  const off = !value.enabled;
+  const complete = hasAnyUrl(value.urls) && !!value.payloadTemplate.trim();
+  return (
+    <div className="pt-2">
+      <ChannelHeader
+        title={t("启用企业微信消息推送")}
+        enabled={value.enabled}
+        onToggle={(enabled) => onChange({ enabled })}
+        actions={
+          <Button size="small" variant="primary" plain loading={testing} disabled={off || !complete} onClick={onTest}>
+            {t("测试通知")}
+          </Button>
+        }
+      />
+      <SMSOnlyHint />
+      <div className="space-y-4">
+        <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-500 dark:bg-gray-800/60 dark:text-gray-400">
+          {t("每个企业微信消息推送 Webhook URL 单独占一行，点击添加 URL 新增一行；不使用逗号、空格或换行分隔多个 URL。")}
+        </div>
+        <UrlListEditor
+          urls={value.urls}
+          onChange={(urls) => onChange({ urls })}
+          enabled={value.enabled}
+          placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+          emptyText={t("尚未配置任何企业微信消息推送 Webhook URL，点击右侧添加按钮。")}
+        />
+        <Field
+          label={t("JSON 请求体模板")}
+          hint={
+            <>
+              {t("支持完整企业微信消息推送 JSON。变量必须作为 JSON 值使用，例如")} <code>{"{{message}}"}</code>{lang === "zh" ? "。" : "."}
+              {t("可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。")}
+            </>
+          }
+        >
+          <Textarea
+            value={value.payloadTemplate}
+            onChange={(event) => onChange({ payloadTemplate: event.target.value })}
+            disabled={off}
+            rows={12}
+            className="font-mono text-xs"
+          />
+        </Field>
       </div>
     </div>
   );

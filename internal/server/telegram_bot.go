@@ -28,6 +28,8 @@ const (
 	telegramPollInterval       = 3 * time.Second
 	telegramNotificationPeriod = 2 * time.Second
 	telegramConfirmationTTL    = 2 * time.Minute
+	telegramMenuTTL            = 15 * time.Minute
+	telegramInputTTL           = 10 * time.Minute
 	telegramMaxDialDuration    = 10 * time.Minute
 )
 
@@ -53,6 +55,9 @@ type telegramBot struct {
 
 	callMu      sync.Mutex
 	activeDials map[string]struct{}
+
+	inputMu sync.Mutex
+	inputs  map[string]telegramInputState
 }
 
 type telegramPendingAction struct {
@@ -66,6 +71,15 @@ type telegramPendingAction struct {
 	CreatedAt   time.Time
 	TargetAID   string
 	TargetICCID string
+}
+
+type telegramInputState struct {
+	Kind      string
+	DeviceID  string
+	Argument  string
+	ChatID    int64
+	AdminID   int64
+	CreatedAt time.Time
 }
 
 type telegramAPIResponse struct {
@@ -113,6 +127,7 @@ func (s *Server) StartTelegramBot(ctx context.Context) {
 		server:      s,
 		pending:     make(map[string]telegramPendingAction),
 		activeDials: make(map[string]struct{}),
+		inputs:      make(map[string]telegramInputState),
 	}
 	go bot.poll(ctx)
 	go bot.notifyInboundSMS(ctx)
@@ -189,21 +204,14 @@ func (bot *telegramBot) bootstrap(ctx context.Context, config telegramRuntimeCon
 		}
 	}
 	commands := []map[string]string{
-		{"command": "status", "description": "查看设备状态"},
-		{"command": "esim", "description": "查看已安装 eSIM Profile"},
-		{"command": "wfc", "description": "管理 WiFi Calling"},
-		{"command": "sms", "description": "发送短信（需要确认）"},
-		{"command": "call", "description": "限时拨号并自动挂断（需要确认）"},
-		{"command": "calls", "description": "查看当前通话"},
-		{"command": "answer", "description": "接听当前来电"},
-		{"command": "hangup", "description": "挂断通话"},
-		{"command": "at", "description": "向指定设备发送安全 AT 指令"},
-		{"command": "ussd", "description": "向指定设备发送 USSD 指令"},
-		{"command": "ussd_reply", "description": "回复交互式 USSD 会话"},
-		{"command": "ussd_cancel", "description": "取消交互式 USSD 会话"},
-		{"command": "help", "description": "查看命令帮助"},
+		{"command": "menu", "description": "打开可视化操作菜单"},
+		{"command": "status", "description": "查看全部设备状态"},
+		{"command": "cancel", "description": "取消当前输入或操作"},
+		{"command": "help", "description": "查看帮助"},
 	}
-	_ = bot.call(requestContext, config, "setMyCommands", map[string]any{"commands": commands}, nil)
+	if err := bot.call(requestContext, config, "setMyCommands", map[string]any{"commands": commands}, nil); err != nil {
+		bot.warn("register Telegram command menu", err)
+	}
 	return offset, nil
 }
 
@@ -240,18 +248,42 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 		return
 	}
 	command, remainder := parseTelegramCommand(message.Text)
+	if _, waiting := bot.input(message.Chat.ID, message.From.ID); waiting &&
+		command != "menu" && command != "start" && command != "cancel" {
+		bot.handleInputMessage(ctx, config, message)
+		return
+	}
 	if command == "" {
+		bot.handleInputMessage(ctx, config, message)
 		return
 	}
 	switch command {
-	case "start", "menu", "help":
+	case "start", "menu":
+		bot.sendMainMenu(ctx, config, message.Chat.ID)
+	case "help":
 		bot.sendHelp(ctx, config, message.Chat.ID)
+	case "cancel":
+		bot.clearInput(message.Chat.ID, message.From.ID)
+		bot.sendText(ctx, config, message.Chat.ID, "已取消当前输入或操作。", bot.homeKeyboard())
 	case "status", "devices":
 		bot.sendDeviceStatus(ctx, config, message.Chat.ID, strings.TrimSpace(remainder))
 	case "esim":
-		bot.sendESIMProfiles(ctx, config, message.Chat.ID, strings.TrimSpace(remainder))
+		deviceID := strings.TrimSpace(remainder)
+		if deviceID == "" {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "esim")
+		} else {
+			bot.sendESIMProfiles(ctx, config, message.Chat.ID, message.From.ID, deviceID)
+		}
 	case "switch":
 		parts := strings.Fields(remainder)
+		if len(parts) == 0 {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "esim")
+			return
+		}
+		if len(parts) == 1 {
+			bot.sendESIMProfiles(ctx, config, message.Chat.ID, message.From.ID, parts[0])
+			return
+		}
 		if len(parts) != 2 {
 			bot.sendText(ctx, config, message.Chat.ID, "用法：/switch <设备ID> <目标ICCID>", nil)
 			return
@@ -259,13 +291,29 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 		bot.confirmESIMSwitch(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1])
 	case "wfc", "wificalling":
 		parts := strings.Fields(remainder)
+		if len(parts) == 0 {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "wfc")
+			return
+		}
+		if len(parts) == 1 {
+			bot.sendVoWiFiMenu(ctx, config, message.Chat.ID, message.From.ID, parts[0])
+			return
+		}
 		if len(parts) != 2 {
-			bot.sendText(ctx, config, message.Chat.ID, "用法：/wfc <设备ID> <status|on|off|reconnect>", nil)
+			bot.sendText(ctx, config, message.Chat.ID, "请选择菜单按钮，或使用 /wfc <设备ID> <status|on|off|reconnect>。", bot.homeKeyboard())
 			return
 		}
 		bot.handleVoWiFi(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1])
 	case "sms":
 		parts := splitTelegramArguments(remainder, 3)
+		if len(parts) == 0 {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "sms")
+			return
+		}
+		if len(parts) == 1 {
+			bot.beginInput(ctx, config, message.Chat.ID, message.From.ID, parts[0], "sms_phone", "请输入收件人号码：")
+			return
+		}
 		if len(parts) != 3 {
 			bot.sendText(ctx, config, message.Chat.ID, "用法：/sms <设备ID> <号码> <短信内容>", nil)
 			return
@@ -273,6 +321,14 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 		bot.confirmSMS(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1], parts[2])
 	case "call":
 		parts := strings.Fields(remainder)
+		if len(parts) == 0 {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "call")
+			return
+		}
+		if len(parts) == 1 {
+			bot.beginInput(ctx, config, message.Chat.ID, message.From.ID, parts[0], "call_number", "请输入要拨打的电话号码：")
+			return
+		}
 		if len(parts) != 3 {
 			bot.sendText(ctx, config, message.Chat.ID, "用法：/call <设备ID> <号码> <持续秒数>\n拨号后将在指定时间自动挂断，不处理通话音频。", nil)
 			return
@@ -284,13 +340,33 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 		}
 		bot.confirmCall(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1], time.Duration(seconds)*time.Second)
 	case "answer":
-		bot.executeSimpleCallAction(ctx, config, message.Chat.ID, message.From.ID, strings.TrimSpace(remainder), "answer")
+		if strings.TrimSpace(remainder) == "" {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "answer")
+		} else {
+			bot.executeSimpleCallAction(ctx, config, message.Chat.ID, message.From.ID, strings.TrimSpace(remainder), "answer")
+		}
 	case "hangup":
-		bot.executeSimpleCallAction(ctx, config, message.Chat.ID, message.From.ID, strings.TrimSpace(remainder), "hangup")
+		if strings.TrimSpace(remainder) == "" {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "hangup")
+		} else {
+			bot.executeSimpleCallAction(ctx, config, message.Chat.ID, message.From.ID, strings.TrimSpace(remainder), "hangup")
+		}
 	case "calls":
-		bot.executeSimpleCallAction(ctx, config, message.Chat.ID, message.From.ID, strings.TrimSpace(remainder), "status")
+		if strings.TrimSpace(remainder) == "" {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "calls")
+		} else {
+			bot.executeSimpleCallAction(ctx, config, message.Chat.ID, message.From.ID, strings.TrimSpace(remainder), "status")
+		}
 	case "at":
 		parts := splitTelegramArguments(remainder, 2)
+		if len(parts) == 0 {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "at")
+			return
+		}
+		if len(parts) == 1 {
+			bot.beginInput(ctx, config, message.Chat.ID, message.From.ID, parts[0], "at", "请直接发送一条 AT 指令，例如 AT+CSQ：")
+			return
+		}
 		if len(parts) != 2 {
 			bot.sendText(ctx, config, message.Chat.ID, "用法：/at <设备ID> <AT指令>\n示例：/at EC20 AT+CSQ", nil)
 			return
@@ -298,6 +374,14 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 		bot.handleATCommand(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1])
 	case "ussd":
 		parts := strings.Fields(remainder)
+		if len(parts) == 0 {
+			bot.sendDevicePicker(ctx, config, message.Chat.ID, message.From.ID, "ussd")
+			return
+		}
+		if len(parts) == 1 {
+			bot.beginInput(ctx, config, message.Chat.ID, message.From.ID, parts[0], "ussd", "请直接发送 USSD 代码，例如 *100#：")
+			return
+		}
 		if len(parts) != 2 {
 			bot.sendText(ctx, config, message.Chat.ID, "用法：/ussd <设备ID> <USSD代码>\n示例：/ussd EC20 *100#", nil)
 			return
@@ -318,18 +402,100 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 		}
 		bot.handleUSSDCancel(ctx, config, message.Chat.ID, message.From.ID, sessionID)
 	default:
-		bot.sendText(ctx, config, message.Chat.ID, "未知命令。发送 /help 查看可用操作。", nil)
+		bot.sendText(ctx, config, message.Chat.ID, "未知命令，请使用下方操作菜单。", bot.homeKeyboard())
 	}
 }
 
 func (bot *telegramBot) handleCallback(ctx context.Context, config telegramRuntimeConfig, callback *telegramCallbackQuery) {
 	data := strings.TrimSpace(callback.Data)
+	chatID, adminID := callback.Message.Chat.ID, callback.From.ID
+	if data == "menu:home" || data == "menu:devices" {
+		if data == "menu:home" {
+			bot.sendMainMenu(ctx, config, chatID)
+		} else {
+			bot.sendDevicePicker(ctx, config, chatID, adminID, "")
+		}
+		return
+	}
 	if data == "menu:status" {
-		bot.sendDeviceStatus(ctx, config, callback.Message.Chat.ID, "")
+		bot.sendDeviceStatus(ctx, config, chatID, "")
 		return
 	}
 	if data == "menu:help" {
-		bot.sendHelp(ctx, config, callback.Message.Chat.ID)
+		bot.sendHelp(ctx, config, chatID)
+		return
+	}
+	if data == "input:cancel" {
+		bot.clearInput(chatID, adminID)
+		bot.sendText(ctx, config, chatID, "已取消输入。", bot.homeKeyboard())
+		return
+	}
+	if strings.HasPrefix(data, "pick:") {
+		action, ok := bot.takePending(strings.TrimPrefix(data, "pick:"), chatID, adminID)
+		if !ok || action.Kind != "menu_pick" {
+			bot.sendExpiredMenu(ctx, config, chatID)
+			return
+		}
+		bot.dispatchDeviceChoice(ctx, config, chatID, adminID, action.DeviceID, action.Argument)
+		return
+	}
+	if prefix, token, operation, ok := parseTelegramMenuCallback(data); ok {
+		consume := prefix == "es" || prefix == "dur" || prefix == "uc"
+		var action telegramPendingAction
+		var found bool
+		if consume {
+			action, found = bot.takePending(token, chatID, adminID)
+		} else {
+			action, found = bot.getPending(token, chatID, adminID)
+		}
+		if !found {
+			bot.sendExpiredMenu(ctx, config, chatID)
+			return
+		}
+		switch prefix {
+		case "d":
+			if action.Kind != "menu_device" {
+				bot.sendExpiredMenu(ctx, config, chatID)
+				return
+			}
+			bot.dispatchDeviceChoice(ctx, config, chatID, adminID, action.DeviceID, operation)
+		case "w":
+			if action.Kind != "menu_device" {
+				bot.sendExpiredMenu(ctx, config, chatID)
+				return
+			}
+			bot.handleVoWiFi(ctx, config, chatID, adminID, action.DeviceID, operation)
+		case "call":
+			if action.Kind != "menu_device" {
+				bot.sendExpiredMenu(ctx, config, chatID)
+				return
+			}
+			bot.dispatchCallAction(ctx, config, chatID, adminID, action.DeviceID, operation)
+		case "es":
+			if action.Kind != "menu_esim_profile" {
+				bot.sendExpiredMenu(ctx, config, chatID)
+				return
+			}
+			bot.confirmESIMSwitch(ctx, config, chatID, adminID, action.DeviceID, action.TargetICCID)
+		case "dur":
+			if action.Kind != "menu_call_duration" {
+				bot.sendExpiredMenu(ctx, config, chatID)
+				return
+			}
+			seconds, err := strconv.Atoi(operation)
+			if err != nil || seconds < 1 || time.Duration(seconds)*time.Second > telegramMaxDialDuration {
+				bot.sendText(ctx, config, chatID, "自动挂断时间无效。", bot.homeKeyboard())
+				return
+			}
+			bot.confirmCall(ctx, config, chatID, adminID, action.DeviceID, action.Argument, time.Duration(seconds)*time.Second)
+		case "uc":
+			if action.Kind != "menu_ussd_session" {
+				bot.sendExpiredMenu(ctx, config, chatID)
+				return
+			}
+			bot.clearInput(chatID, adminID)
+			bot.handleUSSDCancel(ctx, config, chatID, adminID, action.Argument)
+		}
 		return
 	}
 	decision, token, found := strings.Cut(data, ":")
@@ -342,7 +508,7 @@ func (bot *telegramBot) handleCallback(ctx context.Context, config telegramRunti
 		return
 	}
 	if decision == "cancel" {
-		bot.sendText(ctx, config, callback.Message.Chat.ID, "操作已取消。", nil)
+		bot.sendText(ctx, config, callback.Message.Chat.ID, "操作已取消。", bot.homeKeyboard())
 		return
 	}
 	switch action.Kind {
@@ -360,9 +526,271 @@ func (bot *telegramBot) handleCallback(ctx context.Context, config telegramRunti
 	}
 }
 
+func parseTelegramMenuCallback(data string) (prefix, token, operation string, ok bool) {
+	parts := strings.SplitN(data, ":", 3)
+	if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
+		return "", "", "", false
+	}
+	switch parts[0] {
+	case "d", "w", "call", "es", "dur", "uc":
+		return parts[0], parts[1], parts[2], true
+	default:
+		return "", "", "", false
+	}
+}
+
+func telegramKeyboard(rows ...[]map[string]string) map[string]any {
+	return map[string]any{"inline_keyboard": rows}
+}
+
+func telegramButton(text, data string) map[string]string {
+	return map[string]string{"text": text, "callback_data": data}
+}
+
+func (bot *telegramBot) homeKeyboard() map[string]any {
+	return telegramKeyboard([]map[string]string{
+		telegramButton("📱 选择设备", "menu:devices"),
+		telegramButton("🏠 主菜单", "menu:home"),
+	})
+}
+
+func (bot *telegramBot) sendMainMenu(ctx context.Context, config telegramRuntimeConfig, chatID int64) {
+	bot.clearInput(chatID, config.AdminID)
+	bot.sendText(ctx, config, chatID,
+		"Vocat 控制中心\n\n请选择设备或直接查看全部设备状态。发送 /menu 可随时返回这里。",
+		telegramKeyboard(
+			[]map[string]string{telegramButton("📱 设备操作", "menu:devices")},
+			[]map[string]string{
+				telegramButton("📊 全部状态", "menu:status"),
+				telegramButton("❓ 帮助", "menu:help"),
+			},
+		),
+	)
+}
+
+func (bot *telegramBot) sendDevicePicker(
+	ctx context.Context,
+	config telegramRuntimeConfig,
+	chatID, adminID int64,
+	next string,
+) {
+	configs, err := bot.server.store.ListDevices(ctx)
+	if err != nil {
+		bot.sendText(ctx, config, chatID, "读取设备失败："+err.Error(), bot.homeKeyboard())
+		return
+	}
+	rows := make([][]map[string]string, 0, len(configs)+1)
+	for _, stored := range configs {
+		_, _, present := bot.server.physicalForConfig(stored)
+		icon := "⚫"
+		if present {
+			icon = "🟢"
+		}
+		token, tokenErr := bot.putPending(telegramPendingAction{
+			Kind: "menu_pick", DeviceID: stored.ID, Argument: next,
+			ChatID: chatID, AdminID: adminID, CreatedAt: time.Now(),
+		})
+		if tokenErr != nil {
+			continue
+		}
+		label := fmt.Sprintf("%s %s", icon, firstNonEmpty(stored.Name, stored.ID))
+		if stored.Name != "" && stored.Name != stored.ID {
+			label += " · " + stored.ID
+		}
+		rows = append(rows, []map[string]string{telegramButton(truncateTelegramButton(label), "pick:"+token)})
+	}
+	rows = append(rows, []map[string]string{telegramButton("🏠 主菜单", "menu:home")})
+	if len(configs) == 0 {
+		bot.sendText(ctx, config, chatID, "当前没有已配置设备。", telegramKeyboard(rows...))
+		return
+	}
+	title := "请选择要操作的设备"
+	if next != "" {
+		title += "："
+	}
+	bot.sendText(ctx, config, chatID, title, telegramKeyboard(rows...))
+}
+
+func truncateTelegramButton(value string) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) <= 48 {
+		return value
+	}
+	return string(runes[:47]) + "…"
+}
+
+func (bot *telegramBot) sendDeviceMenu(
+	ctx context.Context,
+	config telegramRuntimeConfig,
+	chatID, adminID int64,
+	deviceID string,
+) {
+	stored, err := bot.server.store.Device(ctx, deviceID)
+	if err != nil {
+		bot.sendText(ctx, config, chatID, "读取设备失败："+err.Error(), bot.homeKeyboard())
+		return
+	}
+	_, _, present := bot.server.physicalForConfig(stored)
+	token, err := bot.putPending(telegramPendingAction{
+		Kind: "menu_device", DeviceID: deviceID, ChatID: chatID, AdminID: adminID, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		bot.sendText(ctx, config, chatID, "创建设备菜单失败："+err.Error(), bot.homeKeyboard())
+		return
+	}
+	status := "⚫ 离线"
+	if present {
+		status = "🟢 在线"
+	}
+	bot.sendText(ctx, config, chatID,
+		fmt.Sprintf("📡 %s\n设备 ID：%s\n状态：%s\n\n请选择功能：", firstNonEmpty(stored.Name, deviceID), deviceID, status),
+		telegramKeyboard(
+			[]map[string]string{
+				telegramButton("📊 状态", "d:"+token+":status"),
+				telegramButton("📲 eSIM", "d:"+token+":esim"),
+			},
+			[]map[string]string{
+				telegramButton("📶 VoWiFi", "d:"+token+":wfc"),
+				telegramButton("✉️ 发送短信", "d:"+token+":sms"),
+			},
+			[]map[string]string{
+				telegramButton("📞 通话", "d:"+token+":call"),
+				telegramButton("🛠 AT / USSD", "d:"+token+":tools"),
+			},
+			[]map[string]string{
+				telegramButton("⬅️ 设备列表", "menu:devices"),
+				telegramButton("🏠 主菜单", "menu:home"),
+			},
+		),
+	)
+}
+
+func (bot *telegramBot) dispatchDeviceChoice(
+	ctx context.Context,
+	config telegramRuntimeConfig,
+	chatID, adminID int64,
+	deviceID, operation string,
+) {
+	switch operation {
+	case "":
+		bot.sendDeviceMenu(ctx, config, chatID, adminID, deviceID)
+	case "status":
+		bot.sendDeviceStatus(ctx, config, chatID, deviceID)
+	case "esim":
+		bot.sendESIMProfiles(ctx, config, chatID, adminID, deviceID)
+	case "wfc":
+		bot.sendVoWiFiMenu(ctx, config, chatID, adminID, deviceID)
+	case "sms":
+		bot.beginInput(ctx, config, chatID, adminID, deviceID, "sms_phone", "请输入收件人号码：")
+	case "call":
+		bot.sendCallMenu(ctx, config, chatID, adminID, deviceID)
+	case "tools":
+		bot.sendToolsMenu(ctx, config, chatID, adminID, deviceID)
+	case "at":
+		bot.beginInput(ctx, config, chatID, adminID, deviceID, "at", "请直接发送一条 AT 指令，例如 AT+CSQ：")
+	case "ussd":
+		bot.beginInput(ctx, config, chatID, adminID, deviceID, "ussd", "请直接发送 USSD 代码，例如 *100#：")
+	case "answer", "hangup", "calls":
+		action := map[string]string{"answer": "answer", "hangup": "hangup", "calls": "status"}[operation]
+		bot.executeSimpleCallAction(ctx, config, chatID, adminID, deviceID, action)
+	default:
+		bot.sendDeviceMenu(ctx, config, chatID, adminID, deviceID)
+	}
+}
+
+func (bot *telegramBot) sendVoWiFiMenu(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID string) {
+	stored, _, _, err := bot.device(deviceID)
+	if err != nil {
+		bot.sendText(ctx, config, chatID, "VoWiFi 不可用："+err.Error(), bot.homeKeyboard())
+		return
+	}
+	if bot.server.vowifi == nil {
+		bot.sendText(ctx, config, chatID, "VoWiFi runtime 不可用。", bot.homeKeyboard())
+		return
+	}
+	state, stateErr := bot.server.vowifi.State(deviceID)
+	if stateErr != nil {
+		bot.sendText(ctx, config, chatID, "读取 VoWiFi 状态失败："+stateErr.Error(), bot.homeKeyboard())
+		return
+	}
+	token, err := bot.putPending(telegramPendingAction{Kind: "menu_device", DeviceID: deviceID, ChatID: chatID, AdminID: adminID, CreatedAt: time.Now()})
+	if err != nil {
+		return
+	}
+	bot.sendText(ctx, config, chatID,
+		fmt.Sprintf("📶 %s · VoWiFi\n策略：%s\n阶段：%s\nTunnel：%t · IMS：%t · SMS：%t", deviceID, map[bool]string{true: "已启用", false: "已关闭"}[stored.VoWiFiEnabled], firstNonEmpty(string(state.Phase), "idle"), state.TunnelReady, state.IMSReady, state.SMSReady),
+		telegramKeyboard(
+			[]map[string]string{
+				telegramButton("✅ 开启", "w:"+token+":on"),
+				telegramButton("⛔ 关闭", "w:"+token+":off"),
+			},
+			[]map[string]string{
+				telegramButton("🔄 重新连接", "w:"+token+":reconnect"),
+				telegramButton("📊 刷新状态", "w:"+token+":status"),
+			},
+			[]map[string]string{telegramButton("⬅️ 设备功能", "d:"+token+":menu")},
+		),
+	)
+}
+
+func (bot *telegramBot) sendCallMenu(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID string) {
+	if _, _, _, err := bot.device(deviceID); err != nil {
+		bot.sendText(ctx, config, chatID, "通话功能不可用："+err.Error(), bot.homeKeyboard())
+		return
+	}
+	token, err := bot.putPending(telegramPendingAction{Kind: "menu_device", DeviceID: deviceID, ChatID: chatID, AdminID: adminID, CreatedAt: time.Now()})
+	if err != nil {
+		return
+	}
+	bot.sendText(ctx, config, chatID, "📞 "+deviceID+" · 通话\n请选择操作：",
+		telegramKeyboard(
+			[]map[string]string{telegramButton("📱 拨打电话", "call:"+token+":dial")},
+			[]map[string]string{
+				telegramButton("✅ 接听", "call:"+token+":answer"),
+				telegramButton("🔴 挂断", "call:"+token+":hangup"),
+			},
+			[]map[string]string{telegramButton("📋 当前通话", "call:"+token+":status")},
+			[]map[string]string{telegramButton("⬅️ 设备功能", "d:"+token+":menu")},
+		),
+	)
+}
+
+func (bot *telegramBot) dispatchCallAction(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID, operation string) {
+	switch operation {
+	case "dial":
+		bot.beginInput(ctx, config, chatID, adminID, deviceID, "call_number", "请输入要拨打的电话号码：")
+	case "answer", "hangup", "status":
+		bot.executeSimpleCallAction(ctx, config, chatID, adminID, deviceID, operation)
+	default:
+		bot.sendCallMenu(ctx, config, chatID, adminID, deviceID)
+	}
+}
+
+func (bot *telegramBot) sendToolsMenu(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID string) {
+	token, err := bot.putPending(telegramPendingAction{Kind: "menu_device", DeviceID: deviceID, ChatID: chatID, AdminID: adminID, CreatedAt: time.Now()})
+	if err != nil {
+		return
+	}
+	bot.sendText(ctx, config, chatID, "🛠 "+deviceID+" · 调试与运营商指令\n请选择输入类型：",
+		telegramKeyboard(
+			[]map[string]string{
+				telegramButton("⌨️ AT 指令", "d:"+token+":at"),
+				telegramButton("📟 USSD", "d:"+token+":ussd"),
+			},
+			[]map[string]string{telegramButton("⬅️ 设备功能", "d:"+token+":menu")},
+		),
+	)
+}
+
+func (bot *telegramBot) sendExpiredMenu(ctx context.Context, config telegramRuntimeConfig, chatID int64) {
+	bot.sendText(ctx, config, chatID, "该菜单已过期，请重新选择。", bot.homeKeyboard())
+}
+
 func (bot *telegramBot) sendHelp(ctx context.Context, config telegramRuntimeConfig, chatID int64) {
 	text := strings.Join([]string{
-		"vocat Telegram 控制", "",
+		"Vocat Telegram 控制", "",
+		"推荐直接发送 /menu，使用按钮完成设备和功能选择。以下命令仅用于兼容和高级操作：", "",
 		"/status [设备ID] — 查看设备、SIM、蜂窝与 VoWiFi 状态",
 		"/esim <设备ID> — 只读查看已安装 Profile",
 		"/switch <设备ID> <ICCID> — 切换到已安装 Profile（需确认）",
@@ -379,10 +807,10 @@ func (bot *telegramBot) sendHelp(ctx context.Context, config telegramRuntimeConf
 		"",
 		"Bot 不提供 eSIM 下载、删除或改名，也不采集或转发通话音频。控制命令只接受设置中的 Admin ID。",
 	}, "\n")
-	keyboard := map[string]any{"inline_keyboard": [][]map[string]string{{
-		{"text": "📊 设备状态", "callback_data": "menu:status"},
-		{"text": "❓ 帮助", "callback_data": "menu:help"},
-	}}}
+	keyboard := telegramKeyboard(
+		[]map[string]string{telegramButton("📱 使用操作菜单", "menu:devices")},
+		[]map[string]string{telegramButton("🏠 主菜单", "menu:home")},
+	)
 	bot.sendText(ctx, config, chatID, text, keyboard)
 }
 
@@ -399,29 +827,47 @@ func (bot *telegramBot) sendDeviceStatus(ctx context.Context, config telegramRun
 		}
 		entry, _, present := bot.server.physicalForConfig(stored)
 		lines := []string{fmt.Sprintf("📡 %s (%s)", firstNonEmpty(stored.Name, stored.ID), stored.ID)}
+		var wfcState *vowifi.State
+		if bot.server.vowifi != nil {
+			if state, stateErr := bot.server.vowifi.State(stored.ID); stateErr == nil {
+				wfcState = &state
+			}
+		}
 		if !present {
 			lines = append(lines, "设备：离线")
 		} else {
-			lines = append(lines, "设备：在线")
+			lines = append(lines, "设备：在线 · "+strings.ToUpper(firstNonEmpty(stored.DeviceBackend, "AT")))
 			if snapshot := entry.Snapshot; snapshot != nil {
+				associationNumber := ""
+				if snapshot.ICCID != "" {
+					if association, associationErr := bot.server.store.PhoneAssociation(ctx, snapshot.ICCID); associationErr == nil {
+						associationNumber = association.Number
+					}
+				}
 				lines = append(lines,
 					"SIM："+map[bool]string{true: "Ready", false: firstNonEmpty(snapshot.SIMStatus, "未就绪")}[snapshot.SIMReady],
+					"IMEI："+firstNonEmpty(snapshot.IMEI, stored.ModemIMEI, "--"),
 					"ICCID："+firstNonEmpty(snapshot.ICCID, "--"),
 					"IMSI："+firstNonEmpty(snapshot.IMSI, "--"),
-					"号码："+firstNonEmpty(snapshot.Phone.Number, "--"),
-					"运营商："+firstNonEmpty(snapshot.OperatorName, snapshot.OperatorCode, "--"),
+					"号码："+resolveTelegramPhoneNumber(associationNumber, wfcState, snapshot),
+					"原运营商："+telegramHomeCarrier(snapshot.IMSI, snapshot.SPN),
+					"当前网络："+telegramCurrentNetwork(snapshot),
 					"蜂窝模式："+map[bool]string{true: "飞行模式", false: "开启"}[snapshot.FlightMode],
 				)
+				if module := telegramModuleLine(snapshot); module != "" {
+					lines = append(lines, module)
+				}
+				if signal := telegramSignalLine(snapshot); signal != "" {
+					lines = append(lines, signal)
+				}
 			}
 		}
-		if bot.server.vowifi != nil {
-			if state, stateErr := bot.server.vowifi.State(stored.ID); stateErr == nil {
-				lines = append(lines,
-					fmt.Sprintf("VoWiFi：%s · Tunnel=%t IMS=%t SMS=%t", firstNonEmpty(string(state.Phase), "idle"), state.TunnelReady, state.IMSReady, state.SMSReady),
-				)
-				if state.LastError != "" {
-					lines = append(lines, "最后错误："+state.LastError)
-				}
+		if wfcState != nil {
+			lines = append(lines,
+				fmt.Sprintf("VoWiFi：%s · Tunnel=%t IMS=%t SMS=%t", firstNonEmpty(string(wfcState.Phase), "idle"), wfcState.TunnelReady, wfcState.IMSReady, wfcState.SMSReady),
+			)
+			if wfcState.LastError != "" {
+				lines = append(lines, "最后错误："+wfcState.LastError)
 			}
 		}
 		blocks = append(blocks, strings.Join(lines, "\n"))
@@ -430,10 +876,168 @@ func (bot *telegramBot) sendDeviceStatus(ctx context.Context, config telegramRun
 		bot.sendText(ctx, config, chatID, "未找到设备 "+onlyID, nil)
 		return
 	}
-	bot.sendText(ctx, config, chatID, strings.Join(blocks, "\n\n"), nil)
+	bot.sendText(ctx, config, chatID, strings.Join(blocks, "\n\n"), bot.homeKeyboard())
 }
 
-func (bot *telegramBot) sendESIMProfiles(ctx context.Context, config telegramRuntimeConfig, chatID int64, deviceID string) {
+func resolveTelegramPhoneNumber(associationNumber string, state *vowifi.State, snapshot *device.Snapshot) string {
+	if usableTelegramPhoneNumber(associationNumber) {
+		return strings.TrimSpace(associationNumber)
+	}
+	currentICCID := ""
+	if snapshot != nil {
+		currentICCID = strings.TrimSpace(snapshot.ICCID)
+	}
+	if state != nil && usableTelegramPhoneNumber(state.PhoneNumber) {
+		stateICCID := strings.TrimSpace(state.ICCID)
+		if currentICCID == "" || (stateICCID != "" && strings.EqualFold(currentICCID, stateICCID)) {
+			return strings.TrimSpace(state.PhoneNumber)
+		}
+	}
+	if snapshot != nil && usableTelegramPhoneNumber(snapshot.Phone.Number) {
+		return strings.TrimSpace(snapshot.Phone.Number)
+	}
+	return "--"
+}
+
+func usableTelegramPhoneNumber(value string) bool {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "+") {
+		value = value[1:]
+	}
+	var digits []byte
+	for index := 0; index < len(value); index++ {
+		switch character := value[index]; {
+		case character >= '0' && character <= '9':
+			digits = append(digits, character)
+		case character == ' ' || character == '-' || character == '(' || character == ')':
+			continue
+		default:
+			return false
+		}
+	}
+	if len(digits) < 5 || len(digits) > 20 {
+		return false
+	}
+	allSame := true
+	for _, digit := range digits[1:] {
+		if digit != digits[0] {
+			allSame = false
+			break
+		}
+	}
+	return !allSame
+}
+
+func telegramHomeCarrier(imsi string, spn ...string) string {
+	plmn, name, country, ok := device.CarrierForIMSI(imsi)
+	if !ok {
+		if len(spn) > 0 && strings.TrimSpace(spn[0]) != "" {
+			return strings.TrimSpace(spn[0])
+		}
+		return "--"
+	}
+	if len(spn) > 0 && strings.TrimSpace(spn[0]) != "" {
+		brand := strings.TrimSpace(spn[0])
+		brandCountry := country
+		if strings.Contains(strings.ToLower(brand), "lebara") && strings.HasPrefix(strings.TrimSpace(imsi), "20404") {
+			brandCountry = "GB"
+		}
+		return strings.TrimSpace(strings.Join([]string{telegramCountryFlag(brandCountry), brand, "（认证核心 " + plmn + "）"}, " "))
+	}
+	return strings.TrimSpace(strings.Join([]string{telegramCountryFlag(country), name, "(" + plmn + ")"}, " "))
+}
+
+func telegramCurrentNetwork(snapshot *device.Snapshot) string {
+	if snapshot == nil {
+		return "--"
+	}
+	if snapshot.FlightMode || snapshot.RadioOff {
+		return "--（飞行模式）"
+	}
+	operatorName := strings.TrimSpace(snapshot.OperatorName)
+	country := ""
+	if databaseName, databaseCountry, ok := device.CarrierForPLMN(snapshot.OperatorCode); ok {
+		if operatorName == "" {
+			operatorName = databaseName
+		}
+		country = databaseCountry
+	}
+	operator := firstNonEmpty(operatorName, strings.TrimSpace(snapshot.OperatorCode), "--")
+	if flag := telegramCountryFlag(country); flag != "" && operator != "--" {
+		operator = flag + " " + operator
+	}
+	parts := []string{operator, telegramRegistrationText(snapshot.RegistrationStatus)}
+	if radio := strings.TrimSpace(strings.Join([]string{snapshot.AccessTech, snapshot.Band}, " ")); radio != "" {
+		parts = append(parts, radio)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func telegramRegistrationText(status int) string {
+	switch status {
+	case 1:
+		return "已驻网"
+	case 5:
+		return "已驻网（漫游）"
+	case 2:
+		return "搜索中"
+	case 3:
+		return "驻网被拒绝"
+	default:
+		return "未驻网"
+	}
+}
+
+func telegramCountryFlag(country string) string {
+	country = strings.ToUpper(strings.TrimSpace(country))
+	if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+		return ""
+	}
+	return string([]rune{
+		rune(0x1F1E6) + rune(country[0]-'A'),
+		rune(0x1F1E6) + rune(country[1]-'A'),
+	})
+}
+
+func telegramModuleLine(snapshot *device.Snapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	description := strings.TrimSpace(strings.Join([]string{snapshot.Manufacturer, snapshot.Model}, " "))
+	if description == "" && strings.TrimSpace(snapshot.Firmware) == "" {
+		return ""
+	}
+	parts := []string{firstNonEmpty(description, "--")}
+	if strings.TrimSpace(snapshot.Firmware) != "" {
+		parts = append(parts, snapshot.Firmware)
+	}
+	return "模块：" + strings.Join(parts, " · ")
+}
+
+func telegramSignalLine(snapshot *device.Snapshot) string {
+	if snapshot == nil || snapshot.FlightMode || snapshot.RadioOff {
+		return ""
+	}
+	metrics := make([]string, 0, 4)
+	if snapshot.RSSIDBm != nil {
+		metrics = append(metrics, fmt.Sprintf("%d dBm", *snapshot.RSSIDBm))
+	}
+	if snapshot.RSRP != nil {
+		metrics = append(metrics, fmt.Sprintf("RSRP %d", *snapshot.RSRP))
+	}
+	if snapshot.RSRQ != nil {
+		metrics = append(metrics, fmt.Sprintf("RSRQ %d", *snapshot.RSRQ))
+	}
+	if snapshot.SINR != nil {
+		metrics = append(metrics, fmt.Sprintf("SINR %d", *snapshot.SINR))
+	}
+	if len(metrics) == 0 {
+		return ""
+	}
+	return "信号：" + strings.Join(metrics, " · ")
+}
+
+func (bot *telegramBot) sendESIMProfiles(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID string) {
 	if deviceID == "" {
 		bot.sendText(ctx, config, chatID, "用法：/esim <设备ID>", nil)
 		return
@@ -455,6 +1059,7 @@ func (bot *telegramBot) sendESIMProfiles(ctx context.Context, config telegramRun
 		return
 	}
 	lines := []string{"📲 " + deviceID + " 已安装 Profile（只读）"}
+	rows := make([][]map[string]string, 0)
 	for index, group := range inventory {
 		lines = append(lines, fmt.Sprintf("\neUICC #%d · …%s", index+1, tailDigits(group.Info.EID, 4)))
 		for _, profile := range group.Info.Profiles {
@@ -464,10 +1069,23 @@ func (bot *telegramBot) sendESIMProfiles(ctx context.Context, config telegramRun
 			}
 			name := firstNonEmpty(profile.Nickname, profile.Name, profile.ServiceProvider, "未命名")
 			lines = append(lines, fmt.Sprintf("• %s · %s\n  %s", name, state, profile.ICCID))
+			if profile.State != 1 {
+				token, tokenErr := bot.putPending(telegramPendingAction{
+					Kind: "menu_esim_profile", DeviceID: deviceID, TargetICCID: profile.ICCID,
+					TargetAID: group.Info.AID, ChatID: chatID, AdminID: adminID, CreatedAt: time.Now(),
+				})
+				if tokenErr == nil {
+					label := "切换到 " + name + " · …" + tailDigits(profile.ICCID, 4)
+					rows = append(rows, []map[string]string{telegramButton(truncateTelegramButton(label), "es:"+token+":select")})
+				}
+			}
 		}
 	}
-	lines = append(lines, "\n切换：/switch "+deviceID+" <目标ICCID>")
-	bot.sendText(ctx, config, chatID, strings.Join(lines, "\n"), nil)
+	rows = append(rows, []map[string]string{
+		telegramButton("⬅️ 设备列表", "menu:devices"),
+		telegramButton("🏠 主菜单", "menu:home"),
+	})
+	bot.sendText(ctx, config, chatID, strings.Join(lines, "\n"), telegramKeyboard(rows...))
 }
 
 func (bot *telegramBot) confirmESIMSwitch(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID, iccid string) {
@@ -572,6 +1190,120 @@ func (bot *telegramBot) askConfirmation(ctx context.Context, config telegramRunt
 	bot.sendText(ctx, config, action.ChatID, text, keyboard)
 }
 
+func telegramInputKey(chatID, adminID int64) string {
+	return strconv.FormatInt(chatID, 10) + ":" + strconv.FormatInt(adminID, 10)
+}
+
+func (bot *telegramBot) beginInput(
+	ctx context.Context,
+	config telegramRuntimeConfig,
+	chatID, adminID int64,
+	deviceID, kind, prompt string,
+) {
+	if _, _, _, err := bot.device(deviceID); err != nil {
+		bot.sendText(ctx, config, chatID, "设备不可用："+err.Error(), bot.homeKeyboard())
+		return
+	}
+	bot.setInput(telegramInputState{
+		Kind: kind, DeviceID: deviceID, ChatID: chatID, AdminID: adminID, CreatedAt: time.Now(),
+	})
+	bot.sendText(ctx, config, chatID, prompt+"\n\n设备："+deviceID,
+		telegramKeyboard([]map[string]string{telegramButton("❌ 取消", "input:cancel")}))
+}
+
+func (bot *telegramBot) setInput(state telegramInputState) {
+	bot.inputMu.Lock()
+	defer bot.inputMu.Unlock()
+	if bot.inputs == nil {
+		bot.inputs = make(map[string]telegramInputState)
+	}
+	state.CreatedAt = time.Now()
+	bot.inputs[telegramInputKey(state.ChatID, state.AdminID)] = state
+}
+
+func (bot *telegramBot) clearInput(chatID, adminID int64) {
+	bot.inputMu.Lock()
+	defer bot.inputMu.Unlock()
+	delete(bot.inputs, telegramInputKey(chatID, adminID))
+}
+
+func (bot *telegramBot) input(chatID, adminID int64) (telegramInputState, bool) {
+	bot.inputMu.Lock()
+	defer bot.inputMu.Unlock()
+	state, ok := bot.inputs[telegramInputKey(chatID, adminID)]
+	if ok && time.Since(state.CreatedAt) > telegramInputTTL {
+		delete(bot.inputs, telegramInputKey(chatID, adminID))
+		return telegramInputState{}, false
+	}
+	return state, ok
+}
+
+func (bot *telegramBot) handleInputMessage(ctx context.Context, config telegramRuntimeConfig, message *telegramMessage) {
+	state, ok := bot.input(message.Chat.ID, message.From.ID)
+	if !ok {
+		bot.sendMainMenu(ctx, config, message.Chat.ID)
+		return
+	}
+	value := strings.TrimSpace(message.Text)
+	if value == "" {
+		return
+	}
+	switch state.Kind {
+	case "sms_phone":
+		if blocked, reason := blockedSMSDestination(value); blocked {
+			bot.sendText(ctx, config, message.Chat.ID, "号码不可用："+reason+"\n请重新输入号码。", telegramKeyboard([]map[string]string{telegramButton("❌ 取消", "input:cancel")}))
+			return
+		}
+		state.Kind = "sms_text"
+		state.Argument = value
+		bot.setInput(state)
+		bot.sendText(ctx, config, message.Chat.ID, "请输入短信内容：\n\n收件人："+value,
+			telegramKeyboard([]map[string]string{telegramButton("❌ 取消", "input:cancel")}))
+	case "sms_text":
+		bot.clearInput(message.Chat.ID, message.From.ID)
+		bot.confirmSMS(ctx, config, message.Chat.ID, message.From.ID, state.DeviceID, state.Argument, value)
+	case "call_number":
+		if !validTelegramDialNumber(value) {
+			bot.sendText(ctx, config, message.Chat.ID, "号码无效，请输入 3–20 位数字，可带前导 +。",
+				telegramKeyboard([]map[string]string{telegramButton("❌ 取消", "input:cancel")}))
+			return
+		}
+		bot.clearInput(message.Chat.ID, message.From.ID)
+		token, err := bot.putPending(telegramPendingAction{
+			Kind: "menu_call_duration", DeviceID: state.DeviceID, Argument: value,
+			ChatID: message.Chat.ID, AdminID: message.From.ID, CreatedAt: time.Now(),
+		})
+		if err != nil {
+			bot.sendText(ctx, config, message.Chat.ID, "创建拨号操作失败："+err.Error(), bot.homeKeyboard())
+			return
+		}
+		bot.sendText(ctx, config, message.Chat.ID, "请选择自动挂断时间：\n\n号码："+value,
+			telegramKeyboard(
+				[]map[string]string{
+					telegramButton("10 秒", "dur:"+token+":10"),
+					telegramButton("30 秒", "dur:"+token+":30"),
+				},
+				[]map[string]string{
+					telegramButton("60 秒", "dur:"+token+":60"),
+					telegramButton("120 秒", "dur:"+token+":120"),
+				},
+				[]map[string]string{telegramButton("❌ 取消", "input:cancel")},
+			))
+	case "at":
+		bot.clearInput(message.Chat.ID, message.From.ID)
+		bot.handleATCommand(ctx, config, message.Chat.ID, message.From.ID, state.DeviceID, value)
+	case "ussd":
+		bot.clearInput(message.Chat.ID, message.From.ID)
+		bot.handleUSSDCommand(ctx, config, message.Chat.ID, message.From.ID, state.DeviceID, value)
+	case "ussd_reply":
+		bot.clearInput(message.Chat.ID, message.From.ID)
+		bot.handleUSSDReply(ctx, config, message.Chat.ID, message.From.ID, state.Argument, value)
+	default:
+		bot.clearInput(message.Chat.ID, message.From.ID)
+		bot.sendMainMenu(ctx, config, message.Chat.ID)
+	}
+}
+
 func (bot *telegramBot) putPending(action telegramPendingAction) (string, error) {
 	raw := make([]byte, 8)
 	if _, err := cryptorand.Read(raw); err != nil {
@@ -581,13 +1313,36 @@ func (bot *telegramBot) putPending(action telegramPendingAction) (string, error)
 	bot.pendingMu.Lock()
 	defer bot.pendingMu.Unlock()
 	now := time.Now()
+	if bot.pending == nil {
+		bot.pending = make(map[string]telegramPendingAction)
+	}
 	for key, value := range bot.pending {
-		if now.Sub(value.CreatedAt) > telegramConfirmationTTL {
+		if now.Sub(value.CreatedAt) > telegramPendingLifetime(value.Kind) {
 			delete(bot.pending, key)
 		}
 	}
 	bot.pending[token] = action
 	return token, nil
+}
+
+func telegramPendingLifetime(kind string) time.Duration {
+	if strings.HasPrefix(kind, "menu_") {
+		return telegramMenuTTL
+	}
+	return telegramConfirmationTTL
+}
+
+func (bot *telegramBot) getPending(token string, chatID, adminID int64) (telegramPendingAction, bool) {
+	bot.pendingMu.Lock()
+	defer bot.pendingMu.Unlock()
+	action, ok := bot.pending[token]
+	if !ok || action.ChatID != chatID || action.AdminID != adminID || time.Since(action.CreatedAt) > telegramPendingLifetime(action.Kind) {
+		if ok {
+			delete(bot.pending, token)
+		}
+		return telegramPendingAction{}, false
+	}
+	return action, true
 }
 
 func (bot *telegramBot) takePending(token string, chatID, adminID int64) (telegramPendingAction, bool) {
@@ -597,7 +1352,7 @@ func (bot *telegramBot) takePending(token string, chatID, adminID int64) (telegr
 	if ok {
 		delete(bot.pending, token)
 	}
-	if !ok || action.ChatID != chatID || action.AdminID != adminID || time.Since(action.CreatedAt) > telegramConfirmationTTL {
+	if !ok || action.ChatID != chatID || action.AdminID != adminID || time.Since(action.CreatedAt) > telegramPendingLifetime(action.Kind) {
 		return telegramPendingAction{}, false
 	}
 	return action, true
@@ -697,9 +1452,9 @@ func (bot *telegramBot) executeSimpleCallAction(ctx context.Context, config tele
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
-		bot.sendText(ctx, config, chatID, "通话操作失败："+err.Error(), nil)
+		bot.sendText(ctx, config, chatID, "通话操作失败："+err.Error(), bot.homeKeyboard())
 	} else {
-		bot.sendText(ctx, config, chatID, result, nil)
+		bot.sendText(ctx, config, chatID, result, bot.homeKeyboard())
 	}
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", adminID), "telegram.call."+action, "device", deviceID, outcome, firstNonEmpty(transport, "unknown"))
 }
@@ -1224,9 +1979,9 @@ func (bot *telegramBot) handleATCommand(ctx context.Context, config telegramRunt
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
-		bot.sendText(ctx, config, chatID, "AT 指令执行失败："+err.Error(), nil)
+		bot.sendText(ctx, config, chatID, "AT 指令执行失败："+err.Error(), bot.homeKeyboard())
 	} else {
-		bot.sendText(ctx, config, chatID, result, nil)
+		bot.sendText(ctx, config, chatID, result, bot.homeKeyboard())
 	}
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", adminID), "telegram.at.execute", "device", deviceID, outcome, "telegram")
 }
@@ -1254,9 +2009,9 @@ func (bot *telegramBot) handleUSSDCommand(ctx context.Context, config telegramRu
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
-		bot.sendText(ctx, config, chatID, "USSD 指令执行失败："+err.Error(), nil)
+		bot.sendText(ctx, config, chatID, "USSD 指令执行失败："+err.Error(), bot.homeKeyboard())
 	} else {
-		bot.sendText(ctx, config, chatID, formatTelegramUSSD(deviceID, result), nil)
+		bot.sendUSSDResult(ctx, config, chatID, adminID, deviceID, result)
 	}
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", adminID), "telegram.ussd.start", "device", deviceID, outcome, "telegram")
 }
@@ -1278,9 +2033,9 @@ func (bot *telegramBot) handleUSSDReply(ctx context.Context, config telegramRunt
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
-		bot.sendText(ctx, config, chatID, "USSD 回复失败："+err.Error(), nil)
+		bot.sendText(ctx, config, chatID, "USSD 回复失败："+err.Error(), bot.homeKeyboard())
 	} else {
-		bot.sendText(ctx, config, chatID, formatTelegramUSSD("", result), nil)
+		bot.sendUSSDResult(ctx, config, chatID, adminID, "", result)
 	}
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", adminID), "telegram.ussd.reply", "ussd_session", "interactive", outcome, "telegram")
 }
@@ -1292,11 +2047,43 @@ func (bot *telegramBot) handleUSSDCancel(ctx context.Context, config telegramRun
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
-		bot.sendText(ctx, config, chatID, "取消 USSD 会话失败："+err.Error(), nil)
+		bot.sendText(ctx, config, chatID, "取消 USSD 会话失败："+err.Error(), bot.homeKeyboard())
 	} else {
-		bot.sendText(ctx, config, chatID, "USSD 会话已取消。", nil)
+		bot.sendText(ctx, config, chatID, "USSD 会话已取消。", bot.homeKeyboard())
 	}
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", adminID), "telegram.ussd.cancel", "ussd_session", "interactive", outcome, "telegram")
+}
+
+func (bot *telegramBot) sendUSSDResult(
+	ctx context.Context,
+	config telegramRuntimeConfig,
+	chatID, adminID int64,
+	deviceID string,
+	result device.USSDResult,
+) {
+	if !result.Continueable || strings.TrimSpace(result.SessionID) == "" {
+		bot.clearInput(chatID, adminID)
+		bot.sendText(ctx, config, chatID, formatTelegramUSSD(deviceID, result), bot.homeKeyboard())
+		return
+	}
+	sessionID := strings.TrimSpace(result.SessionID)
+	bot.setInput(telegramInputState{
+		Kind: "ussd_reply", DeviceID: deviceID, Argument: sessionID,
+		ChatID: chatID, AdminID: adminID, CreatedAt: time.Now(),
+	})
+	token, err := bot.putPending(telegramPendingAction{
+		Kind: "menu_ussd_session", Argument: sessionID,
+		ChatID: chatID, AdminID: adminID, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		bot.sendText(ctx, config, chatID, formatTelegramUSSD(deviceID, result), bot.homeKeyboard())
+		return
+	}
+	bot.sendText(ctx, config, chatID, formatTelegramUSSD(deviceID, result),
+		telegramKeyboard(
+			[]map[string]string{telegramButton("❌ 取消 USSD 会话", "uc:"+token+":cancel")},
+			[]map[string]string{telegramButton("🏠 主菜单", "menu:home")},
+		))
 }
 
 func formatTelegramUSSD(deviceID string, result device.USSDResult) string {
@@ -1318,21 +2105,20 @@ func formatTelegramUSSD(deviceID string, result device.USSDResult) string {
 	if result.Continueable && strings.TrimSpace(result.SessionID) != "" {
 		lines = append(lines,
 			"\n网络正在等待输入。",
-			"回复：/ussd_reply "+result.SessionID+" <内容>",
-			"取消：/ussd_cancel "+result.SessionID,
+			"请直接发送回复内容，或点击下方按钮取消会话。",
 		)
 	}
 	return strings.Join(lines, "\n")
 }
 
 func (bot *telegramBot) handleVoWiFi(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID, operation string) {
-	stored, entry, _, err := bot.device(deviceID)
+	stored, entry, physicalID, err := bot.device(deviceID)
 	if err != nil {
-		bot.sendText(ctx, config, chatID, "VoWiFi 操作失败："+err.Error(), nil)
+		bot.sendText(ctx, config, chatID, "VoWiFi 操作失败："+err.Error(), bot.homeKeyboard())
 		return
 	}
 	if bot.server.vowifi == nil {
-		bot.sendText(ctx, config, chatID, "VoWiFi runtime 不可用。", nil)
+		bot.sendText(ctx, config, chatID, "VoWiFi runtime 不可用。", bot.homeKeyboard())
 		return
 	}
 	operation = strings.ToLower(strings.TrimSpace(operation))
@@ -1349,6 +2135,10 @@ func (bot *telegramBot) handleVoWiFi(ctx context.Context, config telegramRuntime
 	switch operation {
 	case "on", "off":
 		enabled := operation == "on"
+		if enabled && stored.NetworkEnabled {
+			bot.sendText(ctx, config, chatID, "VoWiFi 操作失败：请先关闭漫游数据。", bot.homeKeyboard())
+			return
+		}
 		if enabled && entry.Snapshot != nil {
 			if reason := device.RegionBlockReason(entry.Snapshot.IMSI); reason != "" {
 				bot.sendText(ctx, config, chatID, "VoWiFi 操作被拒绝："+reason, nil)
@@ -1356,6 +2146,36 @@ func (bot *telegramBot) handleVoWiFi(ctx context.Context, config telegramRuntime
 			}
 		}
 		previous := stored.VoWiFiEnabled
+		// Telegram follows the same fail-closed transaction as the web API:
+		// RF is disabled before either starting or stopping VoWiFi. Stopping it
+		// never implicitly permits cellular registration.
+		if _, err = bot.server.devices.SetFlight(ctx, physicalID, true); err != nil {
+			bot.sendText(ctx, config, chatID, "VoWiFi 操作失败：无法进入飞行模式："+err.Error(), bot.homeKeyboard())
+			return
+		}
+		iccid := ""
+		if entry.Snapshot != nil {
+			iccid = strings.TrimSpace(entry.Snapshot.ICCID)
+		}
+		if iccid != "" {
+			policy, policyErr := bot.server.store.CardPolicy(ctx, iccid)
+			if errors.Is(policyErr, store.ErrNotFound) {
+				policy = store.CardPolicy{ICCID: iccid, IPVersion: "IPV4V6"}
+				policyErr = nil
+			}
+			if policyErr != nil {
+				bot.sendText(ctx, config, chatID, "VoWiFi 操作失败："+policyErr.Error(), bot.homeKeyboard())
+				return
+			}
+			policy.VoWiFiEnabled = enabled
+			policy.AirplaneEnabled = true
+			policy.NetworkEnabled = false
+			policy.Source = "manual"
+			if err = bot.server.store.UpsertCardPolicy(ctx, policy); err != nil {
+				bot.sendText(ctx, config, chatID, "VoWiFi 操作失败："+err.Error(), bot.homeKeyboard())
+				return
+			}
+		}
 		stored.VoWiFiEnabled = enabled
 		if err = bot.server.store.UpsertDevice(ctx, stored); err == nil {
 			state, err = bot.server.vowifi.RequestEnabled(deviceID, enabled)
@@ -1363,6 +2183,14 @@ func (bot *telegramBot) handleVoWiFi(ctx context.Context, config telegramRuntime
 		if err != nil {
 			stored.VoWiFiEnabled = previous
 			_ = bot.server.store.UpsertDevice(ctx, stored)
+			if iccid != "" {
+				if policy, policyErr := bot.server.store.CardPolicy(ctx, iccid); policyErr == nil {
+					policy.VoWiFiEnabled = previous
+					policy.AirplaneEnabled = true
+					policy.NetworkEnabled = false
+					_ = bot.server.store.UpsertCardPolicy(ctx, policy)
+				}
+			}
 			if errors.Is(err, vowifiruntime.ErrOperationInProgress) && state.Enabled == enabled {
 				err = nil
 			}
@@ -1380,9 +2208,9 @@ func (bot *telegramBot) handleVoWiFi(ctx context.Context, config telegramRuntime
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
-		bot.sendText(ctx, config, chatID, "VoWiFi 操作失败："+err.Error(), nil)
+		bot.sendText(ctx, config, chatID, "VoWiFi 操作失败："+err.Error(), bot.homeKeyboard())
 	} else {
-		bot.sendText(ctx, config, chatID, "VoWiFi 操作已受理。\n"+formatTelegramVoWiFiState(state), nil)
+		bot.sendText(ctx, config, chatID, "VoWiFi 操作已受理。\n"+formatTelegramVoWiFiState(state), bot.homeKeyboard())
 	}
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", adminID), "telegram.vowifi."+operation, "device", deviceID, outcome, "telegram")
 }
@@ -1391,9 +2219,9 @@ func (bot *telegramBot) finishAction(ctx context.Context, config telegramRuntime
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
-		bot.sendText(ctx, config, action.ChatID, "操作失败："+err.Error(), nil)
+		bot.sendText(ctx, config, action.ChatID, "操作失败："+err.Error(), bot.homeKeyboard())
 	} else {
-		bot.sendText(ctx, config, action.ChatID, "✅ "+result, nil)
+		bot.sendText(ctx, config, action.ChatID, "✅ "+result, bot.homeKeyboard())
 	}
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", action.AdminID), auditAction, "device", action.DeviceID, outcome, "telegram")
 }

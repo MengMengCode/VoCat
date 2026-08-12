@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AddRegular } from "@fluentui/react-icons";
 import { api, ApiError, apiMessage } from "../api";
-import type { DeviceListItem, DeviceProxyBinding, DevicesResponse, UpstreamProxy } from "../types";
+import type { DeviceListItem, DeviceProxyBinding, DevicesResponse, ProfileProxyCandidate, UpstreamProxy } from "../types";
 import { usePolling } from "../lib/usePolling";
-import { PageHeader, confirmDialog, message } from "../components/ui";
+import { Button, PageHeader, confirmDialog, message } from "../components/ui";
 import {
   emptyUpstreamForm,
   ipv6AddrError,
@@ -37,7 +38,7 @@ export default function ProxyPage() {
   const [upstreamProbe, setUpstreamProbe] = useState<UpstreamProbeResult | null>(null);
   const [bindingsDialogOpen, setBindingsDialogOpen] = useState(false);
   const [bindingsProxy, setBindingsProxy] = useState<UpstreamProxy | null>(null);
-  const [busyDevice, setBusyDevice] = useState("");
+  const [bindingBusy, setBindingBusy] = useState(false);
   const [plugins, setPlugins] = useState<InstalledPlugin[]>([]);
 
   const proxyRows = useMemo<UpstreamRow[]>(
@@ -54,7 +55,7 @@ export default function ProxyPage() {
     try {
       const [proxyList, bindingList, deviceList] = await Promise.all([
         api<UpstreamProxy[]>("/upstream-proxies"),
-        api<DeviceProxyBinding[]>("/upstream-proxy-device-bindings"),
+        api<DeviceProxyBinding[]>("/upstream-proxy-profile-bindings"),
         api<DevicesResponse>("/devices"),
       ]);
       setProxies(proxyList || []);
@@ -163,7 +164,7 @@ export default function ProxyPage() {
       <>
         {tf("确定删除上游代理“{name}”？", { name: proxy.name || proxy.id })}
         <br />
-        {t("绑定到该代理的设备将自动解绑并恢复直连。")}
+        {t("绑定到该代理的 Profile 将自动解绑并恢复直连。")}
       </>,
       t("确认删除"),
       { confirmText: t("删除"), cancelText: t("取消"), type: "warning" },
@@ -194,52 +195,60 @@ export default function ProxyPage() {
     }
   }, [t]);
 
-  const bindDevice = useCallback(async (deviceId: string) => {
-    if (!bindingsProxy) return;
-    setBusyDevice(deviceId);
+  const addProfileBindings = useCallback(async (profiles: ProfileProxyCandidate[]) => {
+    if (!bindingsProxy || profiles.length === 0) return;
+    setBindingBusy(true);
     try {
-      const result = await api<BindingMutationResult>(`/upstream-proxy-device-bindings/${encodeURIComponent(deviceId)}`, {
-        method: "PUT",
-        body: { upstreamProxyId: bindingsProxy.id },
+      const result = await api<BindingMutationResult>("/upstream-proxy-profile-bindings", {
+        method: "POST",
+        body: {
+          upstreamProxyId: bindingsProxy.id,
+          bindings: profiles.map(({ deviceId, iccid, profileName }) => ({ deviceId, iccid, profileName })),
+        },
       });
-      showRouteChangeResult(result, t("设备已绑定"));
+      showRouteChangeResult(result, t("Profile 已绑定"));
       await loadUpstream(false);
     } catch (error) {
       const code = error instanceof ApiError ? error.code : "";
-      if (code === "device_already_bound") {
-        message.error(t("该设备已绑定其他代理，请先解绑后再切换"));
+      if (code === "profile_already_bound") {
+        message.error(t("所选 ICCID 已绑定其他代理，请先删除原绑定"));
       } else {
         message.error(apiMessage(error) || t("绑定失败"));
       }
     } finally {
-      setBusyDevice("");
+      setBindingBusy(false);
     }
   }, [bindingsProxy, loadUpstream, showRouteChangeResult, t]);
 
-  const unbindDevice = useCallback(async (deviceId: string) => {
-    setBusyDevice(deviceId);
+  const deleteProfileBindings = useCallback(async (iccids: string[]) => {
+    if (!bindingsProxy || iccids.length === 0) return;
+    setBindingBusy(true);
     try {
-      const result = await api<BindingMutationResult>(`/upstream-proxy-device-bindings/${encodeURIComponent(deviceId)}`, {
+      const result = await api<BindingMutationResult>("/upstream-proxy-profile-bindings", {
         method: "DELETE",
+        body: { upstreamProxyId: bindingsProxy.id, iccids },
       });
-      showRouteChangeResult(result, t("设备已解绑并恢复直连"));
+      showRouteChangeResult(result, t("所选 Profile 绑定已删除"));
       await loadUpstream(false);
     } catch (error) {
-      message.error(apiMessage(error) || t("解绑失败"));
+      message.error(apiMessage(error) || t("删除绑定失败"));
     } finally {
-      setBusyDevice("");
+      setBindingBusy(false);
     }
-  }, [loadUpstream, showRouteChangeResult, t]);
+  }, [bindingsProxy, loadUpstream, showRouteChangeResult, t]);
 
   return (
     <div className="mx-auto max-w-7xl">
-      <PageHeader title={t("代理管理")} subtitle={t("管理 VoWiFi 上游代理和设备绑定")} />
+      <PageHeader
+        title={t("代理管理")}
+        subtitle={t("管理 VoWiFi 上游代理和 eSIM Profile 绑定")}
+        actions={<Button variant="primary" icon={<AddRegular />} onClick={() => openUpstreamDialog()}>{t("新增代理")}</Button>}
+      />
       <UpstreamSection
         rows={proxyRows}
         loading={upstreamLoading}
         error={upstreamError}
         onRetry={() => loadUpstream(false)}
-        onNew={() => openUpstreamDialog()}
         onEdit={openUpstreamDialog}
         onDelete={removeUpstream}
         onOpenBindings={openBindingsDialog}
@@ -279,9 +288,9 @@ export default function ProxyPage() {
         proxies={proxies}
         devices={devices}
         bindings={bindings}
-        busyDevice={busyDevice}
-        onBind={(deviceId) => void bindDevice(deviceId)}
-        onUnbind={(deviceId) => void unbindDevice(deviceId)}
+        busy={bindingBusy}
+        onAdd={(profiles) => void addProfileBindings(profiles)}
+        onDelete={(iccids) => void deleteProfileBindings(iccids)}
         onClose={() => setBindingsDialogOpen(false)}
       />
     </div>

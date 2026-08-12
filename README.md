@@ -414,6 +414,16 @@ cd web && npm run build
 - [Linux.do](https://linux.do) — An inspiring tech community
 - [iniwex5](https://github.com/iniwex5) - Style and Functionality Guidelines
 
+## Buy me a coffee
+
+| Network | Address |
+| ------- | ------- |
+| USDT-TRON (TRC20) | `TQQAbboBoU8h5xX4YCA1rqWJU2WjK3seSg` |
+| USDT-BSC (BEP20) | `0xdbfcd4a462550d6ff06d09cbd89026c6b145d9c4` |
+| USDT-Polygon | `0xdbfcd4a462550d6ff06d09cbd89026c6b145d9c4` |
+
 ## License
 
 See [LICENSE](LICENSE).
+
+[![MengMengCode/VoCat Star History](https://mengmeng.meteor-history.com/api/embed/MengMengCode/VoCat.svg?sig=sdeXRVxAoY3yLWgXL7JViY2USYIN3t9neJ6ScPvgUAo&theme=light&style=xkcd&color=dd4528&background=ffffff&textColor=000000&width=900&height=600&lineWidth=3&showTitle=true&showLegend=true&showDots=false&v=0.0.14)](https://meteor-history.com)

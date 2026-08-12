@@ -59,6 +59,17 @@ export function isRegistered(device?: { modem?: { regStatus?: number } } | null)
   return s === 1 || s === 5;
 }
 
+// The stored device flag is the desired policy, while runtime.enabled is the
+// live owner of RF/IKE/IMS. A stale desired flag must not replace a healthy
+// cellular overview with an all-red "disabled" VoWiFi pipeline.
+export function isVoWiFiInUse(device?: {
+  vowifiEnabled?: boolean;
+  vowifiRuntime?: { enabled?: boolean };
+} | null): boolean {
+  if (!device?.vowifiEnabled) return false;
+  return device.vowifiRuntime?.enabled !== false;
+}
+
 export interface StatusMeta {
   label: string;
   tag: "success" | "warning" | "danger";
@@ -248,7 +259,15 @@ export function simOperatorDisplay(device?: DeviceDetail | null): string {
   const spn = String(modem?.nativeSpn ?? "").trim();
   const name = oplPnnName(modem) || firstPnnName(modem?.pnn);
   const plmn = plmnOf(modem);
-  if (spn) return withPlmn(spn, plmn);
+  // EF_SPN is the SIM's customer-facing brand. Do not append the currently
+  // visited PLMN: a roaming Lebara UK SIM on a Chinese network would otherwise
+  // be mislabeled as "Lebara (460xx)". Append the home/authentication PLMN
+  // resolved from IMSI instead, so GigSky on 222-01 renders as
+  // "GigSky (22201)" even while roaming.
+  if (spn) {
+    const home = lookupCarrier(modem?.imsi);
+    return withPlmn(spn, home ? home.mcc + home.mnc : cardPlmnOf(modem));
+  }
   if (name) return withPlmn(name, plmn);
   // Home ("original") carrier resolved from the SIM's IMSI via the MCC/MNC table.
   // Readable even when the modem isn't camped (VoWiFi RF-off / flight mode).

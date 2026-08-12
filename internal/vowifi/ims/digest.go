@@ -24,13 +24,13 @@ type digestChallenge struct {
 }
 
 type digestCredentials struct {
-	Username string
-	Password []byte
-	AUTS     string
-	URI      string
-	Method   string
-	CNonce   string
-	NC       uint32
+	Username    string
+	AKAResponse []byte
+	AUTS        string
+	URI         string
+	Method      string
+	CNonce      string
+	NC          uint32
 }
 
 func parseDigestChallenge(value string, proxy bool) (digestChallenge, error) {
@@ -146,7 +146,7 @@ func parseAuthDirectives(value string) (map[string]string, error) {
 }
 
 type akaMaterial struct {
-	password []byte
+	response []byte
 	auts     []byte
 	ck       []byte
 	ik       []byte
@@ -156,7 +156,7 @@ func clearAKAMaterial(material *akaMaterial) {
 	if material == nil {
 		return
 	}
-	zeroBytes(material.password)
+	zeroBytes(material.response)
 	zeroBytes(material.auts)
 	zeroBytes(material.ck)
 	zeroBytes(material.ik)
@@ -193,7 +193,7 @@ func authenticateAKA(
 		return akaMaterial{}, err
 	}
 	return akaMaterial{
-		password: res,
+		response: res,
 		ck:       append([]byte(nil), result.CK...),
 		ik:       append([]byte(nil), result.IK...),
 	}, nil
@@ -231,7 +231,7 @@ func extractRES(result vowifi.AKAResult) ([]byte, error) {
 
 func newDigestCredentials(
 	username string,
-	password []byte,
+	akaResponse []byte,
 	uri string,
 	method string,
 	nc uint32,
@@ -241,12 +241,12 @@ func newDigestCredentials(
 		return digestCredentials{}, fmt.Errorf("ims: create digest cnonce: %w", err)
 	}
 	return digestCredentials{
-		Username: username,
-		Password: password,
-		URI:      uri,
-		Method:   method,
-		CNonce:   hex.EncodeToString(cnonceBytes),
-		NC:       nc,
+		Username:    username,
+		AKAResponse: akaResponse,
+		URI:         uri,
+		Method:      method,
+		CNonce:      hex.EncodeToString(cnonceBytes),
+		NC:          nc,
 	}, nil
 }
 
@@ -255,7 +255,7 @@ func buildDigestAuthorization(challenge digestChallenge, credentials digestCrede
 	response := digestResponse(
 		credentials.Username,
 		challenge.Realm,
-		credentials.Password,
+		credentials.AKAResponse,
 		credentials.Method,
 		credentials.URI,
 		challenge.Nonce,
@@ -290,7 +290,7 @@ func buildDigestAuthorization(challenge digestChallenge, credentials digestCrede
 func digestResponse(
 	username string,
 	realm string,
-	password []byte,
+	akaResponse []byte,
 	method string,
 	uri string,
 	nonce string,
@@ -300,7 +300,9 @@ func digestResponse(
 ) string {
 	ha1Hash := md5.New()
 	_, _ = ha1Hash.Write([]byte(username + ":" + realm + ":"))
-	_, _ = ha1Hash.Write(password)
+	// AKAv1-MD5 is mandated by the IMS server challenge (3GPP TS 33.203).
+	// akaResponse is the short-lived USIM RES value, not a stored password.
+	_, _ = ha1Hash.Write(akaResponse)
 	ha1 := hex.EncodeToString(ha1Hash.Sum(nil))
 	ha2 := md5Hex(method + ":" + uri)
 	if qop == "" {

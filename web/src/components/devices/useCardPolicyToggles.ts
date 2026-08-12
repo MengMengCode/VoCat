@@ -13,10 +13,13 @@ export interface PolicyToggleImpl {
 
 type Field = "vowifi" | "airplane";
 
-// mutual-exclusion merge: vowifi on clears airplane; airplane on clears vowifi.
+// RF-safe merge: VoWiFi always implies airplane mode. Turning VoWiFi off keeps
+// airplane mode on; only the separate airplane switch can explicitly restore RF.
 function mergePolicy(current: PolicyFlags, field: Field, value: boolean): PolicyFlags {
   if (field === "vowifi") {
-    return value ? { vowifiEnabled: true, airplaneEnabled: false } : { ...current, vowifiEnabled: false };
+    return value
+      ? { vowifiEnabled: true, airplaneEnabled: true }
+      : { vowifiEnabled: false, airplaneEnabled: true };
   }
   return value ? { vowifiEnabled: false, airplaneEnabled: true } : { ...current, airplaneEnabled: false };
 }

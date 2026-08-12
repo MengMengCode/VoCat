@@ -504,7 +504,7 @@ func dialSIP(
 
 type authenticationState struct {
 	challenge digestChallenge
-	password  []byte
+	response  []byte
 	auts      string
 	cnonce    string
 	nc        uint32
@@ -740,13 +740,13 @@ func (session *Session) register(ctx context.Context, expires int) (*sipResponse
 		if session.auth != nil {
 			session.auth.nc++
 			credentials := digestCredentials{
-				Username: session.identity.private,
-				Password: session.auth.password,
-				AUTS:     session.auth.auts,
-				URI:      "sip:" + session.identity.domain,
-				Method:   "REGISTER",
-				CNonce:   session.auth.cnonce,
-				NC:       session.auth.nc,
+				Username:    session.identity.private,
+				AKAResponse: session.auth.response,
+				AUTS:        session.auth.auts,
+				URI:         "sip:" + session.identity.domain,
+				Method:      "REGISTER",
+				CNonce:      session.auth.cnonce,
+				NC:          session.auth.nc,
 			}
 			authorization = buildDigestAuthorization(session.auth.challenge, credentials)
 			if session.auth.challenge.Proxy {
@@ -793,7 +793,7 @@ func (session *Session) register(ctx context.Context, expires int) (*sipResponse
 		}
 		credentials, err := newDigestCredentials(
 			session.identity.private,
-			material.password,
+			material.response,
 			"sip:"+session.identity.domain,
 			"REGISTER",
 			1,
@@ -805,7 +805,7 @@ func (session *Session) register(ctx context.Context, expires int) (*sipResponse
 		auts := base64.StdEncoding.EncodeToString(material.auts)
 		session.auth = &authenticationState{
 			challenge: challenge,
-			password:  append([]byte(nil), material.password...),
+			response:  append([]byte(nil), material.response...),
 			auts:      auts,
 			cnonce:    credentials.CNonce,
 		}
@@ -1130,8 +1130,8 @@ func (session *Session) clearAuthentication() {
 	if session.auth == nil {
 		return
 	}
-	for index := range session.auth.password {
-		session.auth.password[index] = 0
+	for index := range session.auth.response {
+		session.auth.response[index] = 0
 	}
 	session.auth = nil
 }

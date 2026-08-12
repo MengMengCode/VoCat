@@ -1,4 +1,5 @@
 import { cx } from "../../lib/utils";
+import { CountryFlag } from "../CountryFlag";
 import { EsimProfileRow } from "./EsimProfileRow";
 import type { EsimChipInfo, EsimEid, EsimProfileGroup } from "./types";
 import { useI18n } from "../../lib/i18n";
@@ -35,11 +36,12 @@ function normAid(aid?: string): string {
   return (aid || "").trim().toUpperCase();
 }
 
-function manufacturerFlag(manufacturer?: string): string {
+function manufacturerCountryCode(manufacturer?: string): string {
   const value = (manufacturer || "").toLowerCase();
-  if (value.includes("eastcompeace") || value.includes("watchdata")) return "🇨🇳";
-  if (value.includes("giesecke") || value.includes("g+d")) return "🇩🇪";
-  if (value.includes("thales") || value.includes("idemia")) return "🇫🇷";
+  if (value.includes("eastcompeace") || value.includes("watchdata") || value.includes("hutopt")) return "CN";
+  if (value.includes("giesecke") || value.includes("g+d")) return "DE";
+  if (value.includes("thales") || value.includes("idemia")) return "FR";
+  if (value.includes("gemalto")) return "CH";
   return "";
 }
 
@@ -56,7 +58,9 @@ function PkiInfo({ eid }: { eid: EsimEid }) {
     <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-400 dark:text-gray-500">
       {eid.manufacturer ? (
         <span className="inline-flex items-center gap-1">
-          <span className="text-[10px]">{t("生产商:")}</span> {eid.manufacturer} {manufacturerFlag(eid.manufacturer)}
+          <span className="text-[10px]">{t("生产商:")}</span>
+          <span>{eid.manufacturer}</span>
+          <CountryFlag countryCode={manufacturerCountryCode(eid.manufacturer)} />
         </span>
       ) : null}
       {eid.certificates && eid.certificates.length ? (

@@ -250,12 +250,27 @@ func (adapter *EC20Adapter) readHomePLMN(
 	}
 	// Exact assigned HPLMN prefixes are data, not an MNC-length heuristic. The
 	// target Vodafone UK SIM is 234/15. Unknown assignments remain fail-closed.
-	for prefix, mncLength := range map[string]int{"23415": 2} {
-		if strings.HasPrefix(imsi, prefix) {
-			return imsi[:3], imsi[3 : 3+mncLength], nil
-		}
+	if mcc, mnc, ok := assignedHomePLMN(imsi); ok {
+		return mcc, mnc, nil
 	}
 	return "", "", efErr
+}
+
+func assignedHomePLMN(imsi string) (mcc, mnc string, ok bool) {
+	assignments := []struct {
+		prefix    string
+		mncLength int
+	}{
+		{prefix: "20404", mncLength: 2}, // Vodafone NL core; some Lebara subscriptions.
+		{prefix: "23415", mncLength: 2}, // Vodafone UK.
+		{prefix: "23487", mncLength: 2}, // Lebara Mobile UK.
+	}
+	for _, assignment := range assignments {
+		if strings.HasPrefix(imsi, assignment.prefix) {
+			return imsi[:3], imsi[3 : 3+assignment.mncLength], true
+		}
+	}
+	return "", "", false
 }
 
 func validConfiguredHomePLMN(imsi, mcc, mnc string) bool {
@@ -711,15 +726,22 @@ func (adapter *EC20Adapter) Restore(
 	if snapshot.OperatingMode < 0 {
 		return errors.New("vocat: invalid EC20 radio snapshot")
 	}
+	targetMode := snapshot.OperatingMode
+	if snapshot.PureAirplanePolicy {
+		// VoWiFi teardown is intentionally fail-closed. Even if the modem was in
+		// CFUN=1 before setup, disabling VoWiFi must leave RF off until the user
+		// explicitly turns airplane mode off through the separate control.
+		targetMode = 4
+	}
 	currentMode, err := adapter.readOperatingMode(ctx, deviceID)
 	if err != nil {
 		return err
 	}
-	if currentMode != snapshot.OperatingMode {
+	if currentMode != targetMode {
 		if _, err := adapter.execute(
 			ctx,
 			deviceID,
-			fmt.Sprintf("AT+CFUN=%d", snapshot.OperatingMode),
+			fmt.Sprintf("AT+CFUN=%d", targetMode),
 		); err != nil {
 			return fmt.Errorf("restore EC20 operating mode: %w", err)
 		}
@@ -728,11 +750,11 @@ func (adapter *EC20Adapter) Restore(
 	if err != nil {
 		return err
 	}
-	if currentMode != snapshot.OperatingMode {
+	if currentMode != targetMode {
 		return fmt.Errorf(
 			"vocat: EC20 restore reported CFUN=%d, expected %d",
 			currentMode,
-			snapshot.OperatingMode,
+			targetMode,
 		)
 	}
 
@@ -750,7 +772,7 @@ func (adapter *EC20Adapter) Restore(
 		return errors.New("vocat: EC20 snapshot has active data in RF-off mode")
 	}
 	desiredCIDs := checkpoint.activeCIDs
-	if !adapter.options.RestoreCellularData {
+	if !adapter.options.RestoreCellularData || targetMode == 0 || targetMode == 4 {
 		desiredCIDs = nil
 	}
 	if err := adapter.reconcileActiveCIDs(

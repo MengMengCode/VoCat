@@ -86,6 +86,7 @@ type Server struct {
 	publicIPs           map[string]cachedPublicIP
 	smsMEMu             sync.Mutex
 	smsMEProvenance     map[string]smsMEProvenance
+	automaticTasks      *automaticTaskScheduler
 }
 
 func New(options Options) (*Server, error) {

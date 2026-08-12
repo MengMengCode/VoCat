@@ -63,33 +63,57 @@ func (mapper ATMapper) resolve(
 	if mapper.Store == nil || mapper.Devices == nil {
 		return "", errors.New("vowifi AT mapper is not configured")
 	}
-	if entry, err := mapper.Devices.Get(configuredID); err == nil && entry.Discovered {
-		return entry.ID, nil
-	}
 	config, err := mapper.Store.Device(ctx, configuredID)
 	if err != nil {
 		return "", err
 	}
+	// Score every physical candidate before choosing one. Returning the first
+	// partial match made two EC20s on the same hub vulnerable to iteration order:
+	// a stale USB path on one configured row could win before the other
+	// candidate's AT port, QMI node, or live IMEI was considered. The result was
+	// two logical devices issuing APDUs to the same SIM.
+	bestID := ""
+	bestScore := 0
 	for _, entry := range mapper.Devices.List() {
 		if !entry.Discovered {
 			continue
 		}
-		candidate := entry.Candidate
-		switch {
-		case config.ATPort != "" &&
-			(config.ATPort == candidate.ATPort.Path ||
-				config.ATPort == candidate.ATPort.OpenPath()):
-			return entry.ID, nil
-		case config.USBPath != "" && config.USBPath == candidate.USBPath:
-			return entry.ID, nil
-		case config.ControlDevice != "" &&
-			(config.ControlDevice == candidate.QMIControl ||
-				config.ControlDevice == candidate.ATPort.OpenPath()):
-			return entry.ID, nil
-		case config.ModemIMEI != "" && entry.Snapshot != nil &&
-			config.ModemIMEI == strings.TrimSpace(entry.Snapshot.IMEI):
-			return entry.ID, nil
+		score := physicalMatchScore(configuredID, config, entry)
+		if score > bestScore {
+			bestID = entry.ID
+			bestScore = score
 		}
 	}
+	if bestID != "" {
+		return bestID, nil
+	}
 	return "", device.ErrNotFound
+}
+
+func physicalMatchScore(configuredID string, config store.Device, entry device.Device) int {
+	candidate := entry.Candidate
+	score := 0
+	// A live modem identity is the strongest evidence and must override stale
+	// Linux node names or a USB topology saved before devices were rearranged.
+	if config.ModemIMEI != "" && entry.Snapshot != nil &&
+		strings.EqualFold(strings.TrimSpace(config.ModemIMEI), strings.TrimSpace(entry.Snapshot.IMEI)) {
+		score += 10000
+	}
+	if config.ATPort != "" &&
+		(config.ATPort == candidate.ATPort.Path || config.ATPort == candidate.ATPort.OpenPath()) {
+		score += 300
+	}
+	if config.ControlDevice != "" &&
+		(config.ControlDevice == candidate.QMIControl || config.ControlDevice == candidate.ATPort.OpenPath()) {
+		score += 300
+	}
+	if config.USBPath != "" && config.USBPath == candidate.USBPath {
+		score += 100
+	}
+	// Discovery IDs are not persistent user IDs. Treat an exact text match only
+	// as a weak hint so it cannot override physical identity evidence.
+	if entry.ID == configuredID {
+		score += 25
+	}
+	return score
 }

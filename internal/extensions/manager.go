@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -26,9 +27,14 @@ import (
 	"time"
 
 	"vocat/internal/exportproxy"
+	"vocat/internal/netguard"
 )
 
 const maxPackageBytes int64 = 64 << 20
+
+// This syntactic guard gives the request boundary an explicit allowlist. The
+// resolved addresses are still checked again by netguard before dialing.
+var publicHTTPSURLPattern = regexp.MustCompile(`^https://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?(?:[/?#][^\r\n]*)?$`)
 
 type Plugin struct {
 	Manifest
@@ -73,7 +79,7 @@ func NewManager(root string, logger *slog.Logger) (*Manager, error) {
 	}
 	manager := &Manager{
 		root: root, logger: logger, plugins: make(map[string]*Plugin),
-		client: &http.Client{Timeout: 45 * time.Second},
+		client: netguard.NewPublicHTTPClient(45*time.Second, true),
 	}
 	if err := manager.scan(); err != nil {
 		return nil, err
@@ -155,9 +161,13 @@ func (manager *Manager) List() []Plugin {
 }
 
 func (manager *Manager) InstallURL(ctx context.Context, rawURL, expectedSHA string) (Plugin, error) {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-		return Plugin{}, errors.New("plugin URL must be an absolute HTTP or HTTPS URL")
+	rawURL = strings.TrimSpace(rawURL)
+	if !publicHTTPSURLPattern.MatchString(rawURL) {
+		return Plugin{}, errors.New("plugin URL must be a public absolute HTTPS URL")
+	}
+	parsed, err := netguard.ValidatePublicURL(ctx, rawURL, true)
+	if err != nil {
+		return Plugin{}, fmt.Errorf("plugin URL must be a public absolute HTTPS URL: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
@@ -353,12 +363,13 @@ func (manager *Manager) ServeAsset(w http.ResponseWriter, r *http.Request, id, n
 		http.NotFound(w, r)
 		return
 	}
-	filename := filepath.Join(plugin.dir, filepath.FromSlash(name))
-	if !strings.HasPrefix(filepath.Clean(filename), filepath.Clean(plugin.dir)+string(os.PathSeparator)) {
+	root, err := os.OpenRoot(plugin.dir)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	file, err := os.Open(filename)
+	defer root.Close()
+	file, err := root.Open(filepath.FromSlash(name))
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -369,7 +380,7 @@ func (manager *Manager) ServeAsset(w http.ResponseWriter, r *http.Request, id, n
 		http.NotFound(w, r)
 		return
 	}
-	contentType := mime.TypeByExtension(filepath.Ext(filename))
+	contentType := mime.TypeByExtension(filepath.Ext(name))
 	if contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}

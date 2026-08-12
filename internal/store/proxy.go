@@ -358,9 +358,11 @@ func upstreamProxy(row rowScanner) (UpstreamProxy, error) {
 
 func (s *Store) UpsertDeviceProxyBinding(ctx context.Context, value DeviceProxyBinding) error {
 	value.DeviceID = strings.TrimSpace(value.DeviceID)
+	value.ICCID = strings.TrimSpace(value.ICCID)
+	value.ProfileName = strings.TrimSpace(value.ProfileName)
 	value.UpstreamProxyID = strings.TrimSpace(value.UpstreamProxyID)
-	if value.DeviceID == "" || value.UpstreamProxyID == "" {
-		return errors.New("device proxy binding requires device and upstream proxy IDs")
+	if value.DeviceID == "" || value.ICCID == "" || value.UpstreamProxyID == "" {
+		return errors.New("profile proxy binding requires device ID, ICCID, and upstream proxy ID")
 	}
 	now := time.Now().UTC()
 	createdAt := value.CreatedAt
@@ -373,28 +375,30 @@ func (s *Store) UpsertDeviceProxyBinding(ctx context.Context, value DeviceProxyB
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO device_proxy_bindings (
-			device_id, upstream_proxy_id, created_at, updated_at
-		) VALUES (?, ?, ?, ?)
-		ON CONFLICT(device_id) DO UPDATE SET
+			iccid, device_id, profile_name, upstream_proxy_id, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(iccid) DO UPDATE SET
+			device_id = excluded.device_id,
+			profile_name = excluded.profile_name,
 			upstream_proxy_id = excluded.upstream_proxy_id,
 			updated_at = excluded.updated_at
-	`, value.DeviceID, value.UpstreamProxyID, createdAt.Unix(), updatedAt.Unix())
+	`, value.ICCID, value.DeviceID, value.ProfileName, value.UpstreamProxyID, createdAt.Unix(), updatedAt.Unix())
 	if err != nil {
-		return fmt.Errorf("upsert proxy binding for device %q: %w", value.DeviceID, err)
+		return fmt.Errorf("upsert proxy binding for ICCID %q: %w", value.ICCID, err)
 	}
 	return nil
 }
 
-func (s *Store) DeviceProxyBinding(ctx context.Context, deviceID string) (DeviceProxyBinding, error) {
+func (s *Store) DeviceProxyBinding(ctx context.Context, iccid string) (DeviceProxyBinding, error) {
 	return deviceProxyBinding(s.db.QueryRowContext(
 		ctx,
-		deviceProxyBindingSelect+` WHERE device_id = ?`,
-		strings.TrimSpace(deviceID),
+		deviceProxyBindingSelect+` WHERE iccid = ?`,
+		strings.TrimSpace(iccid),
 	))
 }
 
 func (s *Store) ListDeviceProxyBindings(ctx context.Context) ([]DeviceProxyBinding, error) {
-	rows, err := s.db.QueryContext(ctx, deviceProxyBindingSelect+` ORDER BY device_id`)
+	rows, err := s.db.QueryContext(ctx, deviceProxyBindingSelect+` ORDER BY device_id, profile_name COLLATE NOCASE, iccid`)
 	if err != nil {
 		return nil, fmt.Errorf("list device proxy bindings: %w", err)
 	}
@@ -413,26 +417,26 @@ func (s *Store) ListDeviceProxyBindings(ctx context.Context) ([]DeviceProxyBindi
 	return values, nil
 }
 
-func (s *Store) DeleteDeviceProxyBinding(ctx context.Context, deviceID string) error {
+func (s *Store) DeleteDeviceProxyBinding(ctx context.Context, iccid string) error {
 	result, err := s.db.ExecContext(
 		ctx,
-		`DELETE FROM device_proxy_bindings WHERE device_id = ?`,
-		strings.TrimSpace(deviceID),
+		`DELETE FROM device_proxy_bindings WHERE iccid = ?`,
+		strings.TrimSpace(iccid),
 	)
 	if err != nil {
-		return fmt.Errorf("delete proxy binding for device %q: %w", deviceID, err)
+		return fmt.Errorf("delete proxy binding for ICCID %q: %w", iccid, err)
 	}
 	return requireAffected(result)
 }
 
 const deviceProxyBindingSelect = `
-	SELECT device_id, upstream_proxy_id, created_at, updated_at
+	SELECT device_id, iccid, profile_name, upstream_proxy_id, created_at, updated_at
 	FROM device_proxy_bindings`
 
 func deviceProxyBinding(row rowScanner) (DeviceProxyBinding, error) {
 	var value DeviceProxyBinding
 	var createdAt, updatedAt int64
-	err := row.Scan(&value.DeviceID, &value.UpstreamProxyID, &createdAt, &updatedAt)
+	err := row.Scan(&value.DeviceID, &value.ICCID, &value.ProfileName, &value.UpstreamProxyID, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeviceProxyBinding{}, ErrNotFound
 	}

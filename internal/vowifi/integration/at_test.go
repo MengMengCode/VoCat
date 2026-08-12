@@ -87,3 +87,88 @@ func TestATMapperResolvesConfiguredIDByStableATPath(t *testing.T) {
 		t.Fatalf("ExecuteSensitiveAT physical ID = %q", devices.sensitiveID)
 	}
 }
+
+func TestATMapperScoresAllCandidatesBeforeUsingStaleUSBPath(t *testing.T) {
+	database := testStore(t)
+	if err := database.UpsertDevice(context.Background(), store.Device{
+		ID:            "ec20_1",
+		Name:          "EC20 1",
+		ATPort:        "/dev/ttyUSB2",
+		ControlDevice: "/dev/cdc-wdm0",
+		// Simulate metadata left from a formerly swapped hub mapping.
+		USBPath:   "/sys/bus/usb/devices/1-6",
+		ModemIMEI: "111111111111111",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	devices := &fakeATDevices{entries: []device.Device{
+		{
+			ID:         "quectel-0125-1-6",
+			Discovered: true,
+			Candidate: modem.Candidate{
+				USBPath:    "/sys/bus/usb/devices/1-6",
+				QMIControl: "/dev/cdc-wdm1",
+				ATPort:     modem.Port{Path: "/dev/ttyUSB6"},
+			},
+		},
+		{
+			ID:         "quectel-0306-1-5",
+			Discovered: true,
+			Candidate: modem.Candidate{
+				USBPath:    "/sys/bus/usb/devices/1-5",
+				QMIControl: "/dev/cdc-wdm0",
+				ATPort:     modem.Port{Path: "/dev/ttyUSB2"},
+			},
+		},
+	}}
+	mapper := ATMapper{Store: database, Devices: devices}
+	if _, err := mapper.ExecuteAT(context.Background(), "ec20_1", "AT+CIMI"); err != nil {
+		t.Fatal(err)
+	}
+	if devices.executedID != "quectel-0306-1-5" {
+		t.Fatalf("ExecuteAT physical ID = %q, want coherent AT/QMI candidate", devices.executedID)
+	}
+}
+
+func TestATMapperPrefersLiveIMEIOverAllStalePaths(t *testing.T) {
+	database := testStore(t)
+	if err := database.UpsertDevice(context.Background(), store.Device{
+		ID:            "ec20_1",
+		Name:          "EC20 1",
+		ATPort:        "/dev/ttyUSB2",
+		ControlDevice: "/dev/cdc-wdm0",
+		USBPath:       "/sys/bus/usb/devices/1-5",
+		ModemIMEI:     "222222222222222",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	devices := &fakeATDevices{entries: []device.Device{
+		{
+			ID:         "old-paths",
+			Discovered: true,
+			Candidate: modem.Candidate{
+				USBPath:    "/sys/bus/usb/devices/1-5",
+				QMIControl: "/dev/cdc-wdm0",
+				ATPort:     modem.Port{Path: "/dev/ttyUSB2"},
+			},
+			Snapshot: &device.Snapshot{IMEI: "111111111111111"},
+		},
+		{
+			ID:         "live-imei",
+			Discovered: true,
+			Candidate: modem.Candidate{
+				USBPath:    "/sys/bus/usb/devices/2-3",
+				QMIControl: "/dev/cdc-wdm4",
+				ATPort:     modem.Port{Path: "/dev/ttyUSB10"},
+			},
+			Snapshot: &device.Snapshot{IMEI: "222222222222222"},
+		},
+	}}
+	mapper := ATMapper{Store: database, Devices: devices}
+	if _, err := mapper.ExecuteAT(context.Background(), "ec20_1", "AT+CIMI"); err != nil {
+		t.Fatal(err)
+	}
+	if devices.executedID != "live-imei" {
+		t.Fatalf("ExecuteAT physical ID = %q, want live IMEI candidate", devices.executedID)
+	}
+}

@@ -31,7 +31,7 @@ export function DeviceQuotaCard({
         </CardIcon>
         <CardTitle
           title={zh ? "设备配额" : "Device quota"}
-          subtitle={zh ? "开发者模式下允许配置的设备数量" : "Configured device allowance in developer mode"}
+          subtitle={zh ? "最多允许配置的设备数量" : "Maximum number of configurable devices"}
         />
       </div>
       <div className="relative z-10 space-y-4">
@@ -46,8 +46,8 @@ export function DeviceQuotaCard({
         />
         <p className="text-xs text-gray-500 dark:text-gray-400">
           {zh
-            ? `关闭开发者模式后会自动恢复为 ${value?.defaultDeviceLimit ?? 5} 台，不会删除已经添加的设备。`
-            : `Disabling developer mode restores ${value?.defaultDeviceLimit ?? 5}; existing devices are not deleted.`}
+            ? `恢复默认配置后会自动恢复为 ${value?.defaultDeviceLimit ?? 5} 台，不会删除已经添加的设备。`
+            : `Restoring the default configuration resets the quota to ${value?.defaultDeviceLimit ?? 5}; existing devices are not deleted.`}
         </p>
         <Button variant="primary" loading={saving} disabled={loading} onClick={onSave} className="w-full !border-0">
           {zh ? "保存设备配额" : "Save device quota"}

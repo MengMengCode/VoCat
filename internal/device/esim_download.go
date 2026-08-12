@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 )
 
 // EsimDownloadParams are the SPA download form fields, mapped from the
@@ -74,7 +75,10 @@ func (manager *Manager) ESIMDownloadProfile(ctx context.Context, id string, para
 		return nil, err
 	}
 
-	client := newES9PClient(smdp)
+	client, err := newES9PClient(ctx, smdp)
+	if err != nil {
+		return nil, err
+	}
 
 	report("auth_client", "正在向 SM-DP+ 进行客户端身份认证...", 30)
 	init, err := client.initiateAuthentication(ctx, challenge, info1)
@@ -127,15 +131,24 @@ func (manager *Manager) ESIMDownloadProfile(ctx context.Context, id string, para
 	if err != nil {
 		return nil, err
 	}
-	iccid, err := installationResult(installResponse)
-	if err != nil {
-		return nil, err
-	}
-
 	report("notify", "正在向运营商发送下载通知...", 90)
+	iccid, installErr := installationResult(installResponse)
 	warning := ""
-	if err := client.handleNotification(ctx, installResponse); err != nil {
-		warning = "Profile 已安装，但下载通知发送失败"
+	notification, notificationErr := parsePendingNotification(installResponse)
+	if notificationErr == nil {
+		// Loading the final BPP segment is the commit point. Finish the operator
+		// acknowledgement even if the browser closes its SSE connection now.
+		notifyContext, cancelNotify := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		notificationErr = channel.deliverNotification(notifyContext, notification)
+		cancelNotify()
+	}
+	if notificationErr != nil {
+		warning = "Profile 安装结果已保留在 eUICC，但向运营商上报失败，可在当前通知列表中重发"
+	}
+	// Error installation results must be reported too. Return the card-side
+	// installation failure only after making that best-effort ES9+ attempt.
+	if installErr != nil {
+		return nil, installErr
 	}
 
 	freeAfter := freeBefore
@@ -217,17 +230,26 @@ type EsimChipInfo struct {
 func (manager *Manager) ESIMChipInfo(ctx context.Context, id string) (*EsimChipInfo, error) {
 	manager.esimMu.Lock()
 	defer manager.esimMu.Unlock()
-	channel, err := manager.openEuicc(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	defer channel.close(context.Background())
 
-	info, err := readEsimChipInfo(ctx, channel, isdRAID)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for _, aid := range manager.discoverEuiccAIDs(ctx, id) {
+		channel, err := manager.openEuiccAID(ctx, id, aid)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		info, err := readEsimChipInfo(ctx, channel, aid)
+		channel.close(context.Background())
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return &info, nil
 	}
-	return &info, nil
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, ErrNoEUICC
 }
 
 func readEsimChipInfo(ctx context.Context, channel *euiccChannel, aidHex string) (EsimChipInfo, error) {

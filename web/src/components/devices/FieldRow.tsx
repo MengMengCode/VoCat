@@ -6,6 +6,7 @@ import { useI18n } from "../../lib/i18n";
 export interface FieldRowProps {
   label: ReactNode;
   value?: unknown;
+  prefix?: ReactNode;
   copyable?: boolean;
   monospace?: boolean;
   placeholder?: string;
@@ -13,7 +14,7 @@ export interface FieldRowProps {
 }
 
 // Label/value row used across the overview tab. Click to copy when copyable.
-export function FieldRow({ label, value, copyable, monospace, placeholder, sensitive }: FieldRowProps) {
+export function FieldRow({ label, value, prefix, copyable, monospace, placeholder, sensitive }: FieldRowProps) {
   const { t } = useI18n();
   const display = (value == null ? "" : String(value)).trim() || placeholder || "--";
   const canCopy = !!copyable && !!display && display !== "--" && display !== "---";
@@ -28,7 +29,7 @@ export function FieldRow({ label, value, copyable, monospace, placeholder, sensi
       <span className="shrink-0 whitespace-nowrap text-gray-500">{label}</span>
       <span
         className={cx(
-          "block min-w-0 max-w-full flex-1 truncate text-right",
+          "flex min-w-0 max-w-full flex-1 items-center justify-end gap-1.5 text-right",
           monospace && "font-mono",
           canCopy && "cursor-pointer hover:underline",
           sensitive && "select-none blur-sm transition-all",
@@ -36,7 +37,8 @@ export function FieldRow({ label, value, copyable, monospace, placeholder, sensi
         title={title}
         onClick={handleCopy}
       >
-        {display}
+        {prefix}
+        <span className="min-w-0 truncate">{display}</span>
       </span>
     </div>
   );

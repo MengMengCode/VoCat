@@ -17,6 +17,24 @@ var errFirstAuthObserved = errors.New("test: first IKE_AUTH observed")
 
 type constantReader struct{ value byte }
 
+func TestLegacyIKEProfileIncludesVodafoneHostedLebaraCore(t *testing.T) {
+	for _, item := range []struct {
+		mcc string
+		mnc string
+	}{
+		{mcc: "234", mnc: "15"},
+		{mcc: "204", mnc: "04"},
+		{mcc: "204", mnc: "004"},
+	} {
+		if !legacyIKEProfile(item.mcc, item.mnc) {
+			t.Errorf("legacyIKEProfile(%q, %q) = false", item.mcc, item.mnc)
+		}
+	}
+	if legacyIKEProfile("234", "87") {
+		t.Fatal("Lebara's 234-87 core must use the modern IKE profile")
+	}
+}
+
 func (reader constantReader) Read(destination []byte) (int, error) {
 	for index := range destination {
 		destination[index] = reader.value

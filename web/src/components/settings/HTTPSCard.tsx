@@ -29,7 +29,7 @@ export function HTTPSCard({
           </CardIcon>
           <CardTitle
             title={zh ? "本机自签 HTTPS" : "Local self-signed HTTPS"}
-            subtitle={zh ? "为浏览器麦克风和安全连接提供 HTTPS" : "HTTPS for browser microphone and secure connections"}
+            subtitle={zh ? "为安全连接提供 HTTPS" : "HTTPS for secure connections"}
           />
         </div>
         <Switch checked={enabled} disabled={loading || saving} loading={saving} onChange={onToggle} />
@@ -48,8 +48,8 @@ export function HTTPSCard({
         ) : null}
         <p className="text-xs text-amber-600 dark:text-amber-400">
           {zh
-            ? "自签证书需要在系统或浏览器中信任；否则浏览器可能继续拒绝麦克风权限。"
-            : "Trust the self-signed certificate in the operating system or browser; otherwise microphone access may still be rejected."}
+            ? "自签证书需要在系统或浏览器中信任，否则浏览器可能继续提示连接不安全。"
+            : "Trust the self-signed certificate in the operating system or browser; otherwise the browser may keep warning that the connection is not secure."}
         </p>
         <Button onClick={() => window.open("/api/settings/https/certificate", "_blank")} disabled={loading}>
           {zh ? "下载自签证书" : "Download certificate"}

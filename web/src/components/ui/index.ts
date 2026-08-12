@@ -8,6 +8,8 @@ export { Switch } from "./Switch";
 export { Input, Textarea } from "./Input";
 export { Select } from "./Select";
 export type { SelectOption } from "./Select";
+export { Pagination } from "./Pagination";
+export type { PaginationProps } from "./Pagination";
 export { Tabs } from "./Tabs";
 export type { TabItem } from "./Tabs";
 export { Tag } from "./Tag";

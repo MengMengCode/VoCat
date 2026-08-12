@@ -155,3 +155,16 @@ func TestEuiccFreeNVRAM(t *testing.T) {
 		t.Fatalf("expected ok=false when extCardResource absent")
 	}
 }
+
+func TestES10StatusAcceptsProactiveRefresh(t *testing.T) {
+	for _, status := range []int{0x9000, 0x9100, 0x910B, 0x91FF} {
+		if !es10StatusOK(status) {
+			t.Fatalf("status %04X should be successful", status)
+		}
+	}
+	for _, status := range []int{0x6A82, 0x6985, 0x9200} {
+		if es10StatusOK(status) {
+			t.Fatalf("status %04X should fail", status)
+		}
+	}
+}

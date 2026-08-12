@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 
 	"vocat/internal/exportproxy"
+	"vocat/internal/store"
 )
 
 func (s *Server) routeExportProxyAPI(w http.ResponseWriter, r *http.Request, cleanPath string) bool {
@@ -31,6 +33,9 @@ func (s *Server) routeExportProxyAPI(w http.ResponseWriter, r *http.Request, cle
 			var config exportproxy.Config
 			if err := s.decodeJSON(w, r, &config); err != nil {
 				writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+				return true
+			}
+			if s.rejectUnsupportedExportProxyDevice(w, r.Context(), config.DeviceID) {
 				return true
 			}
 			created, err := s.exportProxy.Create(r.Context(), config)
@@ -71,6 +76,9 @@ func (s *Server) routeExportProxyAPI(w http.ResponseWriter, r *http.Request, cle
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return true
 		}
+		if s.rejectUnsupportedExportProxyDevice(w, r.Context(), config.DeviceID) {
+			return true
+		}
 		updated, err := s.exportProxy.Update(r.Context(), id, config)
 		if err != nil {
 			s.writeExportProxyError(w, err)
@@ -88,6 +96,19 @@ func (s *Server) routeExportProxyAPI(w http.ResponseWriter, r *http.Request, cle
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
 	return true
+}
+
+func (s *Server) rejectUnsupportedExportProxyDevice(w http.ResponseWriter, ctx context.Context, deviceID string) bool {
+	config, err := s.store.Device(ctx, strings.TrimSpace(deviceID))
+	if err != nil {
+		s.writeStoreError(w, err)
+		return true
+	}
+	if config.DeviceType == store.DeviceTypeUSBSIMReader {
+		writeError(w, http.StatusConflict, "wifi_calling_only_device", "USB SIM readers cannot export cellular data as a proxy")
+		return true
+	}
+	return false
 }
 
 func (s *Server) writeExportProxyError(w http.ResponseWriter, err error) {

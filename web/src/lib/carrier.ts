@@ -48,12 +48,12 @@ export function carrierIso(imsi?: string): string {
   return data.i[imsiDigits(imsi).slice(0, 3)] ?? "";
 }
 
-// flagEmoji converts an alpha-2 country code to its regional-indicator flag emoji.
-export function flagEmoji(iso?: string): string {
-  const s = String(iso ?? "").trim().toUpperCase();
-  if (s.length !== 2) return "";
-  const a = s.charCodeAt(0);
-  const b = s.charCodeAt(1);
-  if (a < 65 || a > 90 || b < 65 || b > 90) return "";
-  return String.fromCodePoint(0x1f1e6 + (a - 65)) + String.fromCodePoint(0x1f1e6 + (b - 65));
+// carrierBrandIso keeps the normal IMSI country flag for branded/MVNO SIMs.
+// Lebara UK's Vodafone-NL-hosted 204-04 eSIM is the one known exception: its
+// customer-facing country is GB even though AKA must continue using 204-04.
+export function carrierBrandIso(spn?: string, imsi?: string): string {
+  const brand = String(spn ?? "").trim().toLowerCase();
+  const digits = imsiDigits(imsi);
+  if (brand.includes("lebara") && digits.startsWith("20404")) return "gb";
+  return carrierIso(imsi);
 }

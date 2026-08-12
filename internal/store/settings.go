@@ -22,6 +22,8 @@ func DefaultNotificationSensitiveFields(channel string) []string {
 		return []string{"secret"}
 	case "pushplus":
 		return []string{"token"}
+	case "wecom":
+		return []string{"urls"}
 	default:
 		return nil
 	}
@@ -360,6 +362,7 @@ func maskedJSONValue(value json.RawMessage) bool {
 
 func (s *Store) UpsertCardPolicy(ctx context.Context, value CardPolicy) error {
 	value.ICCID = strings.TrimSpace(value.ICCID)
+	value.CustomPhoneNumber = strings.TrimSpace(value.CustomPhoneNumber)
 	if value.ICCID == "" {
 		return errors.New("card policy ICCID is required")
 	}
@@ -368,9 +371,6 @@ func (s *Store) UpsertCardPolicy(ctx context.Context, value CardPolicy) error {
 	case "", "IP", "IPV6", "IPV4V6":
 	default:
 		return fmt.Errorf("unsupported card policy IP version %q", value.IPVersion)
-	}
-	if value.VoWiFiEnabled && value.AirplaneEnabled {
-		return errors.New("VoWiFi and airplane mode cannot both be enabled")
 	}
 	now := time.Now().UTC()
 	createdAt := value.CreatedAt
@@ -384,20 +384,21 @@ func (s *Store) UpsertCardPolicy(ctx context.Context, value CardPolicy) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO card_policies (
 			iccid, network_enabled, vowifi_enabled, airplane_enabled,
-			apn, ip_version, source, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			apn, ip_version, custom_phone_number, source, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(iccid) DO UPDATE SET
 			network_enabled = excluded.network_enabled,
 			vowifi_enabled = excluded.vowifi_enabled,
 			airplane_enabled = excluded.airplane_enabled,
 			apn = excluded.apn,
 			ip_version = excluded.ip_version,
+			custom_phone_number = excluded.custom_phone_number,
 			source = excluded.source,
 			updated_at = excluded.updated_at
 	`,
 		value.ICCID, boolInt(value.NetworkEnabled), boolInt(value.VoWiFiEnabled),
 		boolInt(value.AirplaneEnabled), value.APN, value.IPVersion,
-		value.Source, createdAt.Unix(), updatedAt.Unix(),
+		value.CustomPhoneNumber, value.Source, createdAt.Unix(), updatedAt.Unix(),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert card policy %q: %w", value.ICCID, err)
@@ -443,7 +444,7 @@ func (s *Store) DeleteCardPolicy(ctx context.Context, iccid string) error {
 
 const cardPolicySelect = `
 	SELECT iccid, network_enabled, vowifi_enabled, airplane_enabled,
-		apn, ip_version, source, created_at, updated_at
+		apn, ip_version, custom_phone_number, source, created_at, updated_at
 	FROM card_policies`
 
 func cardPolicy(row rowScanner) (CardPolicy, error) {
@@ -452,7 +453,7 @@ func cardPolicy(row rowScanner) (CardPolicy, error) {
 	var createdAt, updatedAt int64
 	err := row.Scan(
 		&value.ICCID, &networkEnabled, &vowifiEnabled, &airplaneEnabled,
-		&value.APN, &value.IPVersion, &value.Source, &createdAt, &updatedAt,
+		&value.APN, &value.IPVersion, &value.CustomPhoneNumber, &value.Source, &createdAt, &updatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CardPolicy{}, ErrNotFound
@@ -466,6 +467,161 @@ func cardPolicy(row rowScanner) (CardPolicy, error) {
 	value.CreatedAt = time.Unix(createdAt, 0).UTC()
 	value.UpdatedAt = time.Unix(updatedAt, 0).UTC()
 	return value, nil
+}
+
+func (s *Store) UpsertCardAPNProfile(ctx context.Context, value CardAPNProfile) (CardAPNProfile, error) {
+	value.ICCID = strings.TrimSpace(value.ICCID)
+	value.APN = strings.TrimSpace(value.APN)
+	value.IPVersion = strings.ToUpper(strings.TrimSpace(value.IPVersion))
+	if value.ICCID == "" || value.APN == "" {
+		return CardAPNProfile{}, errors.New("card APN profile ICCID and APN are required")
+	}
+	if value.IPVersion == "" {
+		value.IPVersion = "IPV4V6"
+	}
+	switch value.IPVersion {
+	case "IP", "IPV6", "IPV4V6":
+	default:
+		return CardAPNProfile{}, fmt.Errorf("unsupported card APN profile IP version %q", value.IPVersion)
+	}
+	value.RoamingIPVersion = strings.ToUpper(strings.TrimSpace(value.RoamingIPVersion))
+	if value.RoamingIPVersion == "" {
+		value.RoamingIPVersion = "IP"
+	}
+	switch value.RoamingIPVersion {
+	case "IP", "IPV6", "IPV4V6":
+	default:
+		return CardAPNProfile{}, fmt.Errorf("unsupported card APN roaming IP version %q", value.RoamingIPVersion)
+	}
+	value.AuthType = strings.ToUpper(strings.TrimSpace(value.AuthType))
+	if value.AuthType == "" {
+		value.AuthType = "NONE"
+	}
+	switch value.AuthType {
+	case "NONE", "PAP", "CHAP", "PAP_OR_CHAP":
+	default:
+		return CardAPNProfile{}, fmt.Errorf("unsupported card APN authentication type %q", value.AuthType)
+	}
+	value.Username = strings.TrimSpace(value.Username)
+	value.Proxy = strings.TrimSpace(value.Proxy)
+	value.MCC = strings.TrimSpace(value.MCC)
+	value.MNC = strings.TrimSpace(value.MNC)
+	now := time.Now().UTC().Unix()
+	var createdAt, updatedAt int64
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO card_apn_profiles (
+			iccid, apn, username, password, proxy, mcc, mnc,
+			ip_version, roaming_ip_version, auth_type, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(iccid, apn, ip_version) DO UPDATE SET
+			username = excluded.username, password = excluded.password,
+			proxy = excluded.proxy, mcc = excluded.mcc, mnc = excluded.mnc,
+			roaming_ip_version = excluded.roaming_ip_version,
+			auth_type = excluded.auth_type, updated_at = excluded.updated_at
+		RETURNING id, iccid, apn, username, password, proxy, mcc, mnc,
+			ip_version, roaming_ip_version, auth_type, created_at, updated_at
+	`, value.ICCID, value.APN, value.Username, value.Password, value.Proxy, value.MCC, value.MNC,
+		value.IPVersion, value.RoamingIPVersion, value.AuthType, now, now).Scan(
+		&value.ID, &value.ICCID, &value.APN, &value.Username, &value.Password,
+		&value.Proxy, &value.MCC, &value.MNC, &value.IPVersion,
+		&value.RoamingIPVersion, &value.AuthType, &createdAt, &updatedAt,
+	)
+	if err != nil {
+		return CardAPNProfile{}, fmt.Errorf("upsert card APN profile: %w", err)
+	}
+	value.CreatedAt = time.Unix(createdAt, 0).UTC()
+	value.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+	return value, nil
+}
+
+func (s *Store) ListCardAPNProfiles(ctx context.Context, iccid string) ([]CardAPNProfile, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, iccid, apn, username, password, proxy, mcc, mnc,
+			ip_version, roaming_ip_version, auth_type, created_at, updated_at
+		FROM card_apn_profiles WHERE iccid = ? ORDER BY id
+	`, strings.TrimSpace(iccid))
+	if err != nil {
+		return nil, fmt.Errorf("list card APN profiles: %w", err)
+	}
+	defer rows.Close()
+	values := make([]CardAPNProfile, 0)
+	for rows.Next() {
+		var value CardAPNProfile
+		var createdAt, updatedAt int64
+		if err := rows.Scan(&value.ID, &value.ICCID, &value.APN, &value.Username,
+			&value.Password, &value.Proxy, &value.MCC, &value.MNC, &value.IPVersion,
+			&value.RoamingIPVersion, &value.AuthType, &createdAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("scan card APN profile: %w", err)
+		}
+		value.CreatedAt = time.Unix(createdAt, 0).UTC()
+		value.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+		values = append(values, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate card APN profiles: %w", err)
+	}
+	return values, nil
+}
+
+func (s *Store) CardAPNProfileByAPN(ctx context.Context, iccid, apn, ipVersion string) (CardAPNProfile, error) {
+	profiles, err := s.ListCardAPNProfiles(ctx, iccid)
+	if err != nil {
+		return CardAPNProfile{}, err
+	}
+	for _, profile := range profiles {
+		if strings.EqualFold(profile.APN, strings.TrimSpace(apn)) &&
+			strings.EqualFold(profile.IPVersion, strings.TrimSpace(ipVersion)) {
+			return profile, nil
+		}
+	}
+	return CardAPNProfile{}, ErrNotFound
+}
+
+func (s *Store) UpdateCardAPNProfile(ctx context.Context, value CardAPNProfile) (CardAPNProfile, error) {
+	value.ICCID = strings.TrimSpace(value.ICCID)
+	value.APN = strings.TrimSpace(value.APN)
+	value.Username = strings.TrimSpace(value.Username)
+	value.Proxy = strings.TrimSpace(value.Proxy)
+	value.MCC = strings.TrimSpace(value.MCC)
+	value.MNC = strings.TrimSpace(value.MNC)
+	value.IPVersion = strings.ToUpper(strings.TrimSpace(value.IPVersion))
+	value.RoamingIPVersion = strings.ToUpper(strings.TrimSpace(value.RoamingIPVersion))
+	value.AuthType = strings.ToUpper(strings.TrimSpace(value.AuthType))
+	if value.ID < 1 || value.ICCID == "" || value.APN == "" {
+		return CardAPNProfile{}, errors.New("card APN profile ID, ICCID, and APN are required")
+	}
+	now := time.Now().UTC().Unix()
+	var createdAt, updatedAt int64
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE card_apn_profiles SET
+			apn = ?, username = ?, password = ?, proxy = ?, mcc = ?, mnc = ?,
+			ip_version = ?, roaming_ip_version = ?, auth_type = ?, updated_at = ?
+		WHERE id = ? AND iccid = ?
+		RETURNING id, iccid, apn, username, password, proxy, mcc, mnc,
+			ip_version, roaming_ip_version, auth_type, created_at, updated_at
+	`, value.APN, value.Username, value.Password, value.Proxy, value.MCC, value.MNC,
+		value.IPVersion, value.RoamingIPVersion, value.AuthType, now, value.ID, value.ICCID).Scan(
+		&value.ID, &value.ICCID, &value.APN, &value.Username, &value.Password,
+		&value.Proxy, &value.MCC, &value.MNC, &value.IPVersion,
+		&value.RoamingIPVersion, &value.AuthType, &createdAt, &updatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CardAPNProfile{}, ErrNotFound
+	}
+	if err != nil {
+		return CardAPNProfile{}, fmt.Errorf("update card APN profile: %w", err)
+	}
+	value.CreatedAt = time.Unix(createdAt, 0).UTC()
+	value.UpdatedAt = time.Unix(updatedAt, 0).UTC()
+	return value, nil
+}
+
+func (s *Store) DeleteCardAPNProfile(ctx context.Context, iccid string, id int64) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM card_apn_profiles WHERE iccid = ? AND id = ?`, strings.TrimSpace(iccid), id)
+	if err != nil {
+		return fmt.Errorf("delete card APN profile: %w", err)
+	}
+	return requireAffected(result)
 }
 
 func (s *Store) UpsertTrafficBucket(ctx context.Context, value TrafficBucket) error {

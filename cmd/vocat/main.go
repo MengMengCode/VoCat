@@ -28,6 +28,7 @@ import (
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 	"vocat/internal/server"
 	"vocat/internal/store"
 	"vocat/internal/update"
@@ -185,7 +186,8 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		return err
 	}
 
-	deviceManager, err := device.NewManager(device.Options{})
+	cardReaders := pcsc.New()
+	deviceManager, err := device.NewManager(device.Options{CardReaders: cardReaders})
 	if err != nil {
 		return fmt.Errorf("create device manager: %w", err)
 	}
@@ -220,6 +222,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		logger,
 		database,
 		deviceManager,
+		cardReaders,
 	)
 	if err != nil {
 		return fmt.Errorf("configure VoWiFi runtime: %w", err)
@@ -256,6 +259,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	go handler.StartSMSSyncLoop(pollContext, 15*time.Second)
 	handler.StartTelegramBot(pollContext)
 	handler.StartSMSNotificationDispatchers(pollContext)
+	handler.StartAutomaticTasks(pollContext)
 
 	serverConfig := func(handler http.Handler) *http.Server {
 		return &http.Server{
@@ -556,6 +560,7 @@ func configureVoWiFiRuntime(
 	logger *slog.Logger,
 	database *store.Store,
 	deviceManager *device.Manager,
+	cardReaders *pcsc.Service,
 ) (*vowifiruntime.Manager, error) {
 	mapper := integration.ATMapper{
 		Store:   database,
@@ -604,6 +609,16 @@ func configureVoWiFiRuntime(
 	if err != nil {
 		return nil, err
 	}
+	pcscAdapter, err := vowifi.NewPCSCAdapter(cardReaders, func(ctx context.Context, deviceID string) (pcsc.Selector, string, error) {
+		config, resolveErr := database.Device(ctx, strings.TrimSpace(deviceID))
+		if resolveErr != nil {
+			return pcsc.Selector{}, "", resolveErr
+		}
+		return pcsc.Selector{USBPath: config.USBPath, ReaderName: config.ControlDevice}, config.SIMPIN, nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	qmiRadio, err := vowifi.NewQMIManagerRadio(deviceManager, vowifi.QMIManagerRadioOptions{
 		ResolveDeviceID: func(_ context.Context, configuredID string) (string, error) {
 			entry, resolveErr := mapper.Get(configuredID)
@@ -640,7 +655,13 @@ func configureVoWiFiRuntime(
 			if err != nil {
 				return nil, fmt.Errorf("load device %q VoWiFi config: %w", deviceID, err)
 			}
-			return newVoWiFiOrchestrator(deviceConfig, database, mapper, adapter, qmiRadio)
+			activeAdapter := vowifiDeviceAdapter(adapter)
+			activeQMI := qmiRadio
+			if deviceConfig.DeviceType == store.DeviceTypeUSBSIMReader {
+				activeAdapter = pcscAdapter
+				activeQMI = nil
+			}
+			return newVoWiFiOrchestrator(deviceConfig, database, mapper, activeAdapter, activeQMI)
 		},
 	})
 
@@ -820,11 +841,17 @@ func persistVoWiFiSMSStatus(
 	return nil
 }
 
+type vowifiDeviceAdapter interface {
+	vowifi.SIMIdentityReader
+	vowifi.AKAProvider
+	vowifi.RadioController
+}
+
 func newVoWiFiOrchestrator(
 	deviceConfig store.Device,
 	database *store.Store,
 	mapper integration.ATMapper,
-	adapter *vowifi.EC20Adapter,
+	adapter vowifiDeviceAdapter,
 	qmiRadio *vowifi.QMIManagerRadio,
 ) (*vowifi.Orchestrator, error) {
 	var akaProvider vowifi.AKAProvider = adapter
@@ -917,9 +944,16 @@ func provisionDiscoveredDevices(
 		deviceType := provisionedDeviceType(candidate)
 		backend := "at"
 		control := candidate.ATPort.OpenPath()
+		esimTransport := backend
 		if candidate.QMIControl != "" {
 			backend = "qmi"
 			control = candidate.QMIControl
+			esimTransport = backend
+		}
+		if candidate.HardwareKind == pcsc.HardwareKind {
+			backend = "pcsc"
+			control = candidate.ReaderName
+			esimTransport = "pcsc"
 		}
 		name := candidate.Product
 		if name == "" || strings.EqualFold(name, "Android") {
@@ -945,7 +979,7 @@ func provisionDiscoveredDevices(
 			StopBits:                    1,
 			Parity:                      "none",
 			DeviceBackend:               backend,
-			ESIMTransport:               backend,
+			ESIMTransport:               esimTransport,
 			NetworkEnabled:              false,
 			SMSEnabled:                  true,
 			VoWiFiEnabled:               false,
@@ -957,6 +991,9 @@ func provisionDiscoveredDevices(
 }
 
 func provisionedDeviceType(candidate modem.Candidate) string {
+	if candidate.HardwareKind == pcsc.HardwareKind {
+		return store.DeviceTypeUSBSIMReader
+	}
 	classPath := filepath.ToSlash(filepath.Clean(candidate.USBPath))
 	if strings.Contains(classPath, "/class/wwan/") {
 		return store.DeviceTypeWiFi410
@@ -1138,6 +1175,15 @@ func liftCardRegionBlock(
 	if len(outstanding) == 0 {
 		return
 	}
+	for _, policy := range outstanding {
+		if err := database.DeleteCardPolicy(ctx, policy.ICCID); err != nil && ctx.Err() == nil {
+			logger.Warn(
+				"region block: failed to clear auto policy",
+				"iccid", policy.ICCID, "error", err,
+			)
+			return
+		}
+	}
 	if snapshot.FlightMode {
 		flightContext, cancelFlight := context.WithTimeout(ctx, 30*time.Second)
 		_, err := manager.SetFlight(flightContext, id, false)
@@ -1148,14 +1194,6 @@ func liftCardRegionBlock(
 				"device_id", id, "error", err,
 			)
 			return
-		}
-	}
-	for _, policy := range outstanding {
-		if err := database.DeleteCardPolicy(ctx, policy.ICCID); err != nil && ctx.Err() == nil {
-			logger.Warn(
-				"region block: failed to clear auto policy",
-				"iccid", policy.ICCID, "error", err,
-			)
 		}
 	}
 	logger.Info(

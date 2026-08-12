@@ -107,9 +107,9 @@ func (orchestrator *Orchestrator) Subscribe(buffer int) (<-chan State, func()) {
 }
 
 // Enable executes one evidence-backed transaction. The order intentionally
-// follows the working Linux/QMI path: live identity and home PLMN, AKA
-// availability, ePDG derivation, runtime-owned RF off, cellular-data stop,
-// country proxy resolution, SWu tunnel, IMS registration, and SMS readiness.
+// follows the working Linux/QMI path: runtime-owned RF off and cellular-data
+// stop, live identity and home PLMN, AKA availability, ePDG derivation, country
+// proxy resolution, SWu tunnel, IMS registration, and SMS readiness.
 func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -145,8 +145,13 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 	})
 
 	runtimeContext, runtimeCancel := context.WithCancel(context.Background())
-	resources := &runtimeResources{cancel: runtimeCancel}
 	orchestrator.mu.Lock()
+	resources := orchestrator.resources
+	reuseRadio := resources != nil && resources.radioChanged
+	if resources == nil || !reuseRadio {
+		resources = &runtimeResources{}
+	}
+	resources.cancel = runtimeCancel
 	orchestrator.resources = resources
 	orchestrator.mu.Unlock()
 
@@ -155,9 +160,11 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 
 	fail := func(stage Phase, cause error) (State, error) {
 		runtimeCancel()
-		cleanupErrors := orchestrator.cleanup(resources)
+		cleanupErrors := orchestrator.cleanup(resources, false)
 		orchestrator.mu.Lock()
-		orchestrator.resources = nil
+		if !resources.radioChanged {
+			orchestrator.resources = nil
+		}
 		orchestrator.mu.Unlock()
 
 		orchestrator.mutate(func(state *State) {
@@ -180,6 +187,24 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 			)
 		}
 		return orchestrator.State(), stageError
+	}
+
+	var err error
+	if !reuseRadio {
+		resources.radio, err = orchestrator.deps.Radio.Snapshot(setupContext, orchestrator.options.DeviceID)
+		if err != nil {
+			return fail(PhaseAccessReady, err)
+		}
+		// Mark the radio transaction before the first mutating call: a provider
+		// may return an error after partially changing the modem. A failed enable
+		// deliberately keeps this checkpoint for an explicit Disable or retry.
+		resources.radioChanged = true
+		if err := orchestrator.deps.Radio.EnterVoWiFiRFOff(setupContext, orchestrator.options.DeviceID); err != nil {
+			return fail(PhaseAccessReady, err)
+		}
+		if err := orchestrator.deps.Radio.StopCellularData(setupContext, orchestrator.options.DeviceID); err != nil {
+			return fail(PhaseAccessReady, err)
+		}
 	}
 
 	identity, err := orchestrator.deps.SIM.ReadIdentity(setupContext, orchestrator.options.DeviceID)
@@ -223,29 +248,9 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 	if err != nil {
 		return fail(PhaseAccessReady, err)
 	}
-	resources.radio, err = orchestrator.deps.Radio.Snapshot(setupContext, orchestrator.options.DeviceID)
-	if err != nil {
-		return fail(PhaseAccessReady, err)
-	}
 	orchestrator.mutate(func(state *State) {
 		state.PureAirplanePolicy = resources.radio.PureAirplanePolicy
 	})
-	// Mark the radio transaction before the first mutating call: a provider
-	// may return an error after partially changing the modem.
-	resources.radioChanged = true
-	// Enter RF-off before reconciling PDP contexts. Some QMI-capable firmware
-	// automatically owns CID 1 while the radio is online and rejects a direct
-	// CGACT=0 command even though the Linux data interface is down. The adapter
-	// selects the modem-specific RF-off form (CFUN=4 for EC20/EC25, CFUN=0 or
-	// the equivalent reported CFUN=7 state for native Qualcomm 410). The data
-	// stop then acts as a fail-closed verification and removes any context that
-	// unexpectedly survived RF-off.
-	if err := orchestrator.deps.Radio.EnterVoWiFiRFOff(setupContext, orchestrator.options.DeviceID); err != nil {
-		return fail(PhaseAccessReady, err)
-	}
-	if err := orchestrator.deps.Radio.StopCellularData(setupContext, orchestrator.options.DeviceID); err != nil {
-		return fail(PhaseAccessReady, err)
-	}
 
 	proxy, err := orchestrator.deps.Proxy.Resolve(setupContext, ProxyRequest{
 		DeviceID:    orchestrator.options.DeviceID,
@@ -480,7 +485,7 @@ func (orchestrator *Orchestrator) Disable(ctx context.Context) (State, error) {
 	if resources != nil && resources.cancel != nil {
 		resources.cancel()
 	}
-	cleanupErrors := orchestrator.cleanup(resources)
+	cleanupErrors := orchestrator.cleanup(resources, true)
 	orchestrator.mu.Lock()
 	orchestrator.resources = nil
 	orchestrator.mu.Unlock()
@@ -545,14 +550,41 @@ func (orchestrator *Orchestrator) Reconnect(ctx context.Context) (State, error) 
 	if !current.Enabled && current.Phase == PhaseIdle {
 		return current, ErrNotRunning
 	}
-	// Teardown during a reconnect is best-effort. Disable already releases the
-	// local IMS, tunnel, and radio resources, so a non-fatal cleanup error
-	// (e.g. the network rejecting SIP deregistration) must not block the
-	// rebuild — otherwise the device wedges in PhaseFailed. Only propagate
-	// errors that prevented the teardown itself (e.g. the operation lock).
-	if _, err := orchestrator.Disable(ctx); err != nil && !errors.Is(err, ErrCleanupIncomplete) {
+	// Reconnect tears down IMS and the tunnel but deliberately retains the
+	// RF-off checkpoint. Enable then reuses it without bringing cellular radio
+	// back up between two VoWiFi sessions.
+	orchestrator.cancelCurrentRuntime()
+	if err := orchestrator.lockOperation(ctx); err != nil {
 		return orchestrator.State(), err
 	}
+	orchestrator.mu.Lock()
+	resources := orchestrator.resources
+	orchestrator.mu.Unlock()
+	if resources != nil && resources.cancel != nil {
+		resources.cancel()
+	}
+	cleanupErrors := orchestrator.cleanup(resources, false)
+	orchestrator.mu.Lock()
+	if resources == nil || !resources.radioChanged {
+		orchestrator.resources = nil
+	}
+	orchestrator.mu.Unlock()
+	orchestrator.mutate(func(state *State) {
+		state.Phase = PhaseIdle
+		state.Enabled = false
+		state.Active = false
+		state.SIMReady = false
+		state.AccessReady = false
+		state.TunnelReady = false
+		state.IMSReady = false
+		state.SMSReady = false
+		state.LastErrorClass = ""
+		state.LastError = ""
+		state.LastReason = "reconnect_requested"
+		state.CleanupErrors = append([]string(nil), cleanupErrors...)
+		state.StartedAt = nil
+	})
+	orchestrator.unlockOperation()
 	return orchestrator.Enable(ctx)
 }
 
@@ -793,7 +825,7 @@ func securityAuditFromEvidence(evidence TunnelEvidence) SecurityAudit {
 	}
 }
 
-func (orchestrator *Orchestrator) cleanup(resources *runtimeResources) []string {
+func (orchestrator *Orchestrator) cleanup(resources *runtimeResources, restoreRadio bool) []string {
 	if resources == nil {
 		return nil
 	}
@@ -810,7 +842,7 @@ func (orchestrator *Orchestrator) cleanup(resources *runtimeResources) []string 
 		}
 		resources.tunnel = nil
 	}
-	if resources.radioChanged {
+	if restoreRadio && resources.radioChanged {
 		if err := orchestrator.cleanupCall(func(ctx context.Context) error {
 			return orchestrator.deps.Radio.Restore(ctx, orchestrator.options.DeviceID, resources.radio)
 		}); err != nil {
@@ -950,7 +982,7 @@ func (orchestrator *Orchestrator) revokeChangedIdentityRuntimeLocked(resources *
 	if !current {
 		return
 	}
-	cleanupErrors := orchestrator.cleanup(resources)
+	cleanupErrors := orchestrator.cleanup(resources, true)
 	orchestrator.mu.Lock()
 	if orchestrator.resources == resources {
 		orchestrator.resources = nil
@@ -1019,9 +1051,9 @@ func (orchestrator *Orchestrator) watchRuntimeFailure(
 			if !current {
 				return
 			}
-			cleanupErrors := orchestrator.cleanup(resources)
+			cleanupErrors := orchestrator.cleanup(resources, false)
 			orchestrator.mu.Lock()
-			if orchestrator.resources == resources {
+			if orchestrator.resources == resources && !resources.radioChanged {
 				orchestrator.resources = nil
 			}
 			orchestrator.mu.Unlock()

@@ -50,7 +50,7 @@ export function EsimNotificationsModal({ open, loading, items, retryingSeq, onCl
         <div className="max-h-[420px] space-y-2 overflow-auto pr-1">
           {items.map((item) => (
             <div
-              key={item.sequenceNumber}
+              key={`${item.aidHex || "default"}:${item.sequenceNumber}`}
               className="flex flex-col gap-3 rounded-xl border border-gray-200 p-3 dark:border-white/10 sm:flex-row sm:items-start sm:justify-between"
             >
               <div className="min-w-0 flex-1 space-y-1">

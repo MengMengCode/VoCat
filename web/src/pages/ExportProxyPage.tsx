@@ -150,7 +150,7 @@ export default function ExportProxyPage() {
     <div className="mx-auto max-w-7xl">
       <PageHeader
         title={t("导出代理")}
-        subtitle={t("将模块漫游数据导出为主机 HTTP 或 SOCKS5 代理；仅在开发者模式下可用")}
+        subtitle={t("将模块漫游数据导出为主机 HTTP 或 SOCKS5 代理")}
         actions={<Button variant="primary" icon={<AddRegular />} onClick={() => edit()} disabled={!devices.length}>{t("添加代理")}</Button>}
       />
 
@@ -211,10 +211,6 @@ export default function ExportProxyPage() {
           </div>
         ) : null}
         {loading ? <div className="px-6 py-16 text-center text-sm text-gray-400">{t("加载中...")}</div> : null}
-      </div>
-
-      <div className="ui-panel-muted mt-4 p-4 text-xs leading-6 text-gray-500">
-        {t("代理出口使用受保护的蜂窝路由和独立 DNS，不会把模块数据设为主机默认网络。关闭开发者模式会停止漫游数据并永久删除这里的全部配置。")}
       </div>
 
       <Modal

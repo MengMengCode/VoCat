@@ -13,7 +13,6 @@ Restart=on-failure
 RestartSec=3s
 TimeoutStartSec=30s
 TimeoutStopSec=20s
-Environment=VOCAT_ADDR=0.0.0.0:7575
 Environment=VOCAT_DATABASE_PATH=/opt/vocat/data/vocat.db
 EnvironmentFile=/etc/vocat/vocat.env
 
