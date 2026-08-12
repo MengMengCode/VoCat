@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"vocat/internal/modem"
+	"vocat/internal/qmiport"
 )
 
 func readPlatformRegistration(ctx context.Context, candidate modem.Candidate) (platformRegistration, bool) {
@@ -22,6 +23,11 @@ func readPlatformRegistration(ctx context.Context, candidate modem.Candidate) (p
 	}
 	queryContext, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	lease, err := qmiport.Acquire(queryContext, control)
+	if err != nil {
+		return platformRegistration{}, false
+	}
+	defer lease.Release()
 	output, err := exec.CommandContext(
 		queryContext,
 		qmicli,

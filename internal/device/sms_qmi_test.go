@@ -253,6 +253,27 @@ func TestNativeWWANSMSFailsClosedWhileQMIControlIsMissing(t *testing.T) {
 	}
 }
 
+func TestBackgroundNativeSMSScanDoesNotPoisonControlHealth(t *testing.T) {
+	manager, _, id := newStartedNativeSMSManager(t)
+	manager.mu.Lock()
+	state := manager.devices[id]
+	state.candidate.QMIControl = ""
+	state.lastError = "previous control-plane error"
+	manager.mu.Unlock()
+
+	_, err := manager.ListSMSBoundSubscriberQuiet(context.Background(), id)
+	if !errors.Is(err, ErrSMSTransportUnavailable) {
+		t.Fatalf("quiet scan error = %v, want QMI transport error", err)
+	}
+	entry, err := manager.Get(id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if entry.LastError != "previous control-plane error" {
+		t.Fatalf("quiet scan replaced control-plane error with %q", entry.LastError)
+	}
+}
+
 func TestNativeQMISendTransportPreflight(t *testing.T) {
 	blocked := []qmi.WMSTransportNetworkRegistration{
 		qmi.WMSTransportNetworkRegistrationNoService,
