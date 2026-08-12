@@ -695,7 +695,7 @@ func voWiFiCarrierConfigs(deviceConfig store.Device) (ike.Config, ims.Config) {
 			PublicIdentity:            strings.TrimSpace(deviceConfig.IMSPublicIdentity),
 			RequireExplicitIdentities: !deviceConfig.IMSAllowIMSIDerivedIdentity,
 			SMSCenter:                 strings.TrimSpace(deviceConfig.IMSSMSCenter),
-	}
+		}
 }
 
 // resolveVoWiFiModemIMEI resolves hardware identity at callback time. Device
@@ -841,6 +841,26 @@ func newVoWiFiOrchestrator(
 		radioController = qmiRadio
 	}
 	tunnelConfig, imsConfig := voWiFiCarrierConfigs(deviceConfig)
+	configuredID := strings.TrimSpace(deviceConfig.ID)
+	// Resolve the saved carrier/IMS settings at every new session boundary.
+	// This keeps a profile edit effective on the next reconnect without
+	// requiring a process restart, while leaving the current tunnel immutable.
+	tunnelConfig.Resolve = func(resolveContext context.Context, _ vowifi.SIMIdentity) (ike.Config, error) {
+		latest, err := database.Device(resolveContext, configuredID)
+		if err != nil {
+			return ike.Config{}, fmt.Errorf("load device %q IKE profile: %w", configuredID, err)
+		}
+		resolved, _ := voWiFiCarrierConfigs(latest)
+		return resolved, nil
+	}
+	imsConfig.Resolve = func(resolveContext context.Context, _ vowifi.SIMIdentity) (ims.Config, error) {
+		latest, err := database.Device(resolveContext, configuredID)
+		if err != nil {
+			return ims.Config{}, fmt.Errorf("load device %q IMS profile: %w", configuredID, err)
+		}
+		_, resolved := voWiFiCarrierConfigs(latest)
+		return resolved, nil
+	}
 	tunnelProvider, err := ike.NewProvider(tunnelConfig)
 	if err != nil {
 		return nil, fmt.Errorf("device %q IKE provider: %w", deviceConfig.ID, err)

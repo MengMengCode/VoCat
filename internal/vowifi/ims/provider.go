@@ -56,6 +56,10 @@ type Config struct {
 	// SMSCenter is an operator-provided fallback when the SIM leaves EF_SMSP
 	// and AT+CSCA empty. It must be an international or national digit string.
 	SMSCenter string
+	// Resolve refreshes deployment-specific IMS settings at the next session
+	// boundary.  Existing registrations keep their original config until they
+	// are torn down, which makes a config/profile update safe to reconnect.
+	Resolve func(context.Context, vowifi.SIMIdentity) (Config, error)
 	// OnSMS is invoked after a valid inbound RP-DATA/SMS-DELIVER has been
 	// decoded. Returning an error causes an RP-ERROR delivery report.
 	OnSMS func(context.Context, ReceivedSMS) error
@@ -157,8 +161,61 @@ func normalizeConfig(config Config) (Config, error) {
 }
 
 func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) (vowifi.IMSSession, error) {
+	if provider == nil {
+		return nil, errors.New("ims: nil provider")
+	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if provider.config.Resolve != nil {
+		resolved, err := provider.config.Resolve(ctx, request.Identity)
+		if err != nil {
+			return nil, fmt.Errorf("ims: resolve carrier configuration: %w", err)
+		}
+		if resolved.PCSCF == "" {
+			resolved.PCSCF = provider.config.PCSCF
+		}
+		if resolved.LocalAddress == "" {
+			resolved.LocalAddress = provider.config.LocalAddress
+		}
+		if resolved.Port == 0 {
+			resolved.Port = provider.config.Port
+		}
+		if resolved.RegistrationExpiry == 0 {
+			resolved.RegistrationExpiry = provider.config.RegistrationExpiry
+		}
+		if resolved.TransactionTimeout == 0 {
+			resolved.TransactionTimeout = provider.config.TransactionTimeout
+		}
+		if resolved.UserAgent == "" {
+			resolved.UserAgent = provider.config.UserAgent
+		}
+		if resolved.SecurityMode == "" {
+			resolved.SecurityMode = provider.config.SecurityMode
+		}
+		if resolved.IPSecInstaller == nil {
+			resolved.IPSecInstaller = provider.config.IPSecInstaller
+		}
+		if resolved.ProtectedClientPort == 0 {
+			resolved.ProtectedClientPort = provider.config.ProtectedClientPort
+		}
+		if resolved.ProtectedServerPort == 0 {
+			resolved.ProtectedServerPort = provider.config.ProtectedServerPort
+		}
+		if resolved.OnSMS == nil {
+			resolved.OnSMS = provider.config.OnSMS
+		}
+		if resolved.OnSMSStatus == nil {
+			resolved.OnSMSStatus = provider.config.OnSMSStatus
+		}
+		resolved.Resolve = provider.config.Resolve
+		normalized, err := normalizeConfig(resolved)
+		if err != nil {
+			return nil, err
+		}
+		copy := *provider
+		copy.config = normalized
+		provider = &copy
 	}
 	if request.Tunnel == nil {
 		return nil, errors.New("ims: tunnel session is required")
@@ -167,7 +224,11 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 	if !tunnel.Established {
 		return nil, vowifi.ErrTunnelNotEstablished
 	}
-	identities, err := deriveIdentities(request.Identity, provider.config)
+	effectiveConfig := provider.config
+	if effectiveConfig.Transport == "" && request.Carrier.IMSTransport != "" {
+		effectiveConfig.Transport = request.Carrier.IMSTransport
+	}
+	identities, err := deriveIdentitiesWithProfile(request.Identity, effectiveConfig, request.Carrier)
 	if err != nil {
 		return nil, err
 	}
@@ -237,9 +298,18 @@ type identitySet struct {
 	private string
 	public  string
 	user    string
+	source  string
 }
 
 func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, error) {
+	return deriveIdentitiesWithProfile(identity, config, vowifi.CarrierProfile{})
+}
+
+func deriveIdentitiesWithProfile(
+	identity vowifi.SIMIdentity,
+	config Config,
+	profile vowifi.CarrierProfile,
+) (identitySet, error) {
 	imsi := strings.TrimSpace(identity.IMSI)
 	if !digitsBetween(imsi, 5, 16) {
 		return identitySet{}, errors.New("ims: SIM IMSI is unavailable or invalid")
@@ -274,6 +344,13 @@ func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, 
 			return identitySet{}, errors.New("ims: configured private identity realm is invalid")
 		}
 	}
+	source := profile.IMSIdentitySource
+	if source == "" {
+		source = vowifi.IMSIdentityExplicit
+	}
+	if strings.TrimSpace(config.PrivateIdentity) == "" {
+		source = vowifi.IMSIdentityDerived
+	}
 	publicIdentityLower := strings.ToLower(publicIdentity)
 	if strings.ContainsAny(privateIdentity+publicIdentity, "\r\n") ||
 		!strings.Contains(privateIdentity, "@") ||
@@ -291,7 +368,7 @@ func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, 
 	if user == "" || strings.ContainsAny(user, "<>\" \t;") {
 		return identitySet{}, errors.New("ims: public identity user is invalid")
 	}
-	return identitySet{domain: domain, private: privateIdentity, public: publicIdentity, user: user}, nil
+	return identitySet{domain: domain, private: privateIdentity, public: publicIdentity, user: user, source: source}, nil
 }
 
 type pcscfEndpoint struct {
@@ -529,6 +606,7 @@ func newSession(
 		evidence: vowifi.IMSEvidence{
 			RegistrationState: "registering",
 			Transport:         transport,
+			IdentitySource:    identity.source,
 		},
 	}
 	if transport == "tcp" {
@@ -952,6 +1030,7 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 		RegisteredContact:    registeredContact,
 		ServiceRoute:         append([]string(nil), serviceRoutes...),
 		Transport:            session.transport,
+		IdentitySource:       session.identity.source,
 		LastSIPCode:          response.StatusCode,
 		SecurityMode:         session.effectiveSecurityMode(),
 		SecurityVerified:     session.securityActive,

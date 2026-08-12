@@ -24,8 +24,11 @@ var (
 
 const (
 	defaultOperationTimeout = 2 * time.Minute
-	defaultRetryInitial     = 2 * time.Second
-	defaultRetryMaximum     = 30 * time.Second
+	// Match VoHive's target-state recovery cadence: give the modem/network
+	// time to settle after a failed IKE/IMS attempt instead of hammering a
+	// registrar that may have just rejected the subscriber.
+	defaultRetryInitial = 30 * time.Second
+	defaultRetryMaximum = 2 * time.Minute
 )
 
 type StateHandler func(context.Context, vowifi.State) error
@@ -646,7 +649,8 @@ func (manager *Manager) runOperations(
 			continue
 		}
 		item.busy = false
-		shouldRetry := item.desiredEnabled && state.Phase == vowifi.PhaseFailed
+		shouldRetry := item.desiredEnabled && (state.Phase == vowifi.PhaseFailed ||
+			(state.Phase == vowifi.PhaseIdle && state.LastReason == "runtime_sim_identity_changed"))
 		if !shouldRetry && state.Phase != vowifi.PhaseFailed {
 			item.retryFailures = 0
 		}
@@ -705,7 +709,9 @@ func (manager *Manager) scheduleAutoRetry(deviceID string, item *entry) {
 			return
 		}
 		state := item.orchestrator.State()
-		if state.Phase != vowifi.PhaseFailed {
+		identityRebuild := state.Phase == vowifi.PhaseIdle &&
+			state.LastReason == "runtime_sim_identity_changed"
+		if state.Phase != vowifi.PhaseFailed && !identityRebuild {
 			if state.Phase != vowifi.PhaseStopping {
 				item.retryFailures = 0
 			}
@@ -721,7 +727,12 @@ func (manager *Manager) scheduleAutoRetry(deviceID string, item *entry) {
 		manager.mu.Unlock()
 
 		go manager.runOperations(deviceID, item, func(ctx context.Context, orchestrator *vowifi.Orchestrator) error {
-			_, err := orchestrator.Retry(ctx)
+			var err error
+			if identityRebuild {
+				_, err = orchestrator.Enable(ctx)
+			} else {
+				_, err = orchestrator.Retry(ctx)
+			}
 			return err
 		})
 	}()
@@ -756,7 +767,33 @@ func (manager *Manager) watch(
 			if !current {
 				return
 			}
-			if state.Phase == vowifi.PhaseFailed {
+			if state.Phase == vowifi.PhaseSIMReady {
+				manager.logger.Info(
+					"VoWiFi carrier profile resolved",
+					"device_id", deviceID,
+					"plmn", state.CarrierPLMN,
+					"preset_id", state.CarrierPresetID,
+					"profile_source", state.CarrierSource,
+				)
+			}
+			if state.Phase == vowifi.PhaseAccessReady {
+				manager.logger.Info(
+					"VoWiFi access profile resolved",
+					"device_id", deviceID,
+					"epdg_source", state.EPDGSource,
+					"identity_source", state.IMSIdentitySource,
+				)
+			}
+			if state.Phase == vowifi.PhaseIMSReady {
+				manager.logger.Info(
+					"VoWiFi IMS profile confirmed",
+					"device_id", deviceID,
+					"preset_id", state.CarrierPresetID,
+					"identity_source", state.IMSIdentitySource,
+				)
+			}
+			if state.Phase == vowifi.PhaseFailed ||
+				(state.Phase == vowifi.PhaseIdle && state.LastReason == "runtime_sim_identity_changed") {
 				manager.scheduleAutoRetry(deviceID, item)
 			} else if state.Phase == vowifi.PhaseSMSReady || !state.Enabled {
 				manager.mu.Lock()

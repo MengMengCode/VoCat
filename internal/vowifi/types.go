@@ -97,6 +97,11 @@ type State struct {
 	PureAirplanePolicy bool          `json:"pure_airplane_policy"`
 	HomeMCC            string        `json:"home_mcc,omitempty"`
 	HomeMNC            string        `json:"home_mnc,omitempty"`
+	CarrierPLMN        string        `json:"carrier_plmn,omitempty"`
+	CarrierPresetID    string        `json:"carrier_preset_id,omitempty"`
+	CarrierSource      string        `json:"carrier_source,omitempty"`
+	EPDGSource         string        `json:"epdg_source,omitempty"`
+	IMSIdentitySource  string        `json:"ims_identity_source,omitempty"`
 	EPDG               string        `json:"epdg,omitempty"`
 	ProxyMode          ProxyMode     `json:"proxy_mode,omitempty"`
 	ProxyID            string        `json:"proxy_id,omitempty"`
@@ -216,6 +221,7 @@ type TunnelSecurityPolicy struct {
 type TunnelRequest struct {
 	DeviceID string
 	Identity SIMIdentity
+	Carrier  CarrierProfile
 	EPDG     string
 	Proxy    ProxyRoute
 	AKA      AKAProvider
@@ -240,6 +246,7 @@ type TunnelEvidence struct {
 type IMSRequest struct {
 	DeviceID string
 	Identity SIMIdentity
+	Carrier  CarrierProfile
 	Tunnel   TunnelSession
 }
 
@@ -252,6 +259,7 @@ type IMSEvidence struct {
 	RegisteredContact    string
 	ServiceRoute         []string
 	Transport            string
+	IdentitySource       string
 	LastSIPCode          int
 	SecurityMode         string
 	SecurityVerified     bool

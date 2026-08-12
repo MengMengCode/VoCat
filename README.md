@@ -109,8 +109,15 @@ Current implementation limits that matter during acceptance:
   rejected instead of advertising media that Vocat cannot carry.
 - IMS APN, private/public identities, transport, SMSC, and EAP method are
   configured per device and are separate from the cellular data APN. Saving
-  these settings requires a Vocat process restart before the in-memory VoWiFi
-  runtime is rebuilt.
+  these settings takes effect on the next VoWiFi reconnect; an active session
+  is asked to reconnect automatically and a process restart is not required.
+- VoCat resolves the live home PLMN into a VoHive-compatible carrier preset
+  (including `O2_de_26203`) and records the matched PLMN, preset, ePDG source,
+  and IMS identity source in runtime diagnostics. Unknown PLMNs use the
+  standards-based fallback.
+- When VoWiFi remains desired after a failed start or a detected SIM/PLMN
+  change, recovery backs off at 30 seconds, one minute, and two minutes rather
+  than repeatedly submitting registrations to the carrier.
 - IKE defaults to MODP2048 with SHA-256. SHA-1 compatibility and MODP1024 are
   separate per-device switches, both disabled by default; enable only the exact
   legacy capability required by a verified carrier profile. No PLMN silently

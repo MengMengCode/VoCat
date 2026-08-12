@@ -196,6 +196,7 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 	if !akaEvidence.Ready {
 		return fail(PhaseSIMReady, errors.New("AKA application is not ready"))
 	}
+	carrierProfile := ResolveCarrierProfile(identity)
 	if smsc, smscErrs := orchestrator.readSMSCenter(setupContext); smsc != "" {
 		identity.SMSC = smsc
 	} else if len(smscErrs) > 0 {
@@ -211,6 +212,10 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 		state.SIMReady = true
 		state.HomeMCC = strings.TrimSpace(identity.HomeMCC)
 		state.HomeMNC = strings.TrimSpace(identity.HomeMNC)
+		state.CarrierPLMN = carrierProfile.PLMN
+		state.CarrierPresetID = carrierProfile.PresetID
+		state.CarrierSource = carrierProfile.Source
+		state.IMSIdentitySource = carrierProfile.IMSIdentitySource
 		state.LastReason = "sim_and_aka_ready"
 	})
 
@@ -259,6 +264,7 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 		state.Phase = PhaseAccessReady
 		state.AccessReady = true
 		state.EPDG = epdg
+		state.EPDGSource = epdgSource(identity)
 		state.ProxyMode = proxy.Mode
 		state.ProxyID = proxy.ID
 		state.LastReason = "epdg_access_ready"
@@ -267,6 +273,7 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 	tunnel, err := orchestrator.deps.Tunnel.Start(setupContext, TunnelRequest{
 		DeviceID: orchestrator.options.DeviceID,
 		Identity: identity,
+		Carrier:  carrierProfile,
 		EPDG:     epdg,
 		Proxy:    proxy,
 		AKA:      orchestrator.deps.AKA,
@@ -308,6 +315,7 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 	ims, err := orchestrator.deps.IMS.Start(setupContext, IMSRequest{
 		DeviceID: orchestrator.options.DeviceID,
 		Identity: identity,
+		Carrier:  carrierProfile,
 		Tunnel:   tunnel,
 	})
 	if err != nil {
@@ -326,6 +334,10 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 		state.Phase = PhaseIMSReady
 		state.IMSReady = true
 		state.IMSRegistration = strings.TrimSpace(imsEvidence.RegistrationState)
+		state.IMSIdentitySource = strings.TrimSpace(imsEvidence.IdentitySource)
+		if state.IMSIdentitySource == "" {
+			state.IMSIdentitySource = carrierProfile.IMSIdentitySource
+		}
 		state.LastReason = "ims_registered"
 	})
 	orchestrator.watchRuntimeIdentity(runtimeContext, resources, identity)
@@ -720,6 +732,13 @@ func DeriveEPDG(identity SIMIdentity) (string, error) {
 	), nil
 }
 
+func epdgSource(identity SIMIdentity) string {
+	if strings.TrimSpace(identity.EPDG) != "" {
+		return "configured"
+	}
+	return "derived"
+}
+
 func normalizeProxyRoute(route ProxyRoute) (ProxyRoute, error) {
 	if route.Mode == "" {
 		route.Mode = ProxyModeDirect
@@ -874,6 +893,7 @@ func (orchestrator *Orchestrator) watchRuntimeIdentity(
 	}
 	wantICCID := strings.TrimSpace(identity.ICCID)
 	wantIMSI := strings.TrimSpace(identity.IMSI)
+	wantProfile := ResolveCarrierProfile(identity)
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -896,8 +916,10 @@ func (orchestrator *Orchestrator) watchRuntimeIdentity(
 			}
 			gotICCID := strings.TrimSpace(current.ICCID)
 			gotIMSI := strings.TrimSpace(current.IMSI)
+			gotProfile := ResolveCarrierProfile(current)
 			if (wantICCID != "" && gotICCID != "" && !strings.EqualFold(wantICCID, gotICCID)) ||
-				(wantIMSI != "" && gotIMSI != "" && wantIMSI != gotIMSI) {
+				(wantIMSI != "" && gotIMSI != "" && wantIMSI != gotIMSI) ||
+				(wantProfile.PLMN != "" && gotProfile.PLMN != "" && wantProfile.PLMN != gotProfile.PLMN) {
 				orchestrator.revokeChangedIdentityRuntime(resources)
 				return
 			}
@@ -944,6 +966,16 @@ func (orchestrator *Orchestrator) revokeChangedIdentityRuntimeLocked(resources *
 		state.IMSReady = false
 		state.SMSReady = false
 		state.IMSRegistration = ""
+		state.HomeMCC = ""
+		state.HomeMNC = ""
+		state.CarrierPLMN = ""
+		state.CarrierPresetID = ""
+		state.CarrierSource = ""
+		state.EPDGSource = ""
+		state.IMSIdentitySource = ""
+		state.EPDG = ""
+		state.ProxyMode = ""
+		state.ProxyID = ""
 		state.LastErrorClass = "sim_identity_changed"
 		state.LastError = ErrSIMIdentityChanged.Error()
 		state.LastReason = "runtime_sim_identity_changed"

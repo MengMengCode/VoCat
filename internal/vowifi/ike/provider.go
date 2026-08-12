@@ -39,6 +39,10 @@ type Config struct {
 	AllowSHA1 bool
 	// UseMODP1024 explicitly selects DH group 2 instead of the group 14 default.
 	UseMODP1024 bool
+	// Resolve refreshes deployment configuration before each new tunnel.  The
+	// callback is intentionally evaluated only at session boundaries, so a
+	// live tunnel is never mutated underneath the IKE state machine.
+	Resolve func(context.Context, vowifi.SIMIdentity) (Config, error)
 }
 
 type Provider struct {
@@ -47,6 +51,14 @@ type Provider struct {
 }
 
 func NewProvider(config Config) (*Provider, error) {
+	normalized, err := normalizeProviderConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return &Provider{config: normalized, transportFactory: newDatagramTransport}, nil
+}
+
+func normalizeProviderConfig(config Config) (Config, error) {
 	if config.Random == nil {
 		config.Random = rand.Reader
 	}
@@ -57,13 +69,13 @@ func NewProvider(config Config) (*Provider, error) {
 		config.Dialer = &net.Dialer{}
 	}
 	if config.Timeout < 0 {
-		return nil, errors.New("ike: timeout must not be negative")
+		return Config{}, errors.New("ike: timeout must not be negative")
 	}
 	if config.Timeout == 0 {
 		config.Timeout = 12 * time.Second
 	}
 	if config.KeepaliveInterval < 0 {
-		return nil, errors.New("ike: keepalive interval must not be negative")
+		return Config{}, errors.New("ike: keepalive interval must not be negative")
 	}
 	if config.KeepaliveInterval == 0 {
 		config.KeepaliveInterval = 20 * time.Second
@@ -76,19 +88,19 @@ func NewProvider(config Config) (*Provider, error) {
 		config.APN = "ims"
 	}
 	if len(config.APN) > 253 || strings.ContainsAny(config.APN, " \t\r\n/:@") {
-		return nil, errors.New("ike: APN is invalid")
+		return Config{}, errors.New("ike: APN is invalid")
 	}
 	config.EAPMethod = strings.ToLower(strings.TrimSpace(config.EAPMethod))
 	if config.EAPMethod == "" {
 		config.EAPMethod = "aka"
 	}
 	if config.EAPMethod != "aka" && config.EAPMethod != "aka-prime" {
-		return nil, fmt.Errorf("ike: unsupported EAP method %q", config.EAPMethod)
+		return Config{}, fmt.Errorf("ike: unsupported EAP method %q", config.EAPMethod)
 	}
 	if config.Installer == nil {
 		config.Installer = defaultChildSAInstaller()
 	}
-	return &Provider{config: config, transportFactory: newDatagramTransport}, nil
+	return config, nil
 }
 
 func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelRequest) (vowifi.TunnelSession, error) {
@@ -101,6 +113,41 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if request.AKA == nil {
 		return nil, errors.New("ike: AKA provider is required")
 	}
+	if provider.config.Resolve != nil {
+		resolved, err := provider.config.Resolve(ctx, request.Identity)
+		if err != nil {
+			return nil, fmt.Errorf("ike: resolve carrier configuration: %w", err)
+		}
+		if resolved.Random == nil {
+			resolved.Random = provider.config.Random
+		}
+		if resolved.Resolver == nil {
+			resolved.Resolver = provider.config.Resolver
+		}
+		if resolved.Dialer == nil {
+			resolved.Dialer = provider.config.Dialer
+		}
+		if resolved.RootCAs == nil {
+			resolved.RootCAs = provider.config.RootCAs
+		}
+		if resolved.ResponderPublicKey == nil {
+			resolved.ResponderPublicKey = provider.config.ResponderPublicKey
+		}
+		if resolved.ServerName == "" {
+			resolved.ServerName = provider.config.ServerName
+		}
+		if resolved.Installer == nil {
+			resolved.Installer = provider.config.Installer
+		}
+		resolved.Resolve = provider.config.Resolve
+		normalized, err := normalizeProviderConfig(resolved)
+		if err != nil {
+			return nil, err
+		}
+		copy := *provider
+		copy.config = normalized
+		provider = &copy
+	}
 	epdg := strings.TrimSpace(request.EPDG)
 	if epdg == "" || strings.ContainsAny(epdg, " \t\r\n/:") {
 		return nil, errors.New("ike: ePDG must be a hostname")
@@ -110,8 +157,12 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	// lower-priority compatibility transform for those home PLMNs while keeping
 	// MODP2048 and the strong-first ordering. Other carriers still require the
 	// explicit AllowSHA1 setting before any legacy transform is advertised.
-	allowSHA1 := provider.config.AllowSHA1 || telefonicaGermanySHA1Compatibility(request.Identity)
-	aka, err := newAKAClientWithMethod(request.Identity, request.AKA, provider.config.EAPMethod)
+	allowSHA1 := provider.config.AllowSHA1 || request.Carrier.AllowSHA1 || telefonicaGermanySHA1Compatibility(request.Identity)
+	eapMethod := provider.config.EAPMethod
+	if eapMethod == "aka" && request.Carrier.EAPMethod != "" {
+		eapMethod = request.Carrier.EAPMethod
+	}
+	aka, err := newAKAClientWithMethod(request.Identity, request.AKA, eapMethod)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +331,11 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 		return nil, err
 	}
 	idi := payload{Type: payloadIDi, Body: append([]byte{provider.config.IdentityType, 0, 0, 0}, aka.identity...)}
-	requestedIDr := payload{Type: payloadIDr, Body: append([]byte{2, 0, 0, 0}, []byte(provider.config.APN)...)}
+	apn := provider.config.APN
+	if apn == "ims" && request.Carrier.IMSAPN != "" {
+		apn = request.Carrier.IMSAPN
+	}
+	requestedIDr := payload{Type: payloadIDr, Body: append([]byte{2, 0, 0, 0}, []byte(apn)...)}
 	tsi := dualStackTrafficSelectors(payloadTSi)
 	tsr := dualStackTrafficSelectors(payloadTSr)
 	firstAuthPayloads := buildInitialEAPOnlyAuth(idi, requestedIDr, childOfferBody, tsi, tsr)
@@ -417,7 +472,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 		return nil, errors.New("ike: duplicate final responder IDr payload")
 	}
 	if len(finalIDs) == 1 {
-		if err := validateFQDNIDr(finalIDs[0], provider.config.APN, "final APN"); err != nil {
+		if err := validateFQDNIDr(finalIDs[0], apn, "final APN"); err != nil {
 			return nil, fmt.Errorf("ike: final APN IDr: %w", err)
 		}
 	}

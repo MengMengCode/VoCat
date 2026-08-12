@@ -100,7 +100,13 @@ VoWiFi 代码是工程实现，不代表运营商认证，也不能证明任意 
 - VoWiFi 媒体支持 G.711 PCMA/PCMU、RTCP 及协商后的 RFC 4733 DTMF；
   不提供 AMR-NB/AMR-WB 转码，运营商只提供 AMR 时会明确拒绝。
 - IMS APN、私有/公共身份、传输协议、SMSC 与 EAP 方法按设备配置，并与
-  蜂窝数据 APN 分离。保存后需重启 Vocat，内存中的 VoWiFi 运行时才会重建。
+  蜂窝数据 APN 分离。保存后会在下一次 VoWiFi 重连时生效；如果运行态已启用，
+  Vocat 会自动排队重连，不需要重启进程。
+- Vocat 会按 SIM 的 home PLMN 解析与 VoHive 兼容的运营商 Profile（包括
+  `O2_de_26203`），并在运行态诊断中记录匹配 PLMN、preset、ePDG 来源和 IMS
+  身份来源；未知 PLMN 使用标准 fallback。
+- 只要 VoWiFi 目标策略仍开启，启动失败或检测到 SIM/PLMN 变化后会按 30 秒、
+  1 分钟、2 分钟退避恢复，避免持续撞击运营商注册接口。
 - IKE 默认使用 MODP2048 与 SHA-256。SHA-1 兼容和 MODP1024 是两个独立的
   设备开关，默认均关闭；只应按已验证运营商 Profile 的实际要求启用对应项，
   升级时不会再按 PLMN 静默开启弱算法。

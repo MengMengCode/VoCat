@@ -21,6 +21,29 @@ func (fakeSIM) ReadIdentity(context.Context, string) (vowifi.SIMIdentity, error)
 	}, nil
 }
 
+type mutableProfileSIM struct {
+	mu  sync.Mutex
+	mnc string
+}
+
+func (sim *mutableProfileSIM) ReadIdentity(context.Context, string) (vowifi.SIMIdentity, error) {
+	sim.mu.Lock()
+	mnc := sim.mnc
+	sim.mu.Unlock()
+	return vowifi.SIMIdentity{
+		ICCID:   "8944100000000000000",
+		IMSI:    "23415",
+		HomeMCC: "234",
+		HomeMNC: mnc,
+	}, nil
+}
+
+func (sim *mutableProfileSIM) SetMNC(mnc string) {
+	sim.mu.Lock()
+	sim.mnc = mnc
+	sim.mu.Unlock()
+}
+
 type fakeAKA struct{}
 
 func (fakeAKA) CheckReady(context.Context, vowifi.SIMIdentity) (vowifi.AKAEvidence, error) {
@@ -150,6 +173,23 @@ func testOrchestratorWithTunnel(
 	return orchestrator
 }
 
+func testOrchestratorWithSIM(t *testing.T, id string, sim vowifi.SIMIdentityReader) *vowifi.Orchestrator {
+	t.Helper()
+	orchestrator, err := vowifi.New(vowifi.Dependencies{
+		SIM:    sim,
+		AKA:    fakeAKA{},
+		Radio:  fakeRadio{},
+		Proxy:  fakeProxy{},
+		Tunnel: fakeTunnelProvider{},
+		IMS:    fakeIMSProvider{},
+		Phones: fakePhones{},
+	}, vowifi.Options{DeviceID: id, IdentityCheckInterval: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return orchestrator
+}
+
 func TestManagerRunsAndPublishesEnable(t *testing.T) {
 	var mu sync.Mutex
 	var states []vowifi.State
@@ -264,6 +304,47 @@ func TestManagerStopsAutomaticRetryWhenPolicyIsDisabled(t *testing.T) {
 	}
 	if state.Enabled || state.Phase != vowifi.PhaseIdle {
 		t.Fatalf("state after disabling retry policy = %+v", state)
+	}
+}
+
+func TestManagerRebuildsAfterHomePLMNChangeWhileDesired(t *testing.T) {
+	sim := &mutableProfileSIM{mnc: "15"}
+	manager := New(Options{
+		RetryInitial: 5 * time.Millisecond,
+		RetryMaximum: 10 * time.Millisecond,
+	})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.Register(testOrchestratorWithSIM(t, "ec20", sim)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RequestEnabled("ec20", true); err != nil {
+		t.Fatal(err)
+	}
+	waitFor := func(predicate func(vowifi.State) bool) vowifi.State {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			state, err := manager.State("ec20")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if predicate(state) {
+				return state
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatal("VoWiFi state did not converge")
+		return vowifi.State{}
+	}
+	waitFor(func(state vowifi.State) bool {
+		return state.Phase == vowifi.PhaseSMSReady && state.CarrierPLMN == "234015"
+	})
+	sim.SetMNC("03")
+	state := waitFor(func(state vowifi.State) bool {
+		return state.Phase == vowifi.PhaseSMSReady && state.CarrierPLMN == "234003" && state.Attempt >= 2
+	})
+	if state.LastReason != "sms_ready" {
+		t.Fatalf("rebuilt state = %+v", state)
 	}
 }
 
