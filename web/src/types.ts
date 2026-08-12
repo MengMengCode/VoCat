@@ -89,6 +89,7 @@ export interface ModemSummary {
   operatingMode?: number;
   phoneNumber?: string;
   phoneNumberSource?: string;
+  phoneNumberStatus?: string;
 }
 
 export interface DeviceListItem {

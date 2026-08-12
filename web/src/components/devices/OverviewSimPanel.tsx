@@ -40,7 +40,13 @@ export function OverviewSimPanel({ device, simOperatorDisplay }: OverviewSimPane
         <FieldRow label="IMEI" value={modem?.imei} sensitive={sensitive} monospace copyable />
         <FieldRow label="ICCID" value={modem?.iccid} sensitive={sensitive} monospace copyable />
         <FieldRow label="IMSI" value={modem?.imsi} sensitive={sensitive} monospace copyable />
-        <FieldRow label={t("本机号码")} value={device.localPhone || "--"} sensitive={sensitive} monospace copyable />
+        <FieldRow
+          label={t("本机号码")}
+          value={device.localPhone || modem?.phoneNumberStatus || "--"}
+          sensitive={sensitive}
+          monospace
+          copyable={Boolean(device.localPhone)}
+        />
         {activeEsim ? <FieldRow label={t("当前eSIM")} value={activeEsim} monospace copyable /> : null}
         <FieldRow label={t("原运营商")} value={operatorValue} copyable />
         <FieldRow label={t("固件版本")} value={modem?.firmware} monospace copyable />

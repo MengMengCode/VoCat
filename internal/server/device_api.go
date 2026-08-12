@@ -1420,6 +1420,7 @@ func (s *Server) configuredDeviceSummary(
 				if modemStatus, ok := result["modem"].(map[string]any); ok {
 					modemStatus["phone_number"] = association.Number
 					modemStatus["phone_number_source"] = association.Source
+					modemStatus["phone_number_status"] = "号码来自按 ICCID 保存的 IMS/VoWiFi 注册关联"
 				}
 			}
 		}
@@ -1773,7 +1774,15 @@ func modemSummary(snapshot *device.Snapshot, phone string, phoneSource string) m
 		"operating_mode":        snapshot.OperatingMode,
 		"phone_number":          phone,
 		"phone_number_source":   phoneSource,
+		"phone_number_status":   phoneStatus(snapshot),
 	}
+}
+
+func phoneStatus(snapshot *device.Snapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	return snapshot.Phone.Status
 }
 
 func idleVoWiFiRuntime(id string, snapshot *device.Snapshot) map[string]any {

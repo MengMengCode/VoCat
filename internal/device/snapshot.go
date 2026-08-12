@@ -98,6 +98,20 @@ func (manager *Manager) readSnapshot(
 			snapshot.OperatorName = carrierNameForPLMN(registration.PLMN, registration.Name)
 		}
 	}
+	// Qualcomm/OpenStick firmware often leaves AT+QENG empty even while QMI
+	// NAS has the serving LTE tuple.  Query the same native QMI session for
+	// band/channel and DMS MSISDN, using it only as a native-path supplement.
+	nativeQMI, nativeQMIWarnings := manager.readNativeQMISnapshot(ctx, candidate)
+	if nativeQMI.accessTech != "" && snapshot.AccessTech == "" {
+		snapshot.AccessTech = nativeQMI.accessTech
+	}
+	if nativeQMI.band != "" {
+		snapshot.Band = nativeQMI.band
+	}
+	if nativeQMI.channel != "" {
+		snapshot.Channel = nativeQMI.channel
+	}
+	snapshot.Warnings = append(snapshot.Warnings, nativeQMIWarnings...)
 	if snapshot.RegistrationSource == "" && (snapshot.OperatorName != "" || snapshot.OperatorCode != "") {
 		// Older firmware can omit registration queries while COPS still proves
 		// that an operator is selected.
@@ -149,6 +163,11 @@ func (manager *Manager) readSnapshot(
 	}
 
 	phone, warnings := manager.readPhoneNumber(ctx, client)
+	if nativeQMI.phone.Number != "" {
+		phone = nativeQMI.phone
+	} else if isQMINotProvisioned(nativeQMI.phoneErr) {
+		phone.Status = "CNUM、Own Numbers、EF_MSISDN 与 QMI DMS MSISDN 均未配置；号码不能由 IMSI/ICCID 推导，需要运营商或 IMS/VoWiFi 注册侧提供"
+	}
 	snapshot.Phone = phone
 	snapshot.Warnings = append(snapshot.Warnings, warnings...)
 	snapshot.UpdatedAt = time.Now().UTC()

@@ -21,6 +21,17 @@ type qmiDMSICCIDSession interface {
 	GetICCID(context.Context) (string, error)
 }
 
+// qmiNativeSnapshotSession is the optional QMI data surface used by native
+// WWAN devices for fields that Qualcomm firmware does not expose through the
+// AT port.  Keep it separate from qmiRadioSession so transcript-backed and
+// AT-only devices do not need to implement these queries.
+type qmiNativeSnapshotSession interface {
+	qmiRadioSession
+	GetMSISDN(context.Context) (string, error)
+	GetRFBandInfo(context.Context) (*qmi.RFBandInfo, error)
+	GetCellLocationInfo(context.Context) (*qmi.CellLocationInfo, error)
+}
+
 type qmiNetworkSelectionSession interface {
 	ResetNetworkSelection(context.Context) error
 }
@@ -146,6 +157,29 @@ func (session *productionQMIRadioSession) GetOperatingMode(ctx context.Context) 
 
 func (session *productionQMIRadioSession) GetICCID(ctx context.Context) (string, error) {
 	return session.dms.GetICCID(ctx)
+}
+
+func (session *productionQMIRadioSession) GetMSISDN(ctx context.Context) (string, error) {
+	if session == nil || session.dms == nil {
+		return "", errors.New("QMI DMS session is unavailable")
+	}
+	return session.dms.GetMSISDN(ctx)
+}
+
+func (session *productionQMIRadioSession) GetRFBandInfo(ctx context.Context) (*qmi.RFBandInfo, error) {
+	nas, err := session.nasService()
+	if err != nil {
+		return nil, err
+	}
+	return nas.GetRFBandInfo(ctx)
+}
+
+func (session *productionQMIRadioSession) GetCellLocationInfo(ctx context.Context) (*qmi.CellLocationInfo, error) {
+	nas, err := session.nasService()
+	if err != nil {
+		return nil, err
+	}
+	return nas.GetCellLocationInfo(ctx)
 }
 
 // ResetNetworkSelection clears a stale PLMN/band restriction after an eSIM

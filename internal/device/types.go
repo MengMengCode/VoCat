@@ -70,9 +70,10 @@ type PhoneNumber struct {
 }
 
 const (
-	PhoneSourceCNUM      = "at_cnum"
-	PhoneSourceOwnNumber = "sim_own_number"
-	PhoneSourceEFMSISDN  = "usim_ef_msisdn"
+	PhoneSourceCNUM         = "at_cnum"
+	PhoneSourceOwnNumber    = "sim_own_number"
+	PhoneSourceEFMSISDN     = "usim_ef_msisdn"
+	PhoneSourceQMIDMSMSISDN = "qmi_dms_msisdn"
 )
 
 type Snapshot struct {
