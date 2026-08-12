@@ -17,11 +17,21 @@ type qmiRadioSession interface {
 	Close() error
 }
 
+type qmiDMSICCIDSession interface {
+	GetICCID(context.Context) (string, error)
+}
+
+type qmiNetworkSelectionSession interface {
+	ResetNetworkSelection(context.Context) error
+}
+
 type qmiRadioSessionOpener func(context.Context, string) (qmiRadioSession, error)
 
 type productionQMIRadioSession struct {
 	client *qmi.Client
 	dms    *qmi.DMSService
+	nas    *qmi.NASService
+	nasErr error
 	lease  *qmiport.Lease
 }
 
@@ -52,11 +62,62 @@ func openQMIRadioSession(ctx context.Context, controlDevice string) (qmiRadioSes
 		lease.Release()
 		return nil, err
 	}
-	return &productionQMIRadioSession{client: client, dms: dms, lease: lease}, nil
+	// NAS is optional for the ordinary radio controls. Some firmware builds
+	// expose DMS but reject NAS client allocation; keep the existing radio path
+	// usable and report that limitation only to network-selection recovery.
+	nas, nasErr := qmi.NewNASServiceWithContext(openContext, client)
+	return &productionQMIRadioSession{
+		client: client,
+		dms:    dms,
+		nas:    nas,
+		nasErr: nasErr,
+		lease:  lease,
+	}, nil
 }
 
 func (session *productionQMIRadioSession) GetOperatingMode(ctx context.Context) (qmi.OperatingMode, error) {
 	return session.dms.GetOperatingMode(ctx)
+}
+
+func (session *productionQMIRadioSession) GetICCID(ctx context.Context) (string, error) {
+	return session.dms.GetICCID(ctx)
+}
+
+// ResetNetworkSelection clears a stale PLMN/band restriction after an eSIM
+// profile switch. The modem reports the complete RF capability through DMS;
+// copying that mask into NAS avoids carrying an old profile's narrow band
+// lock (for example LTE 1/3/5) into a different country or roaming profile.
+func (session *productionQMIRadioSession) ResetNetworkSelection(ctx context.Context) error {
+	if session == nil || session.nas == nil {
+		if session != nil && session.nasErr != nil {
+			return session.nasErr
+		}
+		return errors.New("QMI NAS network-selection recovery is unavailable")
+	}
+	pref := qmi.SystemSelectionPreference{
+		NetworkSelectionPreference:    qmi.NASNetworkSelectionAutomatic,
+		HasNetworkSelectionPreference: true,
+		ChangeDuration:                qmi.NASChangeDurationPermanent,
+		HasChangeDuration:             true,
+	}
+	if capabilities, err := session.dms.GetBandCapabilities(ctx); err == nil && capabilities != nil && capabilities.HasLTEBandCapability {
+		pref.LTEBandPreference = capabilities.LTEBandCapability
+		pref.HasLTEBandPreference = true
+	}
+	if err := session.nas.SetSystemSelectionPreference(ctx, pref); err != nil {
+		return fmt.Errorf("restore automatic QMI NAS selection: %w", err)
+	}
+	// OpenStick firmware accepts the selection update and starts acquisition,
+	// but returns OperationNotSupported for the optional force-search command.
+	// Treat that firmware quirk as success; the preference update itself is the
+	// supported trigger and a later modem-online transition performs the scan.
+	if err := session.nas.ForceNetworkSearch(ctx); err != nil {
+		qmiErr := qmi.GetQMIError(err)
+		if qmiErr == nil || qmiErr.ErrorCode != qmi.QMIErrOpDeviceUnsupported {
+			return fmt.Errorf("force QMI NAS network search: %w", err)
+		}
+	}
+	return nil
 }
 
 func (session *productionQMIRadioSession) SetOperatingMode(ctx context.Context, mode qmi.OperatingMode) error {
@@ -71,6 +132,10 @@ func (session *productionQMIRadioSession) Close() error {
 	if session.dms != nil {
 		closeErrors = append(closeErrors, session.dms.Close())
 		session.dms = nil
+	}
+	if session.nas != nil {
+		closeErrors = append(closeErrors, session.nas.Close())
+		session.nas = nil
 	}
 	if session.client != nil {
 		closeErrors = append(closeErrors, session.client.Close())
@@ -112,14 +177,75 @@ func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
 	if err != nil {
 		return true, fmt.Errorf("open QMI DMS modem reset: %w", err)
 	}
-	defer session.Close()
 	resetContext, cancelReset := manager.withTimeout(ctx, manager.longTimeout)
 	err = session.SetOperatingMode(resetContext, qmi.ModeReset)
 	cancelReset()
+	// ModeReset on the OpenStick 410 completes by leaving DMS in low-power.
+	// Close the pre-reset client and reopen QMI before explicitly bringing the
+	// radio online; otherwise the modem can remain in a permanent "searching"
+	// state with no RF interface after an accepted EnableProfile.
+	_ = session.Close()
 	if err != nil {
 		return true, fmt.Errorf("reset modem through QMI DMS: %w", err)
 	}
+	onlineSession, err := manager.reopenNativeQMIRadioOnline(ctx, controlDevice)
+	if err != nil {
+		return true, err
+	}
+	defer onlineSession.Close()
+	if selection, ok := onlineSession.(qmiNetworkSelectionSession); ok {
+		if err := selection.ResetNetworkSelection(ctx); err != nil {
+			return true, err
+		}
+	}
 	return true, nil
+}
+
+func (manager *Manager) reopenNativeQMIRadioOnline(ctx context.Context, controlDevice string) (qmiRadioSession, error) {
+	if manager.qmiRadioOpener == nil {
+		return nil, errors.New("QMI DMS modem online recovery is unavailable")
+	}
+	recoveryContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), manager.longTimeout)
+	defer cancel()
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		session, err := manager.qmiRadioOpener(recoveryContext, controlDevice)
+		if err == nil {
+			setContext, cancelSet := context.WithTimeout(recoveryContext, manager.commandTimeout*2)
+			setErr := session.SetOperatingMode(setContext, qmi.ModeOnline)
+			cancelSet()
+			if setErr == nil {
+				readContext, cancelRead := context.WithTimeout(recoveryContext, manager.commandTimeout)
+				mode, readErr := session.GetOperatingMode(readContext)
+				cancelRead()
+				if readErr == nil && mode == qmi.ModeOnline {
+					return session, nil
+				}
+				if readErr != nil {
+					lastErr = readErr
+				} else {
+					lastErr = fmt.Errorf("QMI modem remained in mode %d after online request", mode)
+				}
+			} else {
+				lastErr = setErr
+			}
+			_ = session.Close()
+		} else {
+			lastErr = err
+		}
+		if attempt+1 < 8 {
+			timer := time.NewTimer(750 * time.Millisecond)
+			select {
+			case <-timer.C:
+			case <-recoveryContext.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return nil, fmt.Errorf("restore QMI modem online mode: %w", recoveryContext.Err())
+			}
+		}
+	}
+	return nil, fmt.Errorf("restore QMI modem online mode: %w", lastErr)
 }
 
 func (manager *Manager) setNativeQMIFlight(

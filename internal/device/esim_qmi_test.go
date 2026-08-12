@@ -410,3 +410,25 @@ func TestVerifySwitchedICCIDUsesNativeQMIUIM(t *testing.T) {
 		t.Fatalf("AT opener used %d times for native QMI ICCID verification", opener.openCount)
 	}
 }
+
+func TestVerifySwitchedICCIDFallsBackToQMIDMSIdentity(t *testing.T) {
+	const (
+		id       = "wwan0"
+		expected = "894921007998876780"
+	)
+	manager, _, _ := newStartedNativeQMITestManager(t)
+	manager.qmiEUICCOpener = func(context.Context, string) (qmiEUICCSession, error) {
+		// UIM can expose the previous profile briefly while the modem's DMS
+		// subscriber identity has already switched to the target.
+		return &fakeDeviceQMIUIMSession{iccid: "89636624020107210949"}, nil
+	}
+	dms := &fakeQMIRadioSession{mode: qmi.ModeOnline, iccid: expected}
+	manager.qmiRadioOpener = func(context.Context, string) (qmiRadioSession, error) {
+		return dms, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := manager.verifySwitchedICCID(ctx, id, expected); err != nil {
+		t.Fatalf("verifySwitchedICCID: %v", err)
+	}
+}

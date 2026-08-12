@@ -977,10 +977,13 @@ func profileSwitchVerificationTimeout(manager *Manager) time.Duration {
 // is actually exposing the requested ICCID.
 func (manager *Manager) verifySwitchedICCID(ctx context.Context, id, expected string) error {
 	expected = strings.TrimSpace(expected)
-	const attempts = 6
+	const (
+		pollInterval = 2 * time.Second
+		maxAttempts  = 60
+	)
 	var lastICCID string
 	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		live, nativeQMI, qmiErr := manager.readNativeQMIICCID(ctx, id)
 		if nativeQMI {
 			if qmiErr != nil {
@@ -991,6 +994,20 @@ func (manager *Manager) verifySwitchedICCID(ctx context.Context, id, expected st
 					return nil
 				}
 				lastErr = fmt.Errorf("modem still reports ICCID %s", live)
+			}
+			// QMI-UIM reads can briefly lag the modem's subscriber identity while
+			// a profile refresh is being applied. DMS exposes the identity used by
+			// the modem itself, so accept it when it has already moved to target.
+			if dmsLive, dmsNative, dmsErr := manager.readNativeQMIDMSICCID(ctx, id); dmsNative {
+				if dmsErr == nil {
+					lastICCID = dmsLive
+					if dmsLive == expected {
+						return nil
+					}
+					lastErr = fmt.Errorf("modem still reports ICCID %s", dmsLive)
+				} else {
+					lastErr = errors.Join(lastErr, dmsErr)
+				}
 			}
 		} else {
 			for _, command := range []string{"AT+CCID", "AT+QCCID"} {
@@ -1014,16 +1031,37 @@ func (manager *Manager) verifySwitchedICCID(ctx context.Context, id, expected st
 				break
 			}
 		}
-		if attempt+1 < attempts {
-			select {
-			case <-time.After(2 * time.Second):
-			case <-ctx.Done():
-				return fmt.Errorf("esim: verify enabled profile %s: %w", expected, ctx.Err())
+		if attempt+1 >= maxAttempts {
+			break
+		}
+		wait := pollInterval
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				break
 			}
+			if remaining < wait {
+				wait = remaining
+			}
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			break
+		}
+		if ctx.Err() != nil {
+			break
 		}
 	}
 	if lastICCID != "" {
 		return fmt.Errorf("esim: EnableProfile was accepted but target ICCID %s did not become active after modem recovery (current ICCID %s)", expected, lastICCID)
+	}
+	if lastErr == nil {
+		lastErr = ctx.Err()
 	}
 	return fmt.Errorf("esim: EnableProfile was accepted but target ICCID %s could not be verified after modem recovery: %w", expected, lastErr)
 }
@@ -1050,6 +1088,36 @@ func (manager *Manager) readNativeQMIICCID(ctx context.Context, id string) (stri
 	iccid = strings.TrimRight(strings.ToUpper(strings.TrimSpace(iccid)), "F")
 	if !validProfileICCID(iccid) {
 		return "", true, errors.New("QMI-UIM returned no valid active ICCID")
+	}
+	return iccid, true, nil
+}
+
+func (manager *Manager) readNativeQMIDMSICCID(ctx context.Context, id string) (string, bool, error) {
+	controlDevice, native, err := manager.nativeQMIControl(id)
+	if err != nil || !native {
+		return "", native, err
+	}
+	if manager.qmiRadioOpener == nil {
+		return "", true, errors.New("QMI DMS ICCID verification is unavailable")
+	}
+	readContext, cancel := context.WithTimeout(ctx, manager.commandTimeout)
+	defer cancel()
+	session, err := manager.qmiRadioOpener(readContext, controlDevice)
+	if err != nil {
+		return "", true, fmt.Errorf("open QMI DMS session for ICCID verification: %w", err)
+	}
+	defer session.Close()
+	identityReader, ok := session.(qmiDMSICCIDSession)
+	if !ok {
+		return "", true, errors.New("QMI DMS ICCID verification is unavailable")
+	}
+	iccid, err := identityReader.GetICCID(readContext)
+	if err != nil {
+		return "", true, fmt.Errorf("read active ICCID through QMI DMS: %w", err)
+	}
+	iccid = strings.TrimRight(strings.ToUpper(strings.TrimSpace(iccid)), "F")
+	if !validProfileICCID(iccid) {
+		return "", true, errors.New("QMI DMS returned no valid active ICCID")
 	}
 	return iccid, true, nil
 }

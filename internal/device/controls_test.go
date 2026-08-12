@@ -11,12 +11,15 @@ import (
 )
 
 type fakeQMIRadioSession struct {
-	mode       qmi.OperatingMode
-	getModes   []qmi.OperatingMode
-	setModes   []qmi.OperatingMode
-	getErr     error
-	setErr     error
-	closeCount int
+	mode          qmi.OperatingMode
+	iccid         string
+	iccidErr      error
+	getModes      []qmi.OperatingMode
+	setModes      []qmi.OperatingMode
+	networkResets int
+	getErr        error
+	setErr        error
+	closeCount    int
 }
 
 func (session *fakeQMIRadioSession) GetOperatingMode(context.Context) (qmi.OperatingMode, error) {
@@ -28,12 +31,21 @@ func (session *fakeQMIRadioSession) GetOperatingMode(context.Context) (qmi.Opera
 	return session.mode, session.getErr
 }
 
+func (session *fakeQMIRadioSession) GetICCID(context.Context) (string, error) {
+	return session.iccid, session.iccidErr
+}
+
 func (session *fakeQMIRadioSession) SetOperatingMode(_ context.Context, mode qmi.OperatingMode) error {
 	if session.setErr != nil {
 		return session.setErr
 	}
 	session.setModes = append(session.setModes, mode)
 	session.mode = mode
+	return nil
+}
+
+func (session *fakeQMIRadioSession) ResetNetworkSelection(context.Context) error {
+	session.networkResets++
 	return nil
 }
 
@@ -150,10 +162,13 @@ func TestProfileSwitchRecoveryUsesQMIModemResetForNativeWWAN(t *testing.T) {
 	if err := manager.rebootForProfileSwitch(context.Background(), id); err != nil {
 		t.Fatalf("rebootForProfileSwitch() error = %v", err)
 	}
-	if len(session.setModes) != 1 || session.setModes[0] != qmi.ModeReset {
+	if len(session.setModes) != 2 || session.setModes[0] != qmi.ModeReset || session.setModes[1] != qmi.ModeOnline {
 		t.Fatalf("QMI reset modes = %v", session.setModes)
 	}
-	if session.closeCount != 1 {
+	if session.networkResets != 1 {
+		t.Fatalf("QMI network selection resets = %d", session.networkResets)
+	}
+	if session.closeCount != 2 {
 		t.Fatalf("QMI close count = %d", session.closeCount)
 	}
 	if atOpener.openCount != 0 {
