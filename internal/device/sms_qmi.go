@@ -297,12 +297,14 @@ func (manager *Manager) sendSMSQMILocked(
 		)
 		switch transport {
 		case qmi.WMSTransportNetworkRegistrationFullService,
-			qmi.WMSTransportNetworkRegistrationInProcess:
-			// Full service is ready, while in-process is explicitly allowed to
-			// let raw-send provide the authoritative modem result.
-		case qmi.WMSTransportNetworkRegistrationNoService,
-			qmi.WMSTransportNetworkRegistrationFailure,
+			qmi.WMSTransportNetworkRegistrationInProcess,
 			qmi.WMSTransportNetworkRegistrationLimitedService:
+			// Roaming can expose SMS while packet data (or full CS service) is
+			// unavailable. Let WMS raw-send provide the authoritative result for
+			// both in-process and limited service instead of rejecting a valid
+			// SMS-only roaming path in the client.
+		case qmi.WMSTransportNetworkRegistrationNoService,
+			qmi.WMSTransportNetworkRegistrationFailure:
 			err = fmt.Errorf(
 				"%w: QMI WMS transport is %s",
 				ErrSMSTransportUnavailable,

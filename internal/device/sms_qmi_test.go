@@ -278,7 +278,6 @@ func TestNativeQMISendTransportPreflight(t *testing.T) {
 	blocked := []qmi.WMSTransportNetworkRegistration{
 		qmi.WMSTransportNetworkRegistrationNoService,
 		qmi.WMSTransportNetworkRegistrationFailure,
-		qmi.WMSTransportNetworkRegistrationLimitedService,
 		qmi.WMSTransportNetworkRegistration(0xff),
 	}
 	for _, status := range blocked {
@@ -312,6 +311,10 @@ func TestNativeQMISendTransportPreflight(t *testing.T) {
 		{
 			name:      "in-process",
 			transport: qmi.WMSTransportNetworkRegistrationInProcess,
+		},
+		{
+			name:      "limited-service-roaming-sms",
+			transport: qmi.WMSTransportNetworkRegistrationLimitedService,
 		},
 		{
 			name: "unsupported",
