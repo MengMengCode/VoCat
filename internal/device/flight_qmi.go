@@ -35,6 +35,71 @@ type productionQMIRadioSession struct {
 	lease  *qmiport.Lease
 }
 
+// The native WWAN path uses the same QMI NAS client for radio wake-up,
+// operator selection, and registration.  Keep these methods optional on the
+// qmiRadioSession interface so the older transcript-backed tests and AT-only
+// devices do not need to grow a fake NAS implementation.
+func (session *productionQMIRadioSession) nasService() (*qmi.NASService, error) {
+	if session == nil {
+		return nil, errors.New("QMI NAS session is unavailable")
+	}
+	if session.nas == nil {
+		if session.nasErr != nil {
+			return nil, session.nasErr
+		}
+		return nil, errors.New("QMI NAS session is unavailable")
+	}
+	return session.nas, nil
+}
+
+func (session *productionQMIRadioSession) GetServingSystem(ctx context.Context) (*qmi.ServingSystem, error) {
+	nas, err := session.nasService()
+	if err != nil {
+		return nil, err
+	}
+	return nas.GetServingSystem(ctx)
+}
+
+func (session *productionQMIRadioSession) GetSystemSelectionPreference(ctx context.Context) (*qmi.SystemSelectionPreference, error) {
+	nas, err := session.nasService()
+	if err != nil {
+		return nil, err
+	}
+	return nas.GetSystemSelectionPreference(ctx)
+}
+
+func (session *productionQMIRadioSession) SetSystemSelectionPreference(ctx context.Context, pref qmi.SystemSelectionPreference) error {
+	nas, err := session.nasService()
+	if err != nil {
+		return err
+	}
+	return nas.SetSystemSelectionPreference(ctx, pref)
+}
+
+func (session *productionQMIRadioSession) InitiateNetworkRegister(ctx context.Context, req qmi.NASInitiateNetworkRegisterRequest) error {
+	nas, err := session.nasService()
+	if err != nil {
+		return err
+	}
+	return nas.InitiateNetworkRegister(ctx, req)
+}
+
+func (session *productionQMIRadioSession) ForceNetworkSearch(ctx context.Context) error {
+	nas, err := session.nasService()
+	if err != nil {
+		return err
+	}
+	return nas.ForceNetworkSearch(ctx)
+}
+
+func (session *productionQMIRadioSession) AttachDetach(ctx context.Context, attached bool) error {
+	nas, err := session.nasService()
+	if err != nil {
+		return err
+	}
+	return nas.AttachDetach(ctx, attached)
+}
+
 // openQMIRadioSession controls native WWAN radios through QMI DMS. OpenStick
 // 410 firmware rejects AT+CFUN=1 even though the equivalent DMS online request
 // is supported, so native WWAN devices must not fall back to the AT path.
@@ -318,6 +383,13 @@ func (manager *Manager) setNativeQMIFlight(
 	current := qmiModeAsCFUN(currentQMI)
 	currentRadioOff := isQMIRadioOffMode(currentQMI)
 	manager.updateSnapshotMode(id, state, current)
+	if !enabled && !currentRadioOff {
+		// DMS Online is only the radio half of the recovery. VoHive continues
+		// with a background NAS registration/PS-attach reconcile after the
+		// flight-mode transition; do the same without holding the radio QMI
+		// session open or delaying the control-plane response.
+		manager.startNativeQMIRegistrationReconcile(id)
+	}
 	return FlightResult{
 		PreviousMode: previous,
 		CurrentMode:  current,

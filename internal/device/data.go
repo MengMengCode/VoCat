@@ -46,6 +46,31 @@ func (manager *Manager) SetNetwork(
 		}
 	}
 	candidate := manager.candidateFor(state)
+	// OpenStick's native WWAN path must drive registration through QMI NAS.
+	// AT+COPS only updates the legacy AT facade on this firmware and can leave
+	// NAS in not-registered-searching, which then makes qmi-network report a
+	// generic-no-service call failure.
+	if request.Enabled && isNativeQMICandidate(candidate) {
+		registrationContext, cancel := context.WithTimeout(ctx, manager.scanTimeout)
+		registrationSession, openErr := manager.openNativeQMIRegistration(registrationContext, candidate)
+		if openErr != nil {
+			cancel()
+			manager.setResult(id, state, nil, openErr)
+			return NetworkResult{}, fmt.Errorf("prepare native QMI registration: %w", openErr)
+		}
+		registrationErr := ensureNativeQMIRegistration(
+			registrationContext,
+			registrationSession,
+			qmiRegistrationRequestAutomatic(),
+			true,
+		)
+		_ = registrationSession.Close()
+		cancel()
+		if registrationErr != nil {
+			manager.setResult(id, state, nil, registrationErr)
+			return NetworkResult{}, registrationErr
+		}
+	}
 	if candidate.QMIControl != "" && candidate.NetworkInterface != "" {
 		return setQMINetwork(ctx, candidate, request.Enabled, apn, ipVersion)
 	}
@@ -194,6 +219,19 @@ func usbNetModeName(mode int) string {
 }
 
 func (manager *Manager) OperatorSelection(ctx context.Context, id string) (OperatorSelection, error) {
+	state, err := manager.lookup(id)
+	if err != nil {
+		return OperatorSelection{}, err
+	}
+	candidate := manager.candidateFor(state)
+	if isNativeQMICandidate(candidate) {
+		state.opMu.Lock()
+		defer state.opMu.Unlock()
+		if err := manager.validateActive(id, state); err != nil {
+			return OperatorSelection{}, err
+		}
+		return manager.nativeQMIOperatorSelectionLocked(ctx, candidate)
+	}
 	response, err := manager.ExecuteAT(ctx, id, "AT+COPS?")
 	if err != nil {
 		return OperatorSelection{}, err
@@ -256,6 +294,18 @@ func (manager *Manager) SetOperatorSelection(
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
 		return OperatorSelection{}, err
+	}
+	candidate := manager.candidateFor(state)
+	if isNativeQMICandidate(candidate) {
+		selection, err := manager.setNativeQMIOperatorSelectionLocked(
+			ctx,
+			candidate,
+			automatic,
+			plmn,
+			accessTechnologyValue,
+		)
+		manager.setResult(id, state, nil, err)
+		return selection, err
 	}
 	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
 	if err != nil {
@@ -356,6 +406,12 @@ func (manager *Manager) ReRegisterOperator(ctx context.Context, id string) (Oper
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
 		return OperatorSelection{}, err
+	}
+	candidate := manager.candidateFor(state)
+	if isNativeQMICandidate(candidate) {
+		selection, err := manager.reRegisterNativeQMIOperatorLocked(ctx, candidate)
+		manager.setResult(id, state, nil, err)
+		return selection, err
 	}
 	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
 	if err != nil {

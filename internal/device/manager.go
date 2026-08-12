@@ -22,25 +22,27 @@ type Options struct {
 }
 
 type Manager struct {
-	mu             sync.RWMutex
-	esimMu         sync.Mutex // serializes eSIM card access (list/switch/download)
-	esimRecoveryMu sync.Mutex
-	esimRecoveries map[string]chan struct{}
-	esimCacheMu    sync.RWMutex
-	esimCache      map[string]EsimInfo
-	esimActiveName map[string]string
-	discoverer     modem.Discoverer
-	opener         modem.Opener
-	commandTimeout time.Duration
-	longTimeout    time.Duration
-	smsTimeout     time.Duration
-	scanTimeout    time.Duration
-	qmiEUICCOpener qmiEUICCSessionOpener
-	qmiRadioOpener qmiRadioSessionOpener
-	qmiSMSOpener   qmiSMSSessionOpener
-	started        bool
-	devices        map[string]*managedDevice
-	ussdSessions   map[string]ussdSession
+	mu                            sync.RWMutex
+	esimMu                        sync.Mutex // serializes eSIM card access (list/switch/download)
+	esimRecoveryMu                sync.Mutex
+	esimRecoveries                map[string]chan struct{}
+	esimCacheMu                   sync.RWMutex
+	esimCache                     map[string]EsimInfo
+	esimActiveName                map[string]string
+	discoverer                    modem.Discoverer
+	opener                        modem.Opener
+	commandTimeout                time.Duration
+	longTimeout                   time.Duration
+	smsTimeout                    time.Duration
+	scanTimeout                   time.Duration
+	qmiEUICCOpener                qmiEUICCSessionOpener
+	qmiRadioOpener                qmiRadioSessionOpener
+	qmiSMSOpener                  qmiSMSSessionOpener
+	nativeQMIRegistrationMu       sync.Mutex
+	nativeQMIRegistrationInFlight map[string]struct{}
+	started                       bool
+	devices                       map[string]*managedDevice
+	ussdSessions                  map[string]ussdSession
 }
 
 // ussdSession tracks an open USSD dialog on a device so a follow-up Continue or
@@ -86,20 +88,21 @@ func NewManager(options Options) (*Manager, error) {
 		options.ScanTimeout = 150 * time.Second
 	}
 	return &Manager{
-		discoverer:     options.Discoverer,
-		opener:         options.Opener,
-		commandTimeout: options.CommandTimeout,
-		longTimeout:    options.LongTimeout,
-		smsTimeout:     options.SMSTimeout,
-		scanTimeout:    options.ScanTimeout,
-		qmiEUICCOpener: openQMIEUICCSession,
-		qmiRadioOpener: openQMIRadioSession,
-		qmiSMSOpener:   openQMISMSSession,
-		devices:        make(map[string]*managedDevice),
-		ussdSessions:   make(map[string]ussdSession),
-		esimRecoveries: make(map[string]chan struct{}),
-		esimCache:      make(map[string]EsimInfo),
-		esimActiveName: make(map[string]string),
+		discoverer:                    options.Discoverer,
+		opener:                        options.Opener,
+		commandTimeout:                options.CommandTimeout,
+		longTimeout:                   options.LongTimeout,
+		smsTimeout:                    options.SMSTimeout,
+		scanTimeout:                   options.ScanTimeout,
+		qmiEUICCOpener:                openQMIEUICCSession,
+		qmiRadioOpener:                openQMIRadioSession,
+		qmiSMSOpener:                  openQMISMSSession,
+		nativeQMIRegistrationInFlight: make(map[string]struct{}),
+		devices:                       make(map[string]*managedDevice),
+		ussdSessions:                  make(map[string]ussdSession),
+		esimRecoveries:                make(map[string]chan struct{}),
+		esimCache:                     make(map[string]EsimInfo),
+		esimActiveName:                make(map[string]string),
 	}, nil
 }
 
