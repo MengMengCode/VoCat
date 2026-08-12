@@ -742,7 +742,14 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	if err := manager.waitForESIMRecovery(verifyContext, id); err != nil {
 		return err
 	}
-	return manager.verifySwitchedICCID(verifyContext, id, iccid)
+	if err := manager.verifySwitchedICCID(verifyContext, id, iccid); err != nil {
+		return err
+	}
+	// verifySwitchedICCID reads the live QMI-UIM/DMS identity, while the device
+	// overview is served from Manager's cached AT/QMI snapshot. Refresh that
+	// snapshot after the live identity has moved; otherwise the switch succeeds
+	// but the page keeps showing the previous SIM until an unrelated refresh.
+	return manager.refreshVerifiedProfileSnapshot(verifyContext, id, iccid)
 }
 
 func (manager *Manager) startProfileSwitchRecovery(id string) {
@@ -805,6 +812,7 @@ func (manager *Manager) cachedESIMInfo(id string) (EsimInfo, bool) {
 func (manager *Manager) cacheESIMInfo(id string, info EsimInfo) {
 	manager.esimCacheMu.Lock()
 	manager.esimCache[id] = cloneESIMInfo(info)
+	manager.updateActiveESIMProfileNameLocked(id, info)
 	manager.esimCacheMu.Unlock()
 }
 
@@ -822,8 +830,30 @@ func (manager *Manager) markCachedProfileEnabled(id, iccid string) {
 			}
 		}
 		manager.esimCache[id] = info
+		manager.updateActiveESIMProfileNameLocked(id, info)
 	}
 	manager.esimCacheMu.Unlock()
+}
+
+// updateActiveESIMProfileNameLocked keeps the overview's cache-only profile
+// label aligned with the profile-state cache after a local switch/disable.
+// The caller must hold esimCacheMu.
+func (manager *Manager) updateActiveESIMProfileNameLocked(id string, info EsimInfo) {
+	name := ""
+	for _, profile := range info.Profiles {
+		if profile.State == 1 {
+			name = firstNonEmptyString(profile.Name, profile.Nickname, profile.ServiceProvider, profile.ICCID)
+			break
+		}
+	}
+	if manager.esimActiveName == nil {
+		manager.esimActiveName = make(map[string]string)
+	}
+	if name == "" {
+		delete(manager.esimActiveName, id)
+	} else {
+		manager.esimActiveName[id] = name
+	}
 }
 
 func (manager *Manager) markCachedProfileDisabled(id, iccid string) {
@@ -838,6 +868,7 @@ func (manager *Manager) markCachedProfileDisabled(id, iccid string) {
 			}
 		}
 		manager.esimCache[id] = info
+		manager.updateActiveESIMProfileNameLocked(id, info)
 	}
 	manager.esimCacheMu.Unlock()
 }
@@ -854,6 +885,7 @@ func (manager *Manager) removeCachedProfile(id, iccid string) {
 		}
 		info.Profiles = profiles
 		manager.esimCache[id] = info
+		manager.updateActiveESIMProfileNameLocked(id, info)
 	}
 	manager.esimCacheMu.Unlock()
 }
@@ -869,6 +901,7 @@ func (manager *Manager) renameCachedProfile(id, iccid, nickname string) {
 			}
 		}
 		manager.esimCache[id] = info
+		manager.updateActiveESIMProfileNameLocked(id, info)
 	}
 	manager.esimCacheMu.Unlock()
 }
@@ -1064,6 +1097,103 @@ func (manager *Manager) verifySwitchedICCID(ctx context.Context, id, expected st
 		lastErr = ctx.Err()
 	}
 	return fmt.Errorf("esim: EnableProfile was accepted but target ICCID %s could not be verified after modem recovery: %w", expected, lastErr)
+}
+
+// refreshVerifiedProfileSnapshot reconciles the cached device overview with
+// the identity that verifySwitchedICCID already proved through the native
+// modem control plane. Native OpenStick firmware can expose the new ICCID via
+// QMI-UIM/DMS before the AT SIM cache catches up, so merge that authoritative
+// value into the successful snapshot before publishing it.
+func (manager *Manager) refreshVerifiedProfileSnapshot(ctx context.Context, id, expected string) error {
+	expected = strings.TrimSpace(expected)
+	verifiedSnapshotMerged := false
+	// The QMI-UIM verification is authoritative even when the AT snapshot is
+	// temporarily unavailable. Publish the new subscriber identity immediately
+	// so the successful switch is visible without requiring a browser refresh.
+	identityContext, cancelIdentity := context.WithTimeout(context.Background(), manager.commandTimeout*2)
+	live, nativeQMI, identityErr := manager.readNativeQMIICCID(identityContext, id)
+	cancelIdentity()
+	if nativeQMI && identityErr == nil && strings.EqualFold(strings.TrimSpace(live), expected) {
+		manager.mergeVerifiedProfileSnapshot(id, live)
+		verifiedSnapshotMerged = true
+	}
+	const (
+		attempts = 8
+		interval = 2 * time.Second
+	)
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		refreshContext, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), manager.commandTimeout*6)
+		snapshot, refreshErr := manager.Refresh(refreshContext, id)
+		cancelRefresh()
+		if refreshErr == nil {
+			live, nativeQMI, qmiErr := manager.readNativeQMIICCID(ctx, id)
+			liveIdentityOK := !nativeQMI
+			if nativeQMI {
+				if qmiErr != nil {
+					lastErr = qmiErr
+				} else {
+					liveIdentityOK = true
+					snapshot.ICCID = live
+					if state, stateErr := manager.lookup(id); stateErr == nil {
+						manager.setResult(id, state, &snapshot, nil)
+					}
+				}
+			}
+			if refreshErr == nil && liveIdentityOK && strings.EqualFold(strings.TrimSpace(snapshot.ICCID), expected) {
+				return nil
+			}
+			if lastErr == nil || qmiErr == nil {
+				lastErr = fmt.Errorf("refreshed modem snapshot still reports ICCID %s", strings.TrimSpace(snapshot.ICCID))
+			}
+		} else {
+			lastErr = refreshErr
+		}
+		if attempt+1 >= attempts {
+			break
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return fmt.Errorf("esim: refresh profile snapshot: %w", ctx.Err())
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no snapshot refresh attempt completed")
+	}
+	if verifiedSnapshotMerged {
+		// The identity is already published from QMI-UIM; AT/NAS fields can catch
+		// up on the manager's next periodic refresh without failing the switch.
+		return nil
+	}
+	return fmt.Errorf("esim: target ICCID %s was verified but the device snapshot was not refreshed: %w", expected, lastErr)
+}
+
+func (manager *Manager) mergeVerifiedProfileSnapshot(id, iccid string) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	state := manager.devices[id]
+	if state == nil {
+		return
+	}
+	value := Snapshot{DeviceID: id, Responsive: true}
+	if state.snapshot != nil {
+		value = *state.snapshot
+		value.Warnings = append([]string(nil), state.snapshot.Warnings...)
+	}
+	value.Responsive = true
+	value.ICCID = strings.TrimSpace(iccid)
+	value.SIMStatus = "ready"
+	value.SIMReady = true
+	value.UpdatedAt = time.Now().UTC()
+	state.snapshot = &value
+	state.lastUpdated = value.UpdatedAt
+	state.lastError = ""
+	state.recovering = false
 }
 
 func (manager *Manager) readNativeQMIICCID(ctx context.Context, id string) (string, bool, error) {

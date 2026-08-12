@@ -38,17 +38,9 @@ type subscriberBoundSMSReader interface {
 	) (device.SMSSubscriberScan, error)
 }
 
-type backgroundSubscriberBoundSMSReader interface {
-	ListSMSBoundSubscriberQuiet(
-		context.Context,
-		string,
-	) (device.SMSSubscriberScan, error)
-}
-
 var (
-	_ subscriberBoundSMSSender           = (*device.Manager)(nil)
-	_ subscriberBoundSMSReader           = (*device.Manager)(nil)
-	_ backgroundSubscriberBoundSMSReader = (*device.Manager)(nil)
+	_ subscriberBoundSMSSender = (*device.Manager)(nil)
+	_ subscriberBoundSMSReader = (*device.Manager)(nil)
 )
 
 type smsMEProvenance struct {
@@ -789,15 +781,7 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 			continue
 		}
 		listContext, cancelList := context.WithTimeout(ctx, 30*time.Second)
-		var scan device.SMSSubscriberScan
-		if quietReader, ok := s.devices.(backgroundSubscriberBoundSMSReader); ok {
-			// SMS storage is optional background work. Keep its QMI/WMS failures
-			// out of the device control-plane health signal; the scan error is
-			// still logged and the next tick retries it.
-			scan, err = quietReader.ListSMSBoundSubscriberQuiet(listContext, physicalID)
-		} else {
-			scan, err = reader.ListSMSBoundSubscriber(listContext, physicalID)
-		}
+		scan, err := reader.ListSMSBoundSubscriber(listContext, physicalID)
 		cancelList()
 		if err != nil {
 			s.logger.Debug("modem SMS synchronization skipped", "device_id", config.ID, "error", err)

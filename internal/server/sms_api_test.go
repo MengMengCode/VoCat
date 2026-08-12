@@ -28,7 +28,6 @@ type recordingSMSDeviceController struct {
 	boundListTransport string
 	boundListErr       error
 	boundListCalls     int
-	quietListCalls     int
 }
 
 func (controller *recordingSMSDeviceController) ListSMSBoundSubscriber(
@@ -42,14 +41,6 @@ func (controller *recordingSMSDeviceController) ListSMSBoundSubscriber(
 		Storages:  []string{"SM", "ME"},
 		Transport: controller.boundListTransport,
 	}, controller.boundListErr
-}
-
-func (controller *recordingSMSDeviceController) ListSMSBoundSubscriberQuiet(
-	ctx context.Context,
-	id string,
-) (device.SMSSubscriberScan, error) {
-	controller.quietListCalls++
-	return controller.ListSMSBoundSubscriber(ctx, id)
 }
 
 func (controller *recordingSMSDeviceController) SendSMS(
@@ -938,9 +929,6 @@ func TestNativeWWANSMSSyncWaitsForVoWiFiRadioRestoration(t *testing.T) {
 	server.syncModemSMS(ctx, "wwan0")
 	if devices.boundListCalls != 1 {
 		t.Fatalf("post-restoration QMI scans = %d, want 1", devices.boundListCalls)
-	}
-	if devices.quietListCalls != 1 {
-		t.Fatalf("background QMI scans using quiet reader = %d, want 1", devices.quietListCalls)
 	}
 }
 

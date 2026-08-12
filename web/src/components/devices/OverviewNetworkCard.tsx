@@ -37,12 +37,10 @@ export function OverviewNetworkCard({ device, onOpenOperatorSelection }: { devic
   const phaseLabel = lifecycleLabel(device.lifecyclePhase);
   if (phaseLabel && device.lifecyclePhase !== "online" && device.lifecyclePhase !== "offline") statusText = phaseLabel;
   else if (online) {
-	    statusText = registered
+    statusText = registered
       ? ""
       : device.registrationStateLabel === "searching"
         ? t("搜索网络中")
-        : device.registrationStateLabel === "limited"
-          ? t("受限服务（数据未附着）")
         : device.registrationStateLabel === "denied"
           ? t("驻网被拒")
           : t("未驻网");
@@ -57,8 +55,6 @@ export function OverviewNetworkCard({ device, onOpenOperatorSelection }: { devic
 		? t("已驻网")
 		: device.registrationStateLabel === "searching"
 		  ? t("正在搜索网络")
-		  : device.registrationStateLabel === "limited"
-			? t("受限服务（数据未附着）")
 		  : device.registrationStateLabel === "denied"
 			? t("驻网被拒")
 			: t("未驻网");

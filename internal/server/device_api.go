@@ -1733,7 +1733,6 @@ func modemSummary(snapshot *device.Snapshot, phone string, phoneSource string) m
 			"iccid":                 "",
 			"reg_status":            0,
 			"reg_status_text":       "not refreshed",
-			"registration_limited":  false,
 			"sim_inserted":          false,
 			"phone_number":          phone,
 			"phone_number_source":   phoneSource,
@@ -1769,7 +1768,6 @@ func modemSummary(snapshot *device.Snapshot, phone string, phoneSource string) m
 		"model":                 snapshot.Model,
 		"reg_status":            snapshot.RegistrationStatus,
 		"reg_status_text":       registrationText(snapshot),
-		"registration_limited":  snapshot.RegistrationLimited,
 		"ps_attached":           snapshot.PSAttached,
 		"sim_inserted":          snapshot.SIMStatus != "",
 		"operating_mode":        snapshot.OperatingMode,
@@ -1857,9 +1855,6 @@ func registrationLabel(snapshot *device.Snapshot) string {
 	if snapshot == nil {
 		return "unknown"
 	}
-	if snapshot.RegistrationLimited {
-		return "limited"
-	}
 	switch snapshot.RegistrationStatus {
 	case 1, 5:
 		return "registered"
@@ -1875,12 +1870,6 @@ func registrationLabel(snapshot *device.Snapshot) string {
 func registrationText(snapshot *device.Snapshot) string {
 	if snapshot == nil {
 		return "unknown"
-	}
-	if snapshot.RegistrationLimited {
-		if !snapshot.PSAttached {
-			return "limited service (packet data detached)"
-		}
-		return "limited service"
 	}
 	switch snapshot.RegistrationStatus {
 	case 1:

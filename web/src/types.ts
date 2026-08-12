@@ -84,7 +84,6 @@ export interface ModemSummary {
   model?: string;
   regStatus: number;
   regStatusText?: string;
-  registrationLimited?: boolean;
   psAttached?: boolean;
   simInserted?: boolean;
   operatingMode?: number;
@@ -116,7 +115,7 @@ export interface DeviceListItem {
   vowifiRuntime: VoWiFiRuntime;
   modem: ModemSummary;
   networkConnected: boolean;
-  registrationStateLabel: "registered" | "searching" | "denied" | "limited" | "unknown";
+  registrationStateLabel: "registered" | "searching" | "denied" | "unknown";
   flightMode?: boolean;
 }
 

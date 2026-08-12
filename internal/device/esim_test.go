@@ -303,12 +303,15 @@ func TestESIMListProfilesReturnsCacheDuringRecovery(t *testing.T) {
 }
 
 func TestMarkCachedProfileEnabled(t *testing.T) {
-	manager := &Manager{esimCache: map[string]EsimInfo{
-		"dev": {Profiles: []EsimProfile{
-			{ICCID: "old", State: 1, StateText: "old state"},
-			{ICCID: "target", State: 0, StateText: "target state"},
-		}},
-	}}
+	manager := &Manager{
+		esimCache: map[string]EsimInfo{
+			"dev": {Profiles: []EsimProfile{
+				{ICCID: "old", Name: "Old profile", State: 1, StateText: "old state"},
+				{ICCID: "target", Name: "Target profile", State: 0, StateText: "target state"},
+			}},
+		},
+		esimActiveName: map[string]string{"dev": "Old profile"},
+	}
 
 	manager.markCachedProfileEnabled("dev", "target")
 	info, ok := manager.cachedESIMInfo("dev")
@@ -317,6 +320,32 @@ func TestMarkCachedProfileEnabled(t *testing.T) {
 	}
 	if info.Profiles[1].State != 1 || info.Profiles[1].StateText != "已启用" {
 		t.Fatalf("target profile state = %#v", info.Profiles[1])
+	}
+	if got := manager.ActiveESIMProfileName("dev"); got != "Target profile" {
+		t.Fatalf("active profile name = %q, want target profile", got)
+	}
+}
+
+func TestMergeVerifiedProfileSnapshotPublishesLiveICCID(t *testing.T) {
+	manager, id := newStartedTestManager(t, &transcriptClient{})
+	state, err := manager.lookup(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.setResult(id, state, &Snapshot{
+		DeviceID: id,
+		ICCID:    "old",
+		IMSI:     "old-imsi",
+		SIMReady: true,
+	}, nil)
+	manager.beginRecovery(id, state)
+	manager.mergeVerifiedProfileSnapshot(id, "target")
+	entry, err := manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Snapshot == nil || entry.Snapshot.ICCID != "target" || entry.Snapshot.IMSI != "old-imsi" || !entry.Snapshot.SIMReady || !entry.Snapshot.Responsive || entry.Recovering {
+		t.Fatalf("snapshot after verified merge = %#v", entry.Snapshot)
 	}
 }
 

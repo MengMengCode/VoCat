@@ -359,25 +359,6 @@ func (manager *Manager) ListSMSBoundSubscriber(
 	ctx context.Context,
 	id string,
 ) (SMSSubscriberScan, error) {
-	return manager.listSMSBoundSubscriber(ctx, id, true)
-}
-
-// ListSMSBoundSubscriberQuiet is the background polling variant of
-// ListSMSBoundSubscriber. SMS storage is an optional side channel; a transient
-// QMI/WMS failure while polling it must not overwrite the modem control-plane
-// health result or make an otherwise responsive device appear degraded.
-func (manager *Manager) ListSMSBoundSubscriberQuiet(
-	ctx context.Context,
-	id string,
-) (SMSSubscriberScan, error) {
-	return manager.listSMSBoundSubscriber(ctx, id, false)
-}
-
-func (manager *Manager) listSMSBoundSubscriber(
-	ctx context.Context,
-	id string,
-	recordHealth bool,
-) (SMSSubscriberScan, error) {
 	state, err := manager.lookup(id)
 	if err != nil {
 		return SMSSubscriberScan{}, err
@@ -390,15 +371,11 @@ func (manager *Manager) listSMSBoundSubscriber(
 	controlDevice, nativeQMI, err := manager.smsQMIControlForState(state)
 	if nativeQMI {
 		if err != nil {
-			if recordHealth {
-				manager.setResult(id, state, nil, err)
-			}
+			manager.setResult(id, state, nil, err)
 			return SMSSubscriberScan{Transport: SMSTransportCellularQMI}, err
 		}
 		scan, scanErr := manager.listSMSQMILocked(ctx, state, controlDevice)
-		if recordHealth {
-			manager.setResult(id, state, nil, scanErr)
-		}
+		manager.setResult(id, state, nil, scanErr)
 		return scan, scanErr
 	}
 	if err != nil {
@@ -406,25 +383,19 @@ func (manager *Manager) listSMSBoundSubscriber(
 	}
 	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
 	if err != nil {
-		if recordHealth {
-			manager.setResult(id, state, nil, err)
-		}
+		manager.setResult(id, state, nil, err)
 		return SMSSubscriberScan{Transport: SMSTransportCellularAT}, err
 	}
 	identity, err := manager.readSMSSubscriberIdentityLocked(ctx, client)
 	if err != nil {
-		if recordHealth {
-			manager.setResult(id, state, nil, err)
-		}
+		manager.setResult(id, state, nil, err)
 		return SMSSubscriberScan{
 			Identity:  identity,
 			Transport: SMSTransportCellularAT,
 		}, err
 	}
 	messages, storages, err := manager.listSMSLocked(ctx, client)
-	if recordHealth {
-		manager.setResult(id, state, nil, err)
-	}
+	manager.setResult(id, state, nil, err)
 	return SMSSubscriberScan{
 		Messages:  messages,
 		Identity:  identity,
