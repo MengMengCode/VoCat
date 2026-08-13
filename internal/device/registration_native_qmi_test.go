@@ -137,6 +137,51 @@ func TestQMIManualRegisterRequestMapsPLMNAndRAT(t *testing.T) {
 	}
 }
 
+func TestQMIManualSelectionPreferenceMapsPLMN(t *testing.T) {
+	pref, selection, err := qmiManualSelectionPreference("46001")
+	if err != nil {
+		t.Fatalf("manual preference: %v", err)
+	}
+	if pref.NetworkSelectionPreference != qmi.NASNetworkSelectionManual ||
+		!pref.HasNetworkSelectionPreference || !pref.HasManualNetworkSelection ||
+		!pref.HasChangeDuration || pref.ChangeDuration != qmi.NASChangeDurationPermanent {
+		t.Fatalf("manual preference = %#v", pref)
+	}
+	if selection.MCC != 460 || selection.MNC != 1 || selection.IncludesPCSDigit {
+		t.Fatalf("manual selection = %#v", selection)
+	}
+}
+
+func TestEnsureNativeQMIRegistrationWaitsForManualTarget(t *testing.T) {
+	session := &fakeNativeQMIRegistrationSession{
+		mode: qmi.ModeOnline,
+		serving: []*qmi.ServingSystem{
+			{RegistrationState: qmi.RegStateRegistered, PSAttached: true, MCC: 460, MNC: 0},
+			{RegistrationState: qmi.RegStateSearching},
+			{RegistrationState: qmi.RegStateRegistered, PSAttached: false, MCC: 460, MNC: 1},
+			{RegistrationState: qmi.RegStateRegistered, PSAttached: true, MCC: 460, MNC: 1},
+		},
+	}
+	request, err := qmiManualRegisterRequest("46001", nil)
+	if err != nil {
+		t.Fatalf("manual request: %v", err)
+	}
+	target := qmi.ManualNetworkSelection{MCC: 460, MNC: 1}
+	if err := ensureNativeQMIRegistrationForTarget(context.Background(), session, request, false, &target); err != nil {
+		t.Fatalf("ensure manual registration: %v", err)
+	}
+	if len(session.registerRequests) != 1 || session.registerRequests[0].Mode != qmi.NASNetworkRegisterManual ||
+		session.registerRequests[0].MCC != 460 || session.registerRequests[0].MNC != 1 {
+		t.Fatalf("registration requests = %#v, want one manual 46001 request", session.registerRequests)
+	}
+	if session.forceSearches != 1 {
+		t.Fatalf("force-search count = %d, want 1", session.forceSearches)
+	}
+	if len(session.attachRequests) != 1 || !session.attachRequests[0] {
+		t.Fatalf("attach requests = %#v, want one attach", session.attachRequests)
+	}
+}
+
 func TestNativeQMIRegistrationCyclesEarlyWhenForceSearchUnsupported(t *testing.T) {
 	if got := nativeQMIRegistrationRadioCycleThreshold(true); got != 3 {
 		t.Fatalf("unsupported force-search threshold = %d, want 3", got)

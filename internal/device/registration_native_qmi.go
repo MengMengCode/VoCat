@@ -147,17 +147,9 @@ func qmiManualRegisterRequest(
 	plmn string,
 	accessTechnologyValue *int,
 ) (qmi.NASInitiateNetworkRegisterRequest, error) {
-	plmn = strings.TrimSpace(plmn)
-	if !decimalPLMN(plmn) {
-		return qmi.NASInitiateNetworkRegisterRequest{}, errors.New("operator PLMN must contain 5 or 6 digits")
-	}
-	mcc, err := strconv.ParseUint(plmn[:3], 10, 16)
+	mcc, mnc, includesPCSDigit, err := qmiPLMNParts(plmn)
 	if err != nil {
-		return qmi.NASInitiateNetworkRegisterRequest{}, fmt.Errorf("parse operator MCC: %w", err)
-	}
-	mnc, err := strconv.ParseUint(plmn[3:], 10, 16)
-	if err != nil {
-		return qmi.NASInitiateNetworkRegisterRequest{}, fmt.Errorf("parse operator MNC: %w", err)
+		return qmi.NASInitiateNetworkRegisterRequest{}, err
 	}
 	rat := uint8(0)
 	if accessTechnologyValue != nil {
@@ -168,13 +160,49 @@ func qmiManualRegisterRequest(
 	}
 	return qmi.NASInitiateNetworkRegisterRequest{
 		Mode:              qmi.NASNetworkRegisterManual,
-		MCC:               uint16(mcc),
-		MNC:               uint16(mnc),
-		IncludesPCSDigit:  len(plmn) == 6,
+		MCC:               mcc,
+		MNC:               mnc,
+		IncludesPCSDigit:  includesPCSDigit,
 		RadioAccessTech:   rat,
 		ChangeDuration:    qmi.NASChangeDurationPermanent,
 		HasChangeDuration: true,
 	}, nil
+}
+
+func qmiPLMNParts(plmn string) (mcc, mnc uint16, includesPCSDigit bool, err error) {
+	plmn = strings.TrimSpace(plmn)
+	if !decimalPLMN(plmn) {
+		return 0, 0, false, errors.New("operator PLMN must contain 5 or 6 digits")
+	}
+	mccValue, parseErr := strconv.ParseUint(plmn[:3], 10, 16)
+	if parseErr != nil {
+		return 0, 0, false, fmt.Errorf("parse operator MCC: %w", parseErr)
+	}
+	mncValue, parseErr := strconv.ParseUint(plmn[3:], 10, 16)
+	if parseErr != nil {
+		return 0, 0, false, fmt.Errorf("parse operator MNC: %w", parseErr)
+	}
+	return uint16(mccValue), uint16(mncValue), len(plmn) == 6, nil
+}
+
+func qmiManualSelectionPreference(plmn string) (qmi.SystemSelectionPreference, qmi.ManualNetworkSelection, error) {
+	mcc, mnc, includesPCSDigit, err := qmiPLMNParts(plmn)
+	if err != nil {
+		return qmi.SystemSelectionPreference{}, qmi.ManualNetworkSelection{}, err
+	}
+	selection := qmi.ManualNetworkSelection{
+		MCC:              mcc,
+		MNC:              mnc,
+		IncludesPCSDigit: includesPCSDigit,
+	}
+	return qmi.SystemSelectionPreference{
+		NetworkSelectionPreference:    qmi.NASNetworkSelectionManual,
+		HasNetworkSelectionPreference: true,
+		ManualNetworkSelection:        selection,
+		HasManualNetworkSelection:     true,
+		ChangeDuration:                qmi.NASChangeDurationPermanent,
+		HasChangeDuration:             true,
+	}, selection, nil
 }
 
 func qmiRATFromATCode(value int) uint8 {
@@ -266,17 +294,28 @@ func nativeQMIRegistrationRadioCycleThreshold(forceSearchUnsupported bool) int {
 	return nativeQMIRegistrationRadioCycleAfterAttempts
 }
 
-// ensureNativeQMIRegistration runs the same NAS sequence that VoHive uses on
-// OpenStick: wake DMS online, reassert automatic selection, submit a NAS
-// registration request, then attach PS and wait for the serving-system
-// indication to become authoritative.  The modem's AT+COPS surface on this
-// firmware only changes presentation; it does not reliably drive this NAS
-// state machine.
+// ensureNativeQMIRegistration runs the NAS registration sequence used on
+// OpenStick.  The modem's AT+COPS surface on this firmware only changes
+// presentation; it does not reliably drive this NAS state machine.
 func ensureNativeQMIRegistration(
 	ctx context.Context,
 	session nativeQMIRegistrationSession,
 	request qmi.NASInitiateNetworkRegisterRequest,
 	setAutomatic bool,
+) error {
+	return ensureNativeQMIRegistrationForTarget(ctx, session, request, setAutomatic, nil)
+}
+
+// ensureNativeQMIRegistrationForTarget is the manual-lock variant of the
+// registration sequence. A modem can remain registered on the old PLMN while
+// it processes a new manual request, so a successful registered/PS-attached
+// state is only authoritative when it is on the requested PLMN.
+func ensureNativeQMIRegistrationForTarget(
+	ctx context.Context,
+	session nativeQMIRegistrationSession,
+	request qmi.NASInitiateNetworkRegisterRequest,
+	setAutomatic bool,
+	target *qmi.ManualNetworkSelection,
 ) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -327,11 +366,18 @@ func ensureNativeQMIRegistration(
 			return errors.New("QMI serving system returned no data")
 		}
 		if qmiRegistrationStateRegistered(serving.RegistrationState) {
-			if serving.PSAttached {
-				return nil
-			}
-			if err := session.AttachDetach(ctx, true); err != nil {
-				return fmt.Errorf("attach QMI packet service: %w", err)
+			if target == nil || qmiServingSystemMatchesTarget(serving, *target) {
+				if serving.PSAttached {
+					return nil
+				}
+				if err := session.AttachDetach(ctx, true); err != nil {
+					return fmt.Errorf("attach QMI packet service: %w", err)
+				}
+			} else if !registerIssued {
+				if err := session.InitiateNetworkRegister(ctx, request); err != nil {
+					return fmt.Errorf("initiate manual QMI network registration: %w", err)
+				}
+				registerIssued = true
 			}
 		} else if serving.RegistrationState == qmi.RegStateDenied {
 			return errors.New("QMI network registration was denied")
@@ -345,6 +391,9 @@ func ensureNativeQMIRegistration(
 		}
 
 		searching := serving.RegistrationState == qmi.RegStateSearching
+		if target != nil && qmiRegistrationStateRegistered(serving.RegistrationState) && !qmiServingSystemMatchesTarget(serving, *target) {
+			searching = true
+		}
 		if searching && registerIssued && !forceSearchIssued && !forceSearchUnsupported && attempt >= 2 {
 			forceSearchIssued = true
 			if err := session.ForceNetworkSearch(ctx); err != nil {
@@ -369,6 +418,10 @@ func ensureNativeQMIRegistration(
 		}
 	}
 	return fmt.Errorf("QMI network registration/PS attach timed out after %d attempts", nativeQMIRegistrationMaxAttempts)
+}
+
+func qmiServingSystemMatchesTarget(serving *qmi.ServingSystem, target qmi.ManualNetworkSelection) bool {
+	return serving != nil && serving.MCC == target.MCC && serving.MNC == target.MNC
 }
 
 func waitNativeQMIRegistration(ctx context.Context) error {
@@ -426,10 +479,32 @@ func (manager *Manager) setNativeQMIOperatorSelectionLocked(
 	if err != nil {
 		return OperatorSelection{}, err
 	}
-	if err := ensureNativeQMIRegistration(ctx, session, request, false); err != nil {
+	preference, target, err := qmiManualSelectionPreference(plmn)
+	if err != nil {
 		return OperatorSelection{}, err
 	}
-	return OperatorSelection{Mode: 1, Format: 2, Operator: strings.TrimSpace(plmn)}, nil
+	// InitiateNetworkRegister is only a one-shot trigger on this firmware. The
+	// manual preference must be written separately or the next reconcile will
+	// read automatic selection and undo the requested lock.
+	if err := session.SetSystemSelectionPreference(ctx, preference); err != nil {
+		return OperatorSelection{}, fmt.Errorf("set manual QMI network selection: %w", err)
+	}
+	if err := ensureNativeQMIRegistrationForTarget(ctx, session, request, false, &target); err != nil {
+		// Do not leave a rejected PLMN latched in the modem. Best-effort restore
+		// keeps the device usable while reporting the real lock failure.
+		_ = session.SetSystemSelectionPreference(ctx, qmiSelectionAutomaticPreference())
+		return OperatorSelection{}, err
+	}
+	actual, err := session.GetSystemSelectionPreference(ctx)
+	if err != nil {
+		_ = session.SetSystemSelectionPreference(ctx, qmiSelectionAutomaticPreference())
+		return OperatorSelection{}, fmt.Errorf("verify manual QMI network selection: %w", err)
+	}
+	if actual == nil || !actual.HasManualNetworkSelection || actual.ManualNetworkSelection != target {
+		_ = session.SetSystemSelectionPreference(ctx, qmiSelectionAutomaticPreference())
+		return OperatorSelection{}, fmt.Errorf("modem did not retain manual PLMN %s", strings.TrimSpace(plmn))
+	}
+	return qmiOperatorSelectionFromPreference(actual)
 }
 
 func (manager *Manager) reRegisterNativeQMIOperatorLocked(
@@ -461,7 +536,11 @@ func (manager *Manager) reRegisterNativeQMIOperatorLocked(
 			return OperatorSelection{}, err
 		}
 	}
-	if err := ensureNativeQMIRegistration(ctx, session, request, setAutomatic); err != nil {
+	var target *qmi.ManualNetworkSelection
+	if pref != nil && pref.HasManualNetworkSelection {
+		target = &pref.ManualNetworkSelection
+	}
+	if err := ensureNativeQMIRegistrationForTarget(ctx, session, request, setAutomatic, target); err != nil {
 		return OperatorSelection{}, err
 	}
 	return selection, nil
