@@ -980,6 +980,36 @@ func countQMIWMSNVFallbackRoutes(routes []qmi.WMSRoute) int {
 	return count
 }
 
+// qmiWMSHasNVStoredPointToPointRoute reports whether the modem has a usable
+// NV route for ordinary point-to-point SMS.  On the affected OpenStick build,
+// EF_SMS is readable through UIM but WMS List Messages(UIM) still returns
+// INVALID_ARG after a profile refresh.  Once ordinary messages are routed to
+// NV, repeatedly recovering the broken UIM adapter only prevents the scan from
+// reaching the storage that can actually contain the message.
+func (manager *Manager) qmiWMSHasNVStoredPointToPointRoute(
+	ctx context.Context,
+	session qmiSMSSession,
+) bool {
+	inspector, ok := session.(qmiWMSRouteInspector)
+	if !ok {
+		return false
+	}
+	routeContext, cancel := manager.withTimeout(ctx, manager.commandTimeout*2)
+	defer cancel()
+	config, err := inspector.GetWMSRoutes(routeContext)
+	if err != nil || config == nil {
+		return false
+	}
+	for _, route := range config.Routes {
+		if route.MessageType == qmi.WMSMessageTypePointToPoint &&
+			route.StorageType == qmi.WMSStorageTypeNV &&
+			route.ReceiptAction == qmi.WMSReceiptActionStoreAndNotify {
+			return true
+		}
+	}
+	return false
+}
+
 func (manager *Manager) listSMSQMILocked(
 	ctx context.Context,
 	state *managedDevice,
@@ -1044,6 +1074,8 @@ func (manager *Manager) listSMSQMILockedAttempt(
 
 	records := make(map[string]qmiSMSStoredRecord)
 	var lastListErr error
+	checkedNVRoute := false
+	nvRouteAvailable := false
 	for _, storage := range qmiSMSStorages {
 		complete := true
 		for _, requestedTag := range qmiSMSListTags {
@@ -1060,6 +1092,34 @@ func (manager *Manager) listSMSQMILockedAttempt(
 			}
 			if listErr != nil {
 				if isQMIWMSContextFailure(listErr) {
+					if !checkedNVRoute {
+						checkedNVRoute = true
+						nvRouteAvailable = manager.qmiWMSHasNVStoredPointToPointRoute(ctx, session)
+					}
+					if nvRouteAvailable && storage.value == qmiSMSStorageUIM {
+						complete = false
+						lastListErr = fmt.Errorf(
+							"list QMI WMS %s messages with tag %d: %w",
+							storage.name, requestedTag, listErr,
+						)
+						manager.logEvent(slog.LevelInfo, "QMI WMS UIM list skipped after NV route fallback",
+							"category", "sms", "event", "qmi_wms_uim_list_skipped",
+							"control_path", controlDevice, "storage", storage.name,
+							"message_class", "point-to-point", "reason", "nv_route_available",
+							"error", listErr)
+						continue
+					}
+					if nvRouteAvailable && storage.value == qmiSMSStorageNV {
+						lastListErr = fmt.Errorf(
+							"list QMI WMS %s messages with tag %d: %w",
+							storage.name, requestedTag, listErr,
+						)
+						manager.logEvent(slog.LevelInfo, "QMI WMS list handed to AT fallback",
+							"category", "sms", "event", "qmi_wms_list_at_fallback",
+							"control_path", controlDevice, "storage", storage.name,
+							"reason", "nv_route_available", "error", listErr)
+						return scan, lastListErr
+					}
 					if recoveryStage != qmiSMSRecoveryNone {
 						// The WMS-only stage is an optional enhancement. Test and
 						// legacy sessions may not implement the new reset/bind

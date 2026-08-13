@@ -45,6 +45,28 @@ type fakeQMISMSSession struct {
 	closeCount   int
 }
 
+type fakeQMIWMSRouteSession struct {
+	*fakeQMISMSSession
+	routes *qmi.WMSRouteConfig
+}
+
+func (session *fakeQMIWMSRouteSession) GetWMSRoutes(context.Context) (*qmi.WMSRouteConfig, error) {
+	if session.routes == nil {
+		return nil, nil
+	}
+	copyConfig := *session.routes
+	copyConfig.Routes = append([]qmi.WMSRoute(nil), session.routes.Routes...)
+	return &copyConfig, nil
+}
+
+func (session *fakeQMIWMSRouteSession) SetWMSRoutes(_ context.Context, routes []qmi.WMSRoute, transferStatusReportToClient bool) error {
+	session.routes = &qmi.WMSRouteConfig{
+		Routes:                       append([]qmi.WMSRoute(nil), routes...),
+		TransferStatusReportToClient: transferStatusReportToClient,
+	}
+	return nil
+}
+
 type fakeQMIWMSReinitializer struct {
 	ready      []qmi.WMSServiceReadyStatus
 	readyCalls int
@@ -646,6 +668,91 @@ func TestNativeQMIListScansUIMAndNVWithTagMetadata(t *testing.T) {
 	}
 	if len(session.calls) < 2 || session.calls[0] != "get-iccid" || session.calls[1] != "get-imsi" {
 		t.Fatalf("calls = %v", session.calls)
+	}
+}
+
+func TestNativeQMIListSkipsBrokenUIMWhenNVRouteIsAvailable(t *testing.T) {
+	manager, atOpener, id := newStartedNativeSMSManager(t)
+	nvRaw, _ := hex.DecodeString("000405912143F500004210203040500005C82293F904")
+	contextErr := &qmi.QMIError{
+		Service:   qmi.ServiceWMS,
+		MessageID: qmi.WMSListMessages,
+		Result:    1,
+		ErrorCode: qmi.QMIErrInvalidArg,
+	}
+	session := &fakeQMIWMSRouteSession{
+		fakeQMISMSSession: &fakeQMISMSSession{
+			iccid: "8986001234567890123",
+			imsi:  "515031234567890",
+			listErrs: map[fakeQMISMSListKey]error{
+				{storage: qmiSMSStorageUIM, tag: qmi.TagTypeMTNotRead}: contextErr,
+			},
+			lists: map[fakeQMISMSListKey][]qmiSMSListEntry{
+				{storage: qmiSMSStorageNV, tag: qmi.TagTypeMTNotRead}: {{Index: 9, Tag: qmi.TagTypeMTNotRead}},
+			},
+			reads: map[fakeQMISMSReadKey][]byte{
+				{storage: qmiSMSStorageNV, index: 9}: nvRaw,
+			},
+		},
+		routes: &qmi.WMSRouteConfig{Routes: []qmi.WMSRoute{
+			{MessageType: qmi.WMSMessageTypePointToPoint, MessageClass: qmi.WMSMessageClass0, StorageType: qmi.WMSStorageTypeNV, ReceiptAction: qmi.WMSReceiptActionStoreAndNotify},
+			{MessageType: qmi.WMSMessageTypePointToPoint, MessageClass: qmi.WMSMessageClass2, StorageType: qmi.WMSStorageTypeUIM, ReceiptAction: qmi.WMSReceiptActionStoreAndNotify},
+		}},
+	}
+	manager.qmiSMSOpener = func(context.Context, string) (qmiSMSSession, error) {
+		return session, nil
+	}
+
+	scan, err := manager.ListSMSBoundSubscriber(context.Background(), id)
+	if err != nil || len(scan.Messages) != 1 || scan.Messages[0].Text != "HELLO" ||
+		!reflect.DeepEqual(scan.Storages, []string{"ME"}) {
+		t.Fatalf("NV fallback scan = (%#v, %v)", scan, err)
+	}
+	if session.closeCount != 1 || atOpener.openCount != 0 {
+		t.Fatalf("session/AT opens = %d/%d", session.closeCount, atOpener.openCount)
+	}
+}
+
+func TestNativeQMIListHandsBrokenNVWMSPathToATFallback(t *testing.T) {
+	manager, atOpener, id := newStartedNativeSMSManager(t)
+	pdu := "000405912143F500004210203040500005C82293F904"
+	contextErr := &qmi.QMIError{
+		Service:   qmi.ServiceWMS,
+		MessageID: qmi.WMSListMessages,
+		Result:    1,
+		ErrorCode: qmi.QMIErrInvalidArg,
+	}
+	session := &fakeQMIWMSRouteSession{
+		fakeQMISMSSession: &fakeQMISMSSession{
+			iccid: "8986001234567890123",
+			imsi:  "515031234567890",
+			listErrs: map[fakeQMISMSListKey]error{
+				{storage: qmiSMSStorageUIM, tag: qmi.TagTypeMTNotRead}: contextErr,
+				{storage: qmiSMSStorageNV, tag: qmi.TagTypeMTNotRead}:  contextErr,
+			},
+		},
+		routes: &qmi.WMSRouteConfig{Routes: []qmi.WMSRoute{
+			{MessageType: qmi.WMSMessageTypePointToPoint, MessageClass: qmi.WMSMessageClass0, StorageType: qmi.WMSStorageTypeNV, ReceiptAction: qmi.WMSReceiptActionStoreAndNotify},
+		}},
+	}
+	manager.qmiSMSOpener = func(context.Context, string) (qmiSMSSession, error) {
+		return session, nil
+	}
+	atOpener.client = &transcriptClient{steps: []clientStep{
+		{command: "AT+CMGF=0", response: okResponse()},
+		{command: `AT+CPMS="SM"`, response: okResponse()},
+		{command: "AT+CMGL=4", response: okResponse("+CMGL: 7,0,,23", pdu)},
+		{command: `AT+CPMS="ME"`, response: okResponse()},
+		{command: "AT+CMGL=4", response: okResponse()},
+	}}
+
+	scan, err := manager.ListSMSBoundSubscriber(context.Background(), id)
+	if err != nil || scan.Transport != SMSTransportCellularAT || len(scan.Messages) != 1 ||
+		scan.Messages[0].Text != "HELLO" || !reflect.DeepEqual(scan.Storages, []string{"SM", "ME"}) {
+		t.Fatalf("AT fallback scan = (%#v, %v)", scan, err)
+	}
+	if session.closeCount != 1 || atOpener.openCount != 1 {
+		t.Fatalf("session/AT opens = %d/%d", session.closeCount, atOpener.openCount)
 	}
 }
 
