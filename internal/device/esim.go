@@ -781,7 +781,7 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
 		return err
 	}
-	// verifySwitchedICCID reads the live QMI-UIM/DMS identity, while the device
+	// verifySwitchedICCID reads the live driver-plane identity, while the device
 	// overview is served from Manager's cached AT/QMI snapshot. Refresh that
 	// snapshot after the live identity has moved; otherwise the switch succeeds
 	// but the page keeps showing the previous SIM until an unrelated refresh.

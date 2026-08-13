@@ -17,8 +17,40 @@ type qmiNativeSnapshotData struct {
 	accessTech string
 	band       string
 	channel    string
+	imsi       string
 	phone      PhoneNumber
 	phoneErr   error
+}
+
+// readNativeQMIIdentity reads the active card identity (ICCID + IMSI) through
+// a single native QMI-DMS session. DMS reflects the baseband's live card,
+// which is authoritative after an eSIM profile switch and does not depend on
+// the AT ICCID/IMSI serial cache.
+func (manager *Manager) readNativeQMIIdentity(ctx context.Context, id string) (iccid, imsi string) {
+	controlDevice, native, err := manager.nativeQMIControl(id)
+	if err != nil || !native || manager.qmiRadioOpener == nil {
+		return "", ""
+	}
+	readContext, cancel := manager.withTimeout(ctx, manager.commandTimeout*2)
+	defer cancel()
+	session, err := manager.qmiRadioOpener(readContext, controlDevice)
+	if err != nil {
+		return "", ""
+	}
+	defer session.Close()
+	identity, ok := session.(qmiNativeSnapshotSession)
+	if !ok {
+		return "", ""
+	}
+	if raw, err := identity.GetICCID(readContext); err == nil {
+		iccid = strings.TrimRight(strings.ToUpper(strings.TrimSpace(raw)), "F")
+	}
+	if raw, err := identity.GetIMSI(readContext); err == nil {
+		if v := strings.TrimSpace(raw); v != "" {
+			imsi = v
+		}
+	}
+	return iccid, imsi
 }
 
 // readNativeQMISnapshot opens one QMI session and reads both the active RF
@@ -44,7 +76,6 @@ func (manager *Manager) readNativeQMISnapshot(
 	if !ok {
 		return qmiNativeSnapshotData{}, nil
 	}
-
 	data := qmiNativeSnapshotData{}
 	var warnings []string
 	if raw, err := native.GetMSISDN(queryContext); err != nil {
@@ -57,6 +88,11 @@ func (manager *Manager) readNativeQMISnapshot(
 			Number: number,
 			Source: PhoneSourceQMIDMSMSISDN,
 			Status: "号码来自 QMI DMS MSISDN",
+		}
+	}
+	if raw, err := native.GetIMSI(queryContext); err == nil {
+		if imsi := strings.TrimSpace(raw); imsi != "" {
+			data.imsi = imsi
 		}
 	}
 

@@ -28,7 +28,9 @@ type qmiDMSICCIDSession interface {
 // AT-only devices do not need to implement these queries.
 type qmiNativeSnapshotSession interface {
 	qmiRadioSession
+	GetICCID(context.Context) (string, error)
 	GetMSISDN(context.Context) (string, error)
+	GetIMSI(context.Context) (string, error)
 	GetRFBandInfo(context.Context) (*qmi.RFBandInfo, error)
 	GetCellLocationInfo(context.Context) (*qmi.CellLocationInfo, error)
 }
@@ -44,6 +46,7 @@ type productionQMIRadioSession struct {
 	dms    *qmi.DMSService
 	nas    *qmi.NASService
 	nasErr error
+	uim    *qmi.UIMService
 	lease  *qmiport.Lease
 }
 
@@ -143,11 +146,18 @@ func openQMIRadioSession(ctx context.Context, controlDevice string) (qmiRadioSes
 	// expose DMS but reject NAS client allocation; keep the existing radio path
 	// usable and report that limitation only to network-selection recovery.
 	nas, nasErr := qmi.NewNASServiceWithContext(openContext, client)
+	// UIM is likewise optional and best-effort: it provides an in-band file
+	// identity fallback during post-switch recovery, never a hard dependency.
+	uim, uimErr := qmi.NewUIMServiceWithContext(openContext, client)
+	if uimErr != nil {
+		uim = nil
+	}
 	return &productionQMIRadioSession{
 		client: client,
 		dms:    dms,
 		nas:    nas,
 		nasErr: nasErr,
+		uim:    uim,
 		lease:  lease,
 	}, nil
 }
@@ -158,6 +168,23 @@ func (session *productionQMIRadioSession) GetOperatingMode(ctx context.Context) 
 
 func (session *productionQMIRadioSession) GetICCID(ctx context.Context) (string, error) {
 	return session.dms.GetICCID(ctx)
+}
+
+func (session *productionQMIRadioSession) GetIMSI(ctx context.Context) (string, error) {
+	if session == nil || session.dms == nil {
+		return "", errors.New("QMI DMS session is unavailable")
+	}
+	return session.dms.GetIMSI(ctx)
+}
+
+// VarUIM exposes the underlying QMI-UIM service (best-effort). qmiRadioSession
+// only allocates DMS and NAS; if the same client could not also allocate a UIM
+// service this returns nil.
+func (session *productionQMIRadioSession) VarUIM() *qmi.UIMService {
+	if session == nil || session.dms == nil {
+		return nil
+	}
+	return session.uim
 }
 
 func (session *productionQMIRadioSession) GetMSISDN(ctx context.Context) (string, error) {

@@ -166,6 +166,13 @@ func (manager *Manager) readSnapshot(
 	if response, ok := optional("AT+CIMI"); ok {
 		snapshot.IMSI = parseIdentifier(response, []string{"+CIMI:"}, 10, 18)
 	}
+	// Native Qualcomm WWAN firmware can refuse AT+CIMI entirely while DMS still
+	// exposes the subscriber IMSI. Treat the QMI DMS value as the authoritative
+	// identity so a post-switch overview does not fall back to a stale or empty
+	// IMSI when the AT serially begins reporting the new card.
+	if nativeQMI.imsi != "" {
+		snapshot.IMSI = nativeQMI.imsi
+	}
 	if response, ok := optional("AT+CFUN?"); ok {
 		if mode, found := parseCFUN(response); found {
 			snapshot.OperatingMode = mode
