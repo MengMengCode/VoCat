@@ -89,19 +89,31 @@ func (manager *Manager) readSnapshot(
 			break
 		}
 	}
-	if registration, found := readPlatformRegistration(ctx, candidate); found {
-		snapshot.RegistrationStatus = registration.Status
-		snapshot.RegistrationSource = "QMI NAS"
-		snapshot.PSAttached = registration.PSAttached
-		if registration.PLMN != "" {
-			snapshot.OperatorCode = registration.PLMN
-			snapshot.OperatorName = carrierNameForPLMN(registration.PLMN, registration.Name)
+	// Read QMI DMS operating mode before consulting NAS/AT registration.  NAS
+	// can retain the last serving-system indication after DMS enters low power,
+	// so treating that indication as live would show a registered network while
+	// flight mode is enabled.
+	nativeQMI, nativeQMIWarnings := manager.readNativeQMISnapshot(ctx, candidate)
+	if nativeQMI.modeKnown {
+		snapshot.OperatingMode = nativeQMI.operatingMode
+		snapshot.ModeKnown = true
+		snapshot.FlightMode = nativeQMI.radioOff && nativeQMI.operatingMode != 1
+		snapshot.RadioOff = nativeQMI.radioOff
+	}
+	if !nativeQMI.radioOff {
+		if registration, found := readPlatformRegistration(ctx, candidate); found {
+			snapshot.RegistrationStatus = registration.Status
+			snapshot.RegistrationSource = "QMI NAS"
+			snapshot.PSAttached = registration.PSAttached
+			if registration.PLMN != "" {
+				snapshot.OperatorCode = registration.PLMN
+				snapshot.OperatorName = carrierNameForPLMN(registration.PLMN, registration.Name)
+			}
 		}
 	}
 	// Qualcomm/OpenStick firmware often leaves AT+QENG empty even while QMI
 	// NAS has the serving LTE tuple.  Query the same native QMI session for
 	// band/channel and DMS MSISDN, using it only as a native-path supplement.
-	nativeQMI, nativeQMIWarnings := manager.readNativeQMISnapshot(ctx, candidate)
 	if nativeQMI.accessTech != "" && snapshot.AccessTech == "" {
 		snapshot.AccessTech = nativeQMI.accessTech
 	}
@@ -112,15 +124,23 @@ func (manager *Manager) readSnapshot(
 		snapshot.Channel = nativeQMI.channel
 	}
 	snapshot.Warnings = append(snapshot.Warnings, nativeQMIWarnings...)
+	if nativeQMI.iccid != "" {
+		snapshot.ICCID = nativeQMI.iccid
+	}
+	if nativeQMI.radioOff {
+		maskSnapshotForRadioOff(&snapshot)
+	}
 	// Native Qualcomm WWAN firmware can reject every AT ICCID command while
 	// QMI-UIM still exposes the active card. Read the authoritative identity
 	// first so a periodic snapshot does not emit WARN entries for expected AT
 	// fallback probes (and never attributes a native card from a stale AT port).
-	if iccid, native, iccidErr := manager.readNativeQMIICCID(ctx, id); native {
-		if iccidErr != nil {
-			snapshot.Warnings = append(snapshot.Warnings, "read native QMI ICCID: "+iccidErr.Error())
-		} else {
-			snapshot.ICCID = iccid
+	if snapshot.ICCID == "" {
+		if iccid, native, iccidErr := manager.readNativeQMIICCID(ctx, id); native {
+			if iccidErr != nil {
+				snapshot.Warnings = append(snapshot.Warnings, "read native QMI ICCID: "+iccidErr.Error())
+			} else {
+				snapshot.ICCID = iccid
+			}
 		}
 	}
 	if snapshot.RegistrationSource == "" && (snapshot.OperatorName != "" || snapshot.OperatorCode != "") {
@@ -173,12 +193,14 @@ func (manager *Manager) readSnapshot(
 	if nativeQMI.imsi != "" {
 		snapshot.IMSI = nativeQMI.imsi
 	}
-	if response, ok := optional("AT+CFUN?"); ok {
-		if mode, found := parseCFUN(response); found {
-			snapshot.OperatingMode = mode
-			snapshot.ModeKnown = true
-			snapshot.FlightMode = isRadioOffMode(mode)
-			snapshot.RadioOff = snapshot.FlightMode
+	if !nativeQMI.modeKnown {
+		if response, ok := optional("AT+CFUN?"); ok {
+			if mode, found := parseCFUN(response); found {
+				snapshot.OperatingMode = mode
+				snapshot.ModeKnown = true
+				snapshot.FlightMode = isRadioOffMode(mode)
+				snapshot.RadioOff = snapshot.FlightMode
+			}
 		}
 	}
 
@@ -192,6 +214,29 @@ func (manager *Manager) readSnapshot(
 	snapshot.Warnings = append(snapshot.Warnings, warnings...)
 	snapshot.UpdatedAt = time.Now().UTC()
 	return snapshot, nil
+}
+
+// maskSnapshotForRadioOff removes stale NAS/AT serving data while preserving
+// modem identity and SIM fields.  The DMS operating mode is the authoritative
+// source when the radio is in flight/low-power mode.
+func maskSnapshotForRadioOff(snapshot *Snapshot) {
+	if snapshot == nil {
+		return
+	}
+	snapshot.RegistrationStatus = 0
+	snapshot.RegistrationSource = "QMI DMS"
+	snapshot.PSAttached = false
+	snapshot.OperatorName = ""
+	snapshot.OperatorCode = ""
+	snapshot.AccessTech = ""
+	snapshot.Band = ""
+	snapshot.Channel = ""
+	snapshot.SignalRaw = nil
+	snapshot.SignalPercent = nil
+	snapshot.RSSIDBm = nil
+	snapshot.RSRP = nil
+	snapshot.RSRQ = nil
+	snapshot.SINR = nil
 }
 
 func parseRegistrationStatus(response modem.Response) (int, bool) {

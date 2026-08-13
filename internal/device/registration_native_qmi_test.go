@@ -2,6 +2,8 @@ package device
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
@@ -77,7 +79,7 @@ func (session *fakeNativeQMIRegistrationSession) AttachDetach(_ context.Context,
 
 func TestEnsureNativeQMIRegistrationDrivesNASSequence(t *testing.T) {
 	session := &fakeNativeQMIRegistrationSession{
-		mode: qmi.ModeLowPower,
+		mode: qmi.ModeOnline,
 		serving: []*qmi.ServingSystem{
 			{RegistrationState: qmi.RegStateSearching},
 			{RegistrationState: qmi.RegStateSearching},
@@ -89,8 +91,8 @@ func TestEnsureNativeQMIRegistrationDrivesNASSequence(t *testing.T) {
 	if err := ensureNativeQMIRegistration(context.Background(), session, qmiRegistrationRequestAutomatic(), true); err != nil {
 		t.Fatalf("ensure native QMI registration: %v", err)
 	}
-	if len(session.setModes) != 1 || session.setModes[0] != qmi.ModeOnline {
-		t.Fatalf("operating mode writes = %#v, want [online]", session.setModes)
+	if len(session.setModes) != 0 {
+		t.Fatalf("operating mode writes = %#v, want no mode transition", session.setModes)
 	}
 	if len(session.setPreferences) != 1 || !session.setPreferences[0].HasNetworkSelectionPreference ||
 		session.setPreferences[0].NetworkSelectionPreference != qmi.NASNetworkSelectionAutomatic {
@@ -104,6 +106,21 @@ func TestEnsureNativeQMIRegistrationDrivesNASSequence(t *testing.T) {
 	}
 	if len(session.attachRequests) != 1 || !session.attachRequests[0] {
 		t.Fatalf("attach requests = %#v, want one attach", session.attachRequests)
+	}
+}
+
+func TestEnsureNativeQMIRegistrationRefusesFlightMode(t *testing.T) {
+	for _, mode := range []qmi.OperatingMode{qmi.ModeLowPower, qmi.ModeOffline, qmi.ModeShutdown, qmi.ModePersistLow, qmi.ModeOnlyLowPower, qmi.ModeReset} {
+		t.Run(fmt.Sprintf("mode_%d", mode), func(t *testing.T) {
+			session := &fakeNativeQMIRegistrationSession{mode: mode}
+			err := ensureNativeQMIRegistration(context.Background(), session, qmiRegistrationRequestAutomatic(), true)
+			if !errors.Is(err, ErrRadioFlightMode) {
+				t.Fatalf("ensure native QMI registration error = %v, want ErrRadioFlightMode", err)
+			}
+			if len(session.setModes) != 0 || len(session.registerRequests) != 0 || len(session.attachRequests) != 0 {
+				t.Fatalf("flight-mode registration mutated QMI session: modes=%v register=%v attach=%v", session.setModes, session.registerRequests, session.attachRequests)
+			}
+		})
 	}
 }
 

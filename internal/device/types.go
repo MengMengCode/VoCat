@@ -21,6 +21,7 @@ var (
 	ErrSMSSubscriberIdentity   = errors.New("live SMS subscriber identity is unavailable")
 	ErrSMSTransportUnavailable = errors.New("SMS transport is unavailable")
 	ErrDataBackendUnavailable  = errors.New("cellular data backend is unavailable")
+	ErrRadioFlightMode         = errors.New("radio is in flight mode")
 	ErrInvalidNetworkAPN       = errors.New("invalid cellular APN")
 	ErrRegionBlocked           = errors.New("sim card home region is not served")
 	ErrUSSDSessionNotFound     = errors.New("ussd session not found or already closed")

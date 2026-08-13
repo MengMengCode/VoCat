@@ -20,12 +20,25 @@ const (
 	qmiSMSStorageUIM uint8 = 0
 	qmiSMSStorageNV  uint8 = 1
 	qmiSMSFormatGW   uint8 = 0x06
-	// OpenStick 410 can return CardCallControlRefFail after an eUICC refresh.
-	// Repeating the eight-query WMS catch-up loop while the card is in that
+	// OpenStick 410 can return the standard QMI INVALID_ARG (0x0030) after an
+	// eUICC refresh. The old qmi-go fork called that value
+	// CardCallControlRefFail, which hid the actual stale WMS-context symptom.
+	// 0x0060 is the real CARD_CALL_CONTROL_FAILED value.
+	qmiWMSInvalidArgCode      uint16 = 0x0030
+	qmiWMSCardCallControlCode uint16 = 0x0060
+	qmiWMSPrimarySubscription uint8  = 0
+	// Repeating the eight-query WMS catch-up loop while the card is in a bad
 	// state monopolizes the shared QMI control port and makes eSIM/VoWiFi
 	// control requests look unstable. Probe again only after a cooldown.
 	qmiSMSWMSBackoff = 5 * time.Minute
+
+	qmiSMSRecoveryNone = iota
+	qmiSMSRecoveryWMS
+	qmiSMSRecoveryUIM
+	qmiSMSRecoveryModem
 )
+
+var errQMIWMSScanSuspended = errors.New("QMI WMS SMS scan is suspended")
 
 type qmiSMSListEntry struct {
 	Index uint32
@@ -40,6 +53,31 @@ type qmiSMSSession interface {
 	ListMessages(context.Context, uint8, qmi.MessageTagType) ([]qmiSMSListEntry, error)
 	RawReadMessage(context.Context, uint8, uint32) ([]byte, error)
 	Close() error
+}
+
+type qmiSMSAutoLister interface {
+	ListMessagesAuto(context.Context, uint8) ([]qmiSMSListEntry, error)
+}
+
+// qmiWMSContextReinitializer is implemented by the production session. It is
+// intentionally optional so unit-test sessions and older modem backends can
+// continue to exercise the list/read state machine without pretending to
+// support newer WMS requests.
+type qmiWMSContextReinitializer interface {
+	ResetWMS(context.Context) error
+	BindWMSSubscription(context.Context, uint8) error
+	GetWMSSubscriptionBinding(context.Context) (uint8, error)
+	GetWMSServiceReady(context.Context) (qmi.WMSServiceReadyStatus, error)
+}
+
+type qmiWMSRouteInspector interface {
+	GetWMSRoutes(context.Context) (*qmi.WMSRouteConfig, error)
+	SetWMSRoutes(context.Context, []qmi.WMSRoute, bool) error
+}
+
+type qmiEFSMSSchemaReader interface {
+	GetEFSMSSchema(context.Context) (qmi.UIMFileAttributes, error)
+	ReadEFSMSSRecord(context.Context, uint16, uint16) (qmi.UIMRecordData, error)
 }
 
 type qmiSMSSessionOpener func(context.Context, string) (qmiSMSSession, error)
@@ -149,6 +187,64 @@ func (session *productionQMISMSSession) GetTransportNetworkRegistrationStatus(
 	return session.wms.GetTransportNetworkRegistrationStatus(ctx)
 }
 
+func (session *productionQMISMSSession) ResetWMS(ctx context.Context) error {
+	return session.wms.Reset(ctx)
+}
+
+func (session *productionQMISMSSession) BindWMSSubscription(ctx context.Context, subscription uint8) error {
+	return session.wms.BindSubscription(ctx, subscription)
+}
+
+func (session *productionQMISMSSession) GetWMSSubscriptionBinding(ctx context.Context) (uint8, error) {
+	return session.wms.GetSubscriptionBinding(ctx)
+}
+
+func (session *productionQMISMSSession) GetWMSServiceReady(ctx context.Context) (qmi.WMSServiceReadyStatus, error) {
+	return session.wms.GetServiceReadyStatus(ctx)
+}
+
+func (session *productionQMISMSSession) GetWMSRoutes(ctx context.Context) (*qmi.WMSRouteConfig, error) {
+	return session.wms.GetRoutes(ctx)
+}
+
+func (session *productionQMISMSSession) SetWMSRoutes(ctx context.Context, routes []qmi.WMSRoute, transferStatusReportToClient bool) error {
+	return session.wms.SetRoutes(ctx, routes, transferStatusReportToClient)
+}
+
+func (session *productionQMISMSSession) GetEFSMSSchema(ctx context.Context) (qmi.UIMFileAttributes, error) {
+	attrs, err := session.uim.GetFileAttributesWithSession(
+		ctx,
+		qmi.UIMSessionTypePrimaryGWProvisioning,
+		0x6F3C,
+		[]uint8{0x00, 0x3F, 0xFF, 0x7F},
+	)
+	if err != nil {
+		return qmi.UIMFileAttributes{}, err
+	}
+	if attrs == nil {
+		return qmi.UIMFileAttributes{}, errors.New("UIM returned no EF_SMS attributes")
+	}
+	return *attrs, nil
+}
+
+func (session *productionQMISMSSession) ReadEFSMSSRecord(ctx context.Context, recordNumber, recordLength uint16) (qmi.UIMRecordData, error) {
+	record, err := session.uim.ReadRecordWithSession(
+		ctx,
+		qmi.UIMSessionTypePrimaryGWProvisioning,
+		0x6F3C,
+		[]uint8{0x00, 0x3F, 0xFF, 0x7F},
+		recordNumber,
+		recordLength,
+	)
+	if err != nil {
+		return qmi.UIMRecordData{}, err
+	}
+	if record == nil {
+		return qmi.UIMRecordData{}, errors.New("UIM returned no EF_SMS record")
+	}
+	return *record, nil
+}
+
 func (session *productionQMISMSSession) SendRawMessage(
 	ctx context.Context,
 	format uint8,
@@ -163,6 +259,21 @@ func (session *productionQMISMSSession) ListMessages(
 	tag qmi.MessageTagType,
 ) ([]qmiSMSListEntry, error) {
 	entries, err := session.wms.ListMessages(ctx, storage, tag)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]qmiSMSListEntry, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, qmiSMSListEntry{Index: entry.Index, Tag: entry.Tag})
+	}
+	return result, nil
+}
+
+func (session *productionQMISMSSession) ListMessagesAuto(
+	ctx context.Context,
+	storage uint8,
+) ([]qmiSMSListEntry, error) {
+	entries, err := session.wms.ListMessagesAuto(ctx, storage)
 	if err != nil {
 		return nil, err
 	}
@@ -475,7 +586,35 @@ func isUnsupportedQMIWMSOperation(err error) bool {
 func isQMIWMSCardCallControlFailure(err error) bool {
 	qmiErr := qmi.GetQMIError(err)
 	return qmiErr != nil && qmiErr.Service == qmi.ServiceWMS &&
-		qmiErr.ErrorCode == qmi.QMIErrCardCallControlRefFail
+		qmiErr.ErrorCode == qmiWMSCardCallControlCode
+}
+
+// isQMIWMSContextFailure covers the two values that have appeared in the
+// field: standard INVALID_ARG (0x0030) from the OpenStick and the actual
+// CARD_CALL_CONTROL_FAILED (0x0060) used by other firmware. Both require a
+// fresh WMS context before touching UIM storage; only the latter is labelled
+// a card call-control failure in operator-facing logs.
+func isQMIWMSContextFailure(err error) bool {
+	qmiErr := qmi.GetQMIError(err)
+	return qmiErr != nil && qmiErr.Service == qmi.ServiceWMS &&
+		(qmiErr.ErrorCode == qmiWMSInvalidArgCode || qmiErr.ErrorCode == qmiWMSCardCallControlCode)
+}
+
+// qmiErrorLogAttrs preserves the raw QMI result/error identifiers in the
+// persisted event stream. Serializing an error interface alone can become an
+// empty JSON object in loghub, which would hide whether the modem returned
+// INVALID_ARG (0x0030) or CARD_CALL_CONTROL_FAILED (0x0060).
+func qmiErrorLogAttrs(err error) []any {
+	attrs := []any{"error", err}
+	if qmiErr := qmi.GetQMIError(err); qmiErr != nil {
+		attrs = append(attrs,
+			"qmi_service", qmiErr.Service,
+			"qmi_message_id", qmiErr.MessageID,
+			"qmi_result", qmiErr.Result,
+			"qmi_error_code", qmiErr.ErrorCode,
+		)
+	}
+	return attrs
 }
 
 func (manager *Manager) qmiSMSScanSuspended(controlDevice string) bool {
@@ -516,6 +655,50 @@ func (manager *Manager) suspendQMIWMSScan(controlDevice string, cause error) {
 		"control_path", controlDevice, "cooldown_seconds", int(qmiSMSWMSBackoff/time.Second), "error", cause)
 }
 
+func (manager *Manager) clearQMIWMSScanBackoff(controlDevice string) {
+	controlDevice = strings.TrimSpace(controlDevice)
+	if manager == nil || controlDevice == "" {
+		return
+	}
+	manager.qmiSMSBackoffMu.Lock()
+	delete(manager.qmiSMSBackoffUntil, controlDevice)
+	manager.qmiSMSBackoffMu.Unlock()
+}
+
+func (manager *Manager) markQMIWMSContextPending(deviceID string) {
+	deviceID = strings.TrimSpace(deviceID)
+	if manager == nil || deviceID == "" {
+		return
+	}
+	manager.qmiSMSContextMu.Lock()
+	if manager.qmiSMSContextPending == nil {
+		manager.qmiSMSContextPending = make(map[string]bool)
+	}
+	manager.qmiSMSContextPending[deviceID] = true
+	manager.qmiSMSContextMu.Unlock()
+}
+
+func (manager *Manager) qmiWMSContextPending(deviceID string) bool {
+	deviceID = strings.TrimSpace(deviceID)
+	if manager == nil || deviceID == "" {
+		return false
+	}
+	manager.qmiSMSContextMu.Lock()
+	pending := manager.qmiSMSContextPending[deviceID]
+	manager.qmiSMSContextMu.Unlock()
+	return pending
+}
+
+func (manager *Manager) clearQMIWMSContextPending(deviceID string) {
+	deviceID = strings.TrimSpace(deviceID)
+	if manager == nil || deviceID == "" {
+		return
+	}
+	manager.qmiSMSContextMu.Lock()
+	delete(manager.qmiSMSContextPending, deviceID)
+	manager.qmiSMSContextMu.Unlock()
+}
+
 type qmiSMSStorage struct {
 	value uint8
 	name  string
@@ -540,20 +723,298 @@ type qmiSMSStoredRecord struct {
 	tag     qmi.MessageTagType
 }
 
+// reinitializeQMIWMSContextLocked rebuilds only the WMS service state. It is
+// deliberately separate from UIM/modem resets: the OpenStick reports standard
+// INVALID_ARG (0x0030) when the WMS client still points at the pre-REFRESH
+// subscription/storage context, and a modem reset is needlessly disruptive in
+// that case.
+func (manager *Manager) reinitializeQMIWMSContextLocked(
+	ctx context.Context,
+	id string,
+	controlDevice string,
+	session qmiSMSSession,
+) error {
+	reinitializer, ok := session.(qmiWMSContextReinitializer)
+	if !ok {
+		manager.logEvent(slog.LevelDebug, "QMI WMS context rebuild unavailable",
+			"category", "sms", "event", "qmi_wms_context_rebuild_unavailable",
+			"device_id", id, "control_path", controlDevice)
+		return nil
+	}
+	call := func(operation string, fn func(context.Context) error) error {
+		callContext, cancel := manager.withTimeout(ctx, manager.commandTimeout*2)
+		defer cancel()
+		if err := fn(callContext); err != nil {
+			return fmt.Errorf("%s: %w", operation, err)
+		}
+		return nil
+	}
+
+	if err := call("WMS reset", reinitializer.ResetWMS); err != nil {
+		return err
+	}
+	manager.logEvent(slog.LevelInfo, "QMI WMS service reset",
+		"category", "sms", "event", "qmi_wms_reset", "device_id", id,
+		"control_path", controlDevice)
+
+	if err := call("WMS bind primary subscription", func(callContext context.Context) error {
+		return reinitializer.BindWMSSubscription(callContext, qmiWMSPrimarySubscription)
+	}); err != nil {
+		if !isUnsupportedQMIWMSOperation(err) {
+			return err
+		}
+		manager.logEvent(slog.LevelDebug, "QMI WMS subscription binding unsupported",
+			"category", "sms", "event", "qmi_wms_bind_unsupported",
+			"device_id", id, "control_path", controlDevice, "error", err)
+	} else if err := call("WMS get subscription binding", func(callContext context.Context) error {
+		binding, bindingErr := reinitializer.GetWMSSubscriptionBinding(callContext)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		if binding != qmiWMSPrimarySubscription {
+			return fmt.Errorf("WMS bound subscription is %d, want primary (%d)", binding, qmiWMSPrimarySubscription)
+		}
+		return nil
+	}); err != nil {
+		if !isUnsupportedQMIWMSOperation(err) {
+			return err
+		}
+		manager.logEvent(slog.LevelDebug, "QMI WMS binding query unsupported",
+			"category", "sms", "event", "qmi_wms_binding_query_unsupported",
+			"device_id", id, "control_path", controlDevice, "error", err)
+	}
+
+	ready, err := manager.waitForQMIWMSServiceReady(ctx, reinitializer)
+	if err != nil {
+		if !isUnsupportedQMIWMSOperation(err) {
+			return err
+		}
+		manager.logEvent(slog.LevelDebug, "QMI WMS service-ready query unsupported",
+			"category", "sms", "event", "qmi_wms_service_ready_unsupported",
+			"device_id", id, "control_path", controlDevice, "error", err)
+	} else {
+		manager.logEvent(slog.LevelInfo, "QMI WMS service ready",
+			"category", "sms", "event", "qmi_wms_service_ready", "device_id", id,
+			"control_path", controlDevice, "state", ready.String())
+	}
+
+	routeInspector, hasRouteInspector := session.(qmiWMSRouteInspector)
+	var observedRoutes *qmi.WMSRouteConfig
+	if hasRouteInspector {
+		routeContext, cancel := manager.withTimeout(ctx, manager.commandTimeout*2)
+		routes, routeErr := routeInspector.GetWMSRoutes(routeContext)
+		cancel()
+		if routeErr != nil {
+			if !isUnsupportedQMIWMSOperation(routeErr) {
+				manager.logEvent(slog.LevelWarn, "QMI WMS route query failed",
+					"category", "sms", "event", "qmi_wms_routes_query_failed",
+					"device_id", id, "control_path", controlDevice, "error", routeErr)
+			}
+		} else if routes != nil {
+			observedRoutes = routes
+			manager.logEvent(slog.LevelInfo, "QMI WMS routes observed",
+				"category", "sms", "event", "qmi_wms_routes_observed",
+				"device_id", id, "control_path", controlDevice,
+				"route_count", len(routes.Routes),
+				"transfer_status_report", routes.TransferStatusReportToClient)
+			for index, route := range routes.Routes {
+				manager.logEvent(slog.LevelDebug, "QMI WMS route",
+					"category", "sms", "event", "qmi_wms_route",
+					"device_id", id, "control_path", controlDevice, "index", index,
+					"message_type", route.MessageType, "message_class", route.MessageClass,
+					"storage", route.StorageType, "receipt_action", route.ReceiptAction)
+			}
+		}
+	}
+	if hasRouteInspector && observedRoutes != nil {
+		fallbackRoutes, changed := qmiWMSNVFallbackRoutes(observedRoutes.Routes)
+		if changed {
+			routeContext, cancel := manager.withTimeout(ctx, manager.commandTimeout*2)
+			routeErr := routeInspector.SetWMSRoutes(
+				routeContext,
+				fallbackRoutes,
+				observedRoutes.TransferStatusReportToClient,
+			)
+			cancel()
+			if routeErr != nil {
+				manager.logEvent(slog.LevelWarn, "QMI WMS NV route fallback failed",
+					"category", "sms", "event", "qmi_wms_nv_route_fallback_failed",
+					"device_id", id, "control_path", controlDevice,
+					"changed_routes", countQMIWMSNVFallbackRoutes(observedRoutes.Routes),
+					"error", routeErr)
+			} else {
+				manager.logEvent(slog.LevelInfo, "QMI WMS routes moved to NV storage",
+					"category", "sms", "event", "qmi_wms_nv_route_fallback_applied",
+					"device_id", id, "control_path", controlDevice,
+					"changed_routes", countQMIWMSNVFallbackRoutes(observedRoutes.Routes))
+			}
+		}
+	}
+
+	if schemaReader, ok := session.(qmiEFSMSSchemaReader); ok {
+		schemaContext, cancel := manager.withTimeout(ctx, manager.commandTimeout*2)
+		attrs, schemaErr := schemaReader.GetEFSMSSchema(schemaContext)
+		cancel()
+		if schemaErr != nil {
+			manager.logEvent(slog.LevelWarn, "QMI UIM EF_SMS probe failed",
+				"category", "sms", "event", "qmi_uim_ef_sms_probe_failed",
+				"device_id", id, "control_path", controlDevice, "file_id", "0x6F3C",
+				"error", schemaErr)
+		} else {
+			manager.logEvent(slog.LevelInfo, "QMI UIM EF_SMS available",
+				"category", "sms", "event", "qmi_uim_ef_sms_available",
+				"device_id", id, "control_path", controlDevice, "file_id", "0x6F3C",
+				"file_size", attrs.FileSize, "record_size", attrs.RecordSize,
+				"record_count", attrs.RecordCount, "card_sw1", attrs.CardResult.SW1,
+				"card_sw2", attrs.CardResult.SW2)
+			recordLength := attrs.RecordSize
+			if recordLength == 0 {
+				recordLength = 176
+			}
+			recordContext, recordCancel := manager.withTimeout(ctx, manager.commandTimeout*2)
+			record, recordErr := schemaReader.ReadEFSMSSRecord(recordContext, 1, recordLength)
+			recordCancel()
+			if recordErr != nil {
+				manager.logEvent(slog.LevelWarn, "QMI UIM EF_SMS record probe failed",
+					"category", "sms", "event", "qmi_uim_ef_sms_record_probe_failed",
+					"device_id", id, "control_path", controlDevice, "record_number", 1,
+					"record_length", recordLength, "error", recordErr)
+			} else {
+				manager.logEvent(slog.LevelInfo, "QMI UIM EF_SMS record probe succeeded",
+					"category", "sms", "event", "qmi_uim_ef_sms_record_probe_succeeded",
+					"device_id", id, "control_path", controlDevice, "record_number", 1,
+					"record_length", len(record.Data), "card_sw1", record.CardResult.SW1,
+					"card_sw2", record.CardResult.SW2)
+			}
+		}
+	}
+	return nil
+}
+
+// waitForQMIWMSServiceReady gives the modem time to finish the UIM refresh
+// that WMS RESET exposes as a transient NOT_READY state. A NAS registration
+// can already be visible while this service-specific state is still zero.
+func (manager *Manager) waitForQMIWMSServiceReady(
+	ctx context.Context,
+	reinitializer qmiWMSContextReinitializer,
+) (qmi.WMSServiceReadyStatus, error) {
+	waitTimeout := 5 * time.Second
+	if manager != nil && manager.commandTimeout > 0 && 2*manager.commandTimeout > waitTimeout {
+		waitTimeout = 2 * manager.commandTimeout
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Use a fresh bounded child even when the caller already has a long
+	// recovery deadline; withTimeout intentionally preserves an existing
+	// deadline and would otherwise let a permanently NOT_READY modem block the
+	// WMS stage for the full modem-recovery timeout.
+	waitContext, cancel := context.WithTimeout(ctx, waitTimeout)
+	defer cancel()
+	for {
+		ready, err := reinitializer.GetWMSServiceReady(waitContext)
+		if err != nil {
+			return qmi.WMSServiceReadyNotReady, err
+		}
+		if ready == qmi.WMSServiceReady3GPP || ready == qmi.WMSServiceReady3GPPAnd3GPP2 {
+			return ready, nil
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-waitContext.Done():
+			if err := waitContext.Err(); err != nil {
+				return qmi.WMSServiceReadyNotReady, fmt.Errorf("WMS service ready state remained %s: %w", ready.String(), err)
+			}
+			return qmi.WMSServiceReadyNotReady, fmt.Errorf("WMS service ready state remained %s", ready.String())
+		case <-timer.C:
+		}
+	}
+}
+
+// qmiWMSNVFallbackRoutes keeps ordinary point-to-point SMS in modem NV
+// storage when a profile leaves those routes in transfer-only/unknown storage
+// mode. The application polls WMS storage, so a transfer-only route would
+// acknowledge the SMS without leaving a record for the next scan. A healthy
+// class-2 UIM route is retained because EF_SMS is the standard storage for
+// SIM-data SMS and is independently verified by the probe above.
+func qmiWMSNVFallbackRoutes(routes []qmi.WMSRoute) ([]qmi.WMSRoute, bool) {
+	result := append([]qmi.WMSRoute(nil), routes...)
+	changed := false
+	for index, route := range result {
+		if route.MessageType != qmi.WMSMessageTypePointToPoint {
+			continue
+		}
+		if route.StorageType == qmi.WMSStorageTypeUIM &&
+			route.ReceiptAction == qmi.WMSReceiptActionStoreAndNotify {
+			continue
+		}
+		if route.StorageType != qmi.WMSStorageTypeNone &&
+			route.ReceiptAction != qmi.WMSReceiptActionTransferOnly &&
+			route.ReceiptAction != qmi.WMSReceiptActionTransferAndAck {
+			continue
+		}
+		result[index].StorageType = qmi.WMSStorageTypeNV
+		result[index].ReceiptAction = qmi.WMSReceiptActionStoreAndNotify
+		changed = true
+	}
+	return result, changed
+}
+
+func countQMIWMSNVFallbackRoutes(routes []qmi.WMSRoute) int {
+	_, changed := qmiWMSNVFallbackRoutes(routes)
+	if !changed {
+		return 0
+	}
+	count := 0
+	for _, route := range routes {
+		if route.MessageType != qmi.WMSMessageTypePointToPoint {
+			continue
+		}
+		if route.StorageType != qmi.WMSStorageTypeNone ||
+			(route.ReceiptAction != qmi.WMSReceiptActionTransferOnly &&
+				route.ReceiptAction != qmi.WMSReceiptActionTransferAndAck) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
 func (manager *Manager) listSMSQMILocked(
 	ctx context.Context,
 	state *managedDevice,
 	controlDevice string,
 ) (SMSSubscriberScan, error) {
+	return manager.listSMSQMILockedAttempt(ctx, state, controlDevice, qmiSMSRecoveryWMS)
+}
+
+// listSMSQMILockedAttempt performs one WMS scan. A standard INVALID_ARG
+// (0x0030) after an eUICC REFRESH first rebuilds only the WMS service context;
+// UIM and modem resets are retained as progressively narrower fallbacks. The
+// staged recovery value prevents a permanently wedged card from causing an
+// unbounded reset loop.
+func (manager *Manager) listSMSQMILockedAttempt(
+	ctx context.Context,
+	state *managedDevice,
+	controlDevice string,
+	recoveryStage int,
+) (SMSSubscriberScan, error) {
 	scan := SMSSubscriberScan{Transport: SMSTransportCellularQMI}
 	if manager.qmiSMSScanSuspended(controlDevice) {
-		return scan, nil
+		return scan, errQMIWMSScanSuspended
 	}
 	session, err := manager.openQMISMSSessionLocked(ctx, controlDevice)
 	if err != nil {
 		return scan, err
 	}
-	defer session.Close()
+	sessionClosed := false
+	closeSession := func() {
+		if !sessionClosed {
+			_ = session.Close()
+			sessionClosed = true
+		}
+	}
+	defer closeSession()
 
 	scan.Identity, err = manager.readQMISMSSubscriberIdentityLocked(ctx, session)
 	if err != nil {
@@ -561,6 +1022,24 @@ func (manager *Manager) listSMSQMILocked(
 	}
 	if err := manager.validateQMISMSControl(state, controlDevice); err != nil {
 		return scan, err
+	}
+	if manager.qmiWMSContextPending(state.candidate.ID) {
+		if err := manager.reinitializeQMIWMSContextLocked(
+			ctx, state.candidate.ID, controlDevice, session,
+		); err != nil {
+			attrs := []any{
+				"category", "sms", "event", "qmi_wms_profile_refresh_reinit_failed",
+				"device_id", state.candidate.ID, "control_path", controlDevice,
+			}
+			attrs = append(attrs, qmiErrorLogAttrs(err)...)
+			manager.logEvent(slog.LevelWarn, "QMI WMS profile-refresh reinitialization failed",
+				attrs...)
+		} else {
+			manager.clearQMIWMSContextPending(state.candidate.ID)
+			manager.logEvent(slog.LevelInfo, "QMI WMS profile-refresh reinitialization completed",
+				"category", "sms", "event", "qmi_wms_profile_refresh_reinit_completed",
+				"device_id", state.candidate.ID, "control_path", controlDevice)
+		}
 	}
 
 	records := make(map[string]qmiSMSStoredRecord)
@@ -571,10 +1050,108 @@ func (manager *Manager) listSMSQMILocked(
 			listContext, cancel := manager.withTimeout(ctx, manager.commandTimeout)
 			entries, listErr := session.ListMessages(listContext, storage.value, requestedTag)
 			cancel()
+			if listErr != nil && isQMIWMSContextFailure(listErr) &&
+				(requestedTag == qmi.TagTypeMTNotRead || requestedTag == qmi.TagTypeMTRead) {
+				if autoLister, ok := session.(qmiSMSAutoLister); ok {
+					autoContext, cancelAuto := manager.withTimeout(ctx, manager.commandTimeout)
+					entries, listErr = autoLister.ListMessagesAuto(autoContext, storage.value)
+					cancelAuto()
+				}
+			}
 			if listErr != nil {
-				if isQMIWMSCardCallControlFailure(listErr) {
+				if isQMIWMSContextFailure(listErr) {
+					if recoveryStage != qmiSMSRecoveryNone {
+						// The WMS-only stage is an optional enhancement. Test and
+						// legacy sessions may not implement the new reset/bind
+						// operations; in that case go straight to the existing UIM
+						// recovery instead of opening a second, unusable WMS client.
+						effectiveRecoveryStage := recoveryStage
+						if recoveryStage == qmiSMSRecoveryWMS {
+							if _, available := session.(qmiWMSContextReinitializer); !available {
+								effectiveRecoveryStage = qmiSMSRecoveryUIM
+							}
+						}
+						// WMS and UIM share the QMI control path. Release the
+						// WMS client before resetting UIM so the recovery can
+						// acquire a clean client/lease.
+						closeSession()
+						recoveryName := "WMS"
+						if effectiveRecoveryStage == qmiSMSRecoveryUIM {
+							recoveryName = "UIM"
+						} else if effectiveRecoveryStage == qmiSMSRecoveryModem {
+							recoveryName = "modem"
+						}
+						startAttrs := []any{
+							"category", "sms", "event", "qmi_wms_recovery_started",
+							"control_path", controlDevice, "stage", recoveryName,
+						}
+						startAttrs = append(startAttrs, qmiErrorLogAttrs(listErr)...)
+						manager.logEvent(slog.LevelWarn, "QMI WMS SMS recovery started", startAttrs...)
+						recoveryContext, cancelRecovery := context.WithTimeout(
+							context.WithoutCancel(ctx), manager.longTimeout,
+						)
+						var recoveryErr error
+						if effectiveRecoveryStage == qmiSMSRecoveryWMS {
+							recoverySession, openErr := manager.openQMISMSSessionLocked(
+								recoveryContext, controlDevice,
+							)
+							if openErr != nil {
+								recoveryErr = openErr
+							} else {
+								recoveryErr = manager.reinitializeQMIWMSContextLocked(
+									recoveryContext, state.candidate.ID, controlDevice, recoverySession,
+								)
+								_ = recoverySession.Close()
+							}
+						} else if effectiveRecoveryStage == qmiSMSRecoveryUIM {
+							recoveryErr = manager.recoverQMIEuiccChannelLocked(
+								recoveryContext, state.candidate.ID, state,
+							)
+						} else {
+							recoveryErr = manager.resetNativeQMIModemForSMSLocked(
+								recoveryContext, state.candidate.ID, state,
+							)
+						}
+						cancelRecovery()
+						if recoveryErr == nil {
+							if effectiveRecoveryStage == qmiSMSRecoveryWMS {
+								manager.clearQMIWMSContextPending(state.candidate.ID)
+							}
+							manager.clearQMIWMSScanBackoff(controlDevice)
+							manager.logEvent(slog.LevelInfo, "QMI WMS SMS recovery completed",
+								"category", "sms", "event", "qmi_wms_recovery_completed",
+								"control_path", controlDevice, "stage", recoveryName)
+							nextStage := qmiSMSRecoveryNone
+							if effectiveRecoveryStage == qmiSMSRecoveryWMS {
+								nextStage = qmiSMSRecoveryUIM
+							} else if effectiveRecoveryStage == qmiSMSRecoveryUIM {
+								nextStage = qmiSMSRecoveryModem
+							}
+							return manager.listSMSQMILockedAttempt(
+								ctx, state, controlDevice, nextStage,
+							)
+						}
+						failureAttrs := []any{
+							"category", "sms", "event", "qmi_wms_recovery_failed",
+							"control_path", controlDevice, "stage", recoveryName,
+						}
+						failureAttrs = append(failureAttrs, qmiErrorLogAttrs(recoveryErr)...)
+						manager.logEvent(slog.LevelWarn, "QMI WMS SMS recovery failed", failureAttrs...)
+					}
+					// A WMS context/card error is often tied to the SIM/UIM storage on
+					// affected OpenStick firmware. Do not discard ME/NV records
+					// (where the modem may still have delivered the roaming SMS)
+					// just because the UIM storage cannot be listed.
+					if storage.value == qmiSMSStorageUIM {
+						complete = false
+						lastListErr = fmt.Errorf(
+							"list QMI WMS %s messages with tag %d: %w",
+							storage.name, requestedTag, listErr,
+						)
+						continue
+					}
 					manager.suspendQMIWMSScan(controlDevice, listErr)
-					return scan, nil
+					return scan, listErr
 				}
 				complete = false
 				lastListErr = fmt.Errorf("list QMI WMS %s messages with tag %d: %w", storage.name, requestedTag, listErr)

@@ -11,15 +11,16 @@ import (
 )
 
 type fakeQMIRadioSession struct {
-	mode          qmi.OperatingMode
-	iccid         string
-	iccidErr      error
-	getModes      []qmi.OperatingMode
-	setModes      []qmi.OperatingMode
-	networkResets int
-	getErr        error
-	setErr        error
-	closeCount    int
+	mode           qmi.OperatingMode
+	iccid          string
+	iccidErr       error
+	getModes       []qmi.OperatingMode
+	setModes       []qmi.OperatingMode
+	attachRequests []bool
+	networkResets  int
+	getErr         error
+	setErr         error
+	closeCount     int
 }
 
 func (session *fakeQMIRadioSession) GetOperatingMode(context.Context) (qmi.OperatingMode, error) {
@@ -46,6 +47,11 @@ func (session *fakeQMIRadioSession) SetOperatingMode(_ context.Context, mode qmi
 
 func (session *fakeQMIRadioSession) ResetNetworkSelection(context.Context) error {
 	session.networkResets++
+	return nil
+}
+
+func (session *fakeQMIRadioSession) AttachDetach(_ context.Context, attached bool) error {
+	session.attachRequests = append(session.attachRequests, attached)
 	return nil
 }
 
@@ -121,6 +127,9 @@ func TestSetFlightUsesQMIDMSForNativeWWAN(t *testing.T) {
 	}
 	if len(session.setModes) != 2 || session.setModes[0] != qmi.ModeOnline || session.setModes[1] != qmi.ModeLowPower {
 		t.Fatalf("QMI modes = %v", session.setModes)
+	}
+	if len(session.attachRequests) != 1 || session.attachRequests[0] {
+		t.Fatalf("QMI attach/detach requests = %v, want one detach", session.attachRequests)
 	}
 	if session.closeCount != 2 {
 		t.Fatalf("QMI close count = %d", session.closeCount)

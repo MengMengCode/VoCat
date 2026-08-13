@@ -14,12 +14,16 @@ import (
 // qmiNativeSnapshotData contains the parts of a device snapshot that are
 // available only through QMI on the OpenStick/Qualcomm WWAN path.
 type qmiNativeSnapshotData struct {
-	accessTech string
-	band       string
-	channel    string
-	imsi       string
-	phone      PhoneNumber
-	phoneErr   error
+	accessTech    string
+	band          string
+	channel       string
+	iccid         string
+	imsi          string
+	operatingMode int
+	modeKnown     bool
+	radioOff      bool
+	phone         PhoneNumber
+	phoneErr      error
 }
 
 // readNativeQMIIdentity reads the active card identity (ICCID + IMSI) through
@@ -78,6 +82,16 @@ func (manager *Manager) readNativeQMISnapshot(
 	}
 	data := qmiNativeSnapshotData{}
 	var warnings []string
+	if mode, err := native.GetOperatingMode(queryContext); err != nil {
+		warnings = append(warnings, "read QMI operating mode: "+err.Error())
+	} else {
+		data.modeKnown = true
+		data.operatingMode = qmiModeAsCFUN(mode)
+		data.radioOff = isQMIRadioOffMode(mode) || mode == qmi.ModeReset
+	}
+	if raw, err := native.GetICCID(queryContext); err == nil {
+		data.iccid = strings.TrimRight(strings.ToUpper(strings.TrimSpace(raw)), "F")
+	}
 	if raw, err := native.GetMSISDN(queryContext); err != nil {
 		data.phoneErr = err
 		if !isQMINotProvisioned(err) {

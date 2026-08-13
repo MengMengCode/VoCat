@@ -292,20 +292,12 @@ func ensureNativeQMIRegistration(
 	if err != nil {
 		return fmt.Errorf("read QMI operating mode: %w", err)
 	}
-	if mode == qmi.ModeLowPower || mode == qmi.ModeOffline || mode == qmi.ModeShutdown || mode == qmi.ModeReset {
-		if err := session.SetOperatingMode(ctx, qmi.ModeOnline); err != nil {
-			return fmt.Errorf("restore QMI online mode: %w", err)
-		}
-		if err := waitNativeQMIRegistration(ctx); err != nil {
-			return fmt.Errorf("wait for QMI online mode: %w", err)
-		}
-		mode, err = session.GetOperatingMode(ctx)
-		if err != nil {
-			return fmt.Errorf("recheck QMI operating mode: %w", err)
-		}
-		if mode == qmi.ModeLowPower || mode == qmi.ModeOffline || mode == qmi.ModeShutdown || mode == qmi.ModeReset {
-			return fmt.Errorf("QMI operating mode remained non-online after recovery: %d", mode)
-		}
+	if isQMIRadioOffMode(mode) || mode == qmi.ModeReset {
+		// Registration/data requests must never wake a modem that the user put
+		// into flight mode.  The old recovery path unconditionally wrote
+		// ModeOnline here, which made the flight-mode switch appear to turn
+		// itself off and left NAS registered after every refresh/reconcile.
+		return fmt.Errorf("%w: QMI operating mode %d", ErrRadioFlightMode, mode)
 	}
 
 	if setAutomatic {

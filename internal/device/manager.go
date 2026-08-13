@@ -46,6 +46,8 @@ type Manager struct {
 	logger                        *slog.Logger
 	qmiSMSBackoffMu               sync.Mutex
 	qmiSMSBackoffUntil            map[string]time.Time
+	qmiSMSContextMu               sync.Mutex
+	qmiSMSContextPending          map[string]bool
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
 	started                       bool
@@ -108,6 +110,7 @@ func NewManager(options Options) (*Manager, error) {
 		cardReaders:                   options.CardReaders,
 		logger:                        options.Logger,
 		qmiSMSBackoffUntil:            make(map[string]time.Time),
+		qmiSMSContextPending:          make(map[string]bool),
 		nativeQMIRegistrationInFlight: make(map[string]struct{}),
 		devices:                       make(map[string]*managedDevice),
 		ussdSessions:                  make(map[string]ussdSession),
@@ -206,6 +209,15 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 			manager.devices[candidate.ID] = &managedDevice{
 				candidate:  candidate,
 				discovered: true,
+			}
+			// A newly discovered native Qualcomm device may retain stale WMS
+			// routes from the previous process/profile. Rebuild the WMS context
+			// before the first SMS scan; eSIM switches mark this flag again after
+			// EnableProfile succeeds.
+			if strings.HasPrefix(strings.TrimSpace(candidate.ID), "wwan") {
+				manager.qmiSMSContextMu.Lock()
+				manager.qmiSMSContextPending[candidate.ID] = true
+				manager.qmiSMSContextMu.Unlock()
 			}
 			continue
 		}

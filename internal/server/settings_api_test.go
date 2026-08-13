@@ -522,8 +522,8 @@ func TestCardPolicyDefaultValidationAndPersistence(t *testing.T) {
 	response := decodeSettingsResponse(t, recorder)
 	policy := response["data"].(map[string]any)
 	if policy["iccid"] != iccid || policy["source"] != "default" ||
-		policy["ip_version"] != "IPV4V6" || policy["vowifi_enabled"] != true ||
-		policy["airplane_enabled"] != true || policy["custom_phone_number"] != "" {
+		policy["ip_version"] != "IPV4V6" || policy["vowifi_enabled"] != false ||
+		policy["airplane_enabled"] != false || policy["custom_phone_number"] != "" {
 		t.Fatalf("default policy = %#v", policy)
 	}
 

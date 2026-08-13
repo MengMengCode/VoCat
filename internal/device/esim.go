@@ -760,6 +760,12 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	manager.logEvent(slog.LevelInfo, "SIM profile accepted by eUICC; modem recovery queued",
 		"category", "sim_switch", "event", "profile_switch_accepted",
 		"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "result_code", result)
+	// EnableProfile(refresh=yes) invalidates the modem-side WMS subscription
+	// and storage context even after the new profile is visible through UIM.
+	// Make the next SMS operation rebuild WMS before it attempts List Messages;
+	// this avoids interpreting the resulting standard INVALID_ARG (0x0030) as
+	// a card call-control failure and avoids an unnecessary modem reset.
+	manager.markQMIWMSContextPending(id)
 	manager.markCachedProfileEnabled(id, iccid)
 	// The eUICC accepted the target profile. Reset and repopulate the modem in
 	// a detached recovery so it survives an HTTP disconnect, but keep this API

@@ -372,4 +372,10 @@ func (manager *Manager) updateSnapshotMode(
 	state.snapshot.ModeKnown = true
 	state.snapshot.FlightMode = isRadioOffMode(mode)
 	state.snapshot.RadioOff = state.snapshot.FlightMode
+	if state.snapshot.RadioOff {
+		// SetFlight updates the cached snapshot before the next periodic refresh.
+		// Clear any NAS/AT serving values immediately so the API cannot report a
+		// stale registered network during that window.
+		maskSnapshotForRadioOff(state.snapshot)
+	}
 }

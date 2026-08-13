@@ -48,3 +48,31 @@ func TestIsQMINotProvisioned(t *testing.T) {
 		t.Fatal("ordinary error was classified as NotProvisioned")
 	}
 }
+
+func TestMaskSnapshotForRadioOffClearsStaleServingState(t *testing.T) {
+	signal := 31
+	snapshot := &Snapshot{
+		RegistrationStatus: 5,
+		RegistrationSource: "QMI NAS",
+		PSAttached:         true,
+		OperatorName:       "China Mobile",
+		OperatorCode:       "46000",
+		AccessTech:         "LTE",
+		Band:               "B3",
+		Channel:            "1300",
+		SignalRaw:          &signal,
+		RSRP:               &signal,
+		Phone:              PhoneNumber{Number: "+8613800138000"},
+		IMSI:               "515027106574535",
+	}
+
+	maskSnapshotForRadioOff(snapshot)
+	if snapshot.RegistrationStatus != 0 || snapshot.RegistrationSource != "QMI DMS" || snapshot.PSAttached ||
+		snapshot.OperatorName != "" || snapshot.OperatorCode != "" || snapshot.AccessTech != "" ||
+		snapshot.Band != "" || snapshot.Channel != "" || snapshot.SignalRaw != nil || snapshot.RSRP != nil {
+		t.Fatalf("masked snapshot retained stale serving state: %#v", snapshot)
+	}
+	if snapshot.IMSI == "" || snapshot.Phone.Number == "" {
+		t.Fatalf("mask removed identity fields: %#v", snapshot)
+	}
+}

@@ -335,6 +335,10 @@ func (manager *Manager) ListSMS(
 			return nil, err
 		}
 		scan, scanErr := manager.listSMSQMILocked(ctx, state, controlDevice)
+		if scanErr != nil && (isQMIWMSContextFailure(scanErr) ||
+			errors.Is(scanErr, errQMIWMSScanSuspended)) {
+			scan, scanErr = manager.listSMSNativeATFallbackLocked(ctx, state, controlDevice, scan)
+		}
 		manager.setResult(id, state, nil, scanErr)
 		return scan.Messages, scanErr
 	}
@@ -375,6 +379,10 @@ func (manager *Manager) ListSMSBoundSubscriber(
 			return SMSSubscriberScan{Transport: SMSTransportCellularQMI}, err
 		}
 		scan, scanErr := manager.listSMSQMILocked(ctx, state, controlDevice)
+		if scanErr != nil && (isQMIWMSContextFailure(scanErr) ||
+			errors.Is(scanErr, errQMIWMSScanSuspended)) {
+			scan, scanErr = manager.listSMSNativeATFallbackLocked(ctx, state, controlDevice, scan)
+		}
 		manager.setResult(id, state, nil, scanErr)
 		return scan, scanErr
 	}
@@ -402,6 +410,42 @@ func (manager *Manager) ListSMSBoundSubscriber(
 		Storages:  storages,
 		Transport: SMSTransportCellularAT,
 	}, err
+}
+
+// listSMSNativeATFallbackLocked keeps SMS reception available when the native
+// QMI WMS card-control path is wedged after an eUICC refresh. The QMI scan has
+// already read the live ICCID/IMSI before the storage error, so preserve that
+// identity while using the modem's AT CMGL storage reader as a fallback.
+func (manager *Manager) listSMSNativeATFallbackLocked(
+	ctx context.Context,
+	state *managedDevice,
+	controlDevice string,
+	scan SMSSubscriberScan,
+) (SMSSubscriberScan, error) {
+	if strings.TrimSpace(scan.Identity.IMSI) == "" {
+		// A suspended QMI scan returns before opening WMS, so recover the live
+		// subscriber identity on a short UIM/WMS session before reading AT
+		// storage. Without this, a successful fallback would be unattributed and
+		// discarded by the subscriber-bound SMS store.
+		identitySession, openErr := manager.openQMISMSSessionLocked(ctx, controlDevice)
+		if openErr == nil {
+			identity, identityErr := manager.readQMISMSSubscriberIdentityLocked(ctx, identitySession)
+			_ = identitySession.Close()
+			if identityErr == nil {
+				scan.Identity = identity
+			}
+		}
+	}
+	candidate := manager.candidateFor(state)
+	client, err := manager.clientLocked(ctx, state, candidate)
+	if err != nil {
+		return scan, fmt.Errorf("open AT SMS fallback session: %w", err)
+	}
+	messages, storages, listErr := manager.listSMSLocked(ctx, client)
+	scan.Messages = messages
+	scan.Storages = storages
+	scan.Transport = SMSTransportCellularAT
+	return scan, listErr
 }
 
 // listSMSLocked scans every supported receive storage. The caller owns the

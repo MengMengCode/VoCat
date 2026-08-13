@@ -14,7 +14,7 @@ require (
 	modernc.org/sqlite v1.38.2
 )
 
-replace github.com/iniwex5/quectel-qmi-go => github.com/GooWen/quectel-qmi-go v0.0.0-20260614143133-a513430381a3
+replace github.com/iniwex5/quectel-qmi-go => ./third_party/quectel-qmi-go
 
 require (
 	github.com/creack/goselect v0.1.2 // indirect

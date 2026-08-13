@@ -284,13 +284,42 @@ func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
 	id string,
 	state *managedDevice,
 ) (bool, error) {
+	return manager.resetNativeQMIModemLocked(ctx, id, state, "sim_switch", true)
+}
+
+// resetNativeQMIModemForSMSLocked is a last-resort recovery for a WMS card
+// call-control failure that survives a UIM slot power cycle. It deliberately
+// does not mark the device as being in a profile-switch recovery: SMS scans
+// already hold the operation lock and there is no asynchronous recovery
+// goroutine to clear that flag afterward.
+func (manager *Manager) resetNativeQMIModemForSMSLocked(
+	ctx context.Context,
+	id string,
+	state *managedDevice,
+) error {
+	handled, err := manager.resetNativeQMIModemLocked(
+		ctx, id, state, "sms_wms_card_call_control", false,
+	)
+	if !handled {
+		return errors.New("QMI DMS modem reset is unavailable for native SMS recovery")
+	}
+	return err
+}
+
+func (manager *Manager) resetNativeQMIModemLocked(
+	ctx context.Context,
+	id string,
+	state *managedDevice,
+	reason string,
+	markRecovery bool,
+) (bool, error) {
 	controlDevice, native, err := manager.nativeQMIControl(id)
 	if err != nil || !native {
 		return native, err
 	}
-	manager.logEvent(slog.LevelInfo, "QMI modem reset started for SIM switch",
+	manager.logEvent(slog.LevelInfo, "QMI modem reset started",
 		"category", "control_plane", "event", "qmi_reset_started",
-		"device_id", id, "control_path", controlDevice, "reason", "sim_switch")
+		"device_id", id, "control_path", controlDevice, "reason", reason)
 	if manager.qmiRadioOpener == nil {
 		return true, errors.New("QMI DMS modem reset is unavailable")
 	}
@@ -299,7 +328,9 @@ func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
 		state.client = nil
 	}
 	state.preFlightMode = nil
-	manager.beginRecovery(id, state)
+	if markRecovery {
+		manager.beginRecovery(id, state)
+	}
 
 	openContext, cancelOpen := manager.withTimeout(ctx, manager.commandTimeout*5)
 	session, err := manager.qmiRadioOpener(openContext, controlDevice)
@@ -337,9 +368,9 @@ func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
 			return true, err
 		}
 	}
-	manager.logEvent(slog.LevelInfo, "QMI modem reset completed for SIM switch",
+	manager.logEvent(slog.LevelInfo, "QMI modem reset completed",
 		"category", "control_plane", "event", "qmi_reset_completed",
-		"device_id", id, "control_path", controlDevice)
+		"device_id", id, "control_path", controlDevice, "reason", reason)
 	return true, nil
 }
 
@@ -438,6 +469,26 @@ func (manager *Manager) setNativeQMIFlight(
 	previous := qmiModeAsCFUN(previousQMI)
 	targetQMI := previousQMI
 	if enabled {
+		// Detach packet service before putting DMS into low-power mode.  Some
+		// OpenStick firmware keeps the last NAS serving-system indication alive
+		// after the DMS transition; explicitly detaching prevents the UI and
+		// data path from reporting an attached network while flight mode is on.
+		if nas, ok := session.(interface {
+			AttachDetach(context.Context, bool) error
+		}); ok {
+			detachContext, cancelDetach := manager.withTimeout(ctx, manager.commandTimeout)
+			detachErr := nas.AttachDetach(detachContext, false)
+			cancelDetach()
+			if detachErr != nil {
+				// A few 410 firmware builds return QMI_ERR_NO_EFFECT when NAS is
+				// already detached, even though the DMS low-power transition is
+				// supported.  Do not leave the user stuck online on this benign
+				// control-plane response; DMS low power remains authoritative.
+				manager.logEvent(slog.LevelWarn, "QMI packet-service detach before flight mode returned an error",
+					"category", "control_plane", "event", "qmi_ps_detach_before_flight_failed",
+					"device_id", id, "control_path", controlDevice, "error", detachErr)
+			}
+		}
 		if !isQMIRadioOffMode(previousQMI) {
 			targetQMI = qmi.ModeLowPower
 		}

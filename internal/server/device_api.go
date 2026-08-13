@@ -1262,6 +1262,8 @@ func (s *Server) writeDeviceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid_apn", "APN must contain only letters, digits, dots, underscores, or hyphens")
 	case errors.Is(err, device.ErrRegionBlocked):
 		writeError(w, http.StatusForbidden, "region_blocked", err.Error())
+	case errors.Is(err, device.ErrRadioFlightMode):
+		writeError(w, http.StatusConflict, "radio_flight_mode", "disable flight mode before starting cellular registration or data")
 	case errors.Is(err, device.ErrSMSSubscriberIdentity):
 		writeError(w, http.StatusServiceUnavailable, "sms_subscriber_identity_unavailable", err.Error())
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, modem.ErrCommandTimeout):

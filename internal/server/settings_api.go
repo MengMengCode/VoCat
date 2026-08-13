@@ -1366,9 +1366,12 @@ func (s *Server) handleCardPolicy(w http.ResponseWriter, r *http.Request, iccid 
 
 func defaultCardPolicy(iccid string) store.CardPolicy {
 	return store.CardPolicy{
-		ICCID:           strings.TrimSpace(iccid),
-		VoWiFiEnabled:   true,
-		AirplaneEnabled: true,
+		ICCID: strings.TrimSpace(iccid),
+		// A newly seen card must start with both radios disabled.  Enabling
+		// flight mode by default leaves the modem in QMI low-power mode while
+		// the UI/policy looks as if the user explicitly enabled it.
+		VoWiFiEnabled:   false,
+		AirplaneEnabled: false,
 		IPVersion:       "IPV4V6",
 		Source:          "default",
 	}

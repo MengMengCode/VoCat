@@ -118,6 +118,21 @@ func (manager *Manager) recoverQMIEuiccChannel(ctx context.Context, id string) e
 	if err := manager.validateActive(id, state); err != nil {
 		return err
 	}
+	return manager.recoverQMIEuiccChannelLocked(ctx, id, state)
+}
+
+// recoverQMIEuiccChannelLocked is the same UIM/eUICC recovery operation for
+// callers that already own state.opMu (for example the native QMI SMS scan).
+// Keeping the lock held across the power cycle prevents a concurrent profile
+// switch or identity read from racing the card reset.
+func (manager *Manager) recoverQMIEuiccChannelLocked(
+	ctx context.Context,
+	id string,
+	state *managedDevice,
+) error {
+	if state == nil {
+		return errors.New("esim: missing device state for QMI-UIM recovery")
+	}
 	controlDevice := strings.TrimSpace(manager.candidateFor(state).QMIControl)
 	if controlDevice == "" || manager.qmiEUICCOpener == nil {
 		return errors.New("esim: QMI-UIM recovery is unavailable")

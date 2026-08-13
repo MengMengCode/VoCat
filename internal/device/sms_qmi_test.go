@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 
@@ -42,6 +43,45 @@ type fakeQMISMSSession struct {
 	afterList    func(uint8, qmi.MessageTagType)
 	calls        []string
 	closeCount   int
+}
+
+type fakeQMIWMSReinitializer struct {
+	ready      []qmi.WMSServiceReadyStatus
+	readyCalls int
+	resetCalls int
+	bindCalls  int
+	binding    uint8
+	bindingErr error
+	readyErr   error
+}
+
+func (fake *fakeQMIWMSReinitializer) ResetWMS(context.Context) error {
+	fake.resetCalls++
+	return nil
+}
+
+func (fake *fakeQMIWMSReinitializer) BindWMSSubscription(context.Context, uint8) error {
+	fake.bindCalls++
+	return nil
+}
+
+func (fake *fakeQMIWMSReinitializer) GetWMSSubscriptionBinding(context.Context) (uint8, error) {
+	return fake.binding, fake.bindingErr
+}
+
+func (fake *fakeQMIWMSReinitializer) GetWMSServiceReady(context.Context) (qmi.WMSServiceReadyStatus, error) {
+	fake.readyCalls++
+	if fake.readyErr != nil {
+		return qmi.WMSServiceReadyNotReady, fake.readyErr
+	}
+	if len(fake.ready) == 0 {
+		return qmi.WMSServiceReady3GPP, nil
+	}
+	index := fake.readyCalls - 1
+	if index >= len(fake.ready) {
+		index = len(fake.ready) - 1
+	}
+	return fake.ready[index], nil
 }
 
 func (session *fakeQMISMSSession) GetICCID(context.Context) (string, error) {
@@ -135,6 +175,81 @@ func newStartedNativeSMSManager(t *testing.T) (*Manager, *staticOpener, string) 
 	}
 	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
 	return manager, atOpener, id
+}
+
+func TestQMIWMSContextErrorCodeClassification(t *testing.T) {
+	invalidArgument := &qmi.QMIError{
+		Service:   qmi.ServiceWMS,
+		MessageID: qmi.WMSListMessages,
+		ErrorCode: qmi.QMIErrInvalidArg,
+	}
+	if qmi.QMIErrInvalidArg != 0x0030 {
+		t.Fatalf("QMIErrInvalidArg = 0x%04x, want 0x0030", qmi.QMIErrInvalidArg)
+	}
+	if qmi.QMIErrCardCallControlRefFail != 0x0060 {
+		t.Fatalf("QMIErrCardCallControlRefFail = 0x%04x, want 0x0060", qmi.QMIErrCardCallControlRefFail)
+	}
+	if !isQMIWMSContextFailure(invalidArgument) || isQMIWMSCardCallControlFailure(invalidArgument) {
+		t.Fatal("standard INVALID_ARG must trigger WMS context recovery, not card-call-control labeling")
+	}
+
+	cardCallControl := &qmi.QMIError{
+		Service:   qmi.ServiceWMS,
+		MessageID: qmi.WMSListMessages,
+		ErrorCode: qmi.QMIErrCardCallControlRefFail,
+	}
+	if !isQMIWMSContextFailure(cardCallControl) || !isQMIWMSCardCallControlFailure(cardCallControl) {
+		t.Fatal("0x0060 must trigger both recovery and the card-call-control classification")
+	}
+
+	otherService := *invalidArgument
+	otherService.Service = qmi.ServiceUIM
+	if isQMIWMSContextFailure(&otherService) {
+		t.Fatal("an INVALID_ARG from another QMI service must not trigger WMS recovery")
+	}
+}
+
+func TestQMIWMSNVFallbackRoutes(t *testing.T) {
+	routes := []qmi.WMSRoute{
+		{MessageType: qmi.WMSMessageTypePointToPoint, MessageClass: qmi.WMSMessageClass0, StorageType: qmi.WMSStorageTypeNone, ReceiptAction: qmi.WMSReceiptActionTransferOnly},
+		{MessageType: qmi.WMSMessageTypePointToPoint, MessageClass: qmi.WMSMessageClass1, StorageType: qmi.WMSStorageTypeNone, ReceiptAction: qmi.WMSReceiptActionTransferOnly},
+		{MessageType: qmi.WMSMessageTypePointToPoint, MessageClass: qmi.WMSMessageClass2, StorageType: qmi.WMSStorageTypeUIM, ReceiptAction: qmi.WMSReceiptActionStoreAndNotify},
+		{MessageType: qmi.WMSMessageTypePointToPoint, MessageClass: qmi.WMSMessageClass3, StorageType: qmi.WMSStorageTypeNone, ReceiptAction: qmi.WMSReceiptActionTransferOnly},
+	}
+	fallback, changed := qmiWMSNVFallbackRoutes(routes)
+	if !changed || countQMIWMSNVFallbackRoutes(routes) != 3 {
+		t.Fatalf("fallback changed=%v count=%d", changed, countQMIWMSNVFallbackRoutes(routes))
+	}
+	for index, route := range fallback {
+		if index == 2 {
+			if route.StorageType != qmi.WMSStorageTypeUIM || route.ReceiptAction != qmi.WMSReceiptActionStoreAndNotify {
+				t.Fatalf("healthy class-2 UIM route changed: %#v", route)
+			}
+			continue
+		}
+		if route.StorageType != qmi.WMSStorageTypeNV || route.ReceiptAction != qmi.WMSReceiptActionStoreAndNotify {
+			t.Fatalf("route %d not moved to NV/store-and-notify: %#v", index, route)
+		}
+	}
+	if _, changed := qmiWMSNVFallbackRoutes(fallback); changed {
+		t.Fatal("NV/store-and-notify routes must be idempotent")
+	}
+}
+
+func TestWaitForQMIWMSServiceReadyPollsTransientNotReady(t *testing.T) {
+	fake := &fakeQMIWMSReinitializer{ready: []qmi.WMSServiceReadyStatus{
+		qmi.WMSServiceReadyNotReady,
+		qmi.WMSServiceReady3GPP,
+	}}
+	manager := &Manager{commandTimeout: time.Second}
+	started := time.Now()
+	ready, err := manager.waitForQMIWMSServiceReady(context.Background(), fake)
+	if err != nil || ready != qmi.WMSServiceReady3GPP || fake.readyCalls != 2 {
+		t.Fatalf("ready=%v err=%v calls=%d", ready, err, fake.readyCalls)
+	}
+	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
+		t.Fatalf("poll returned without waiting for transient NOT_READY: %s", elapsed)
+	}
 }
 
 func TestNativeQMISendBindsLiveIdentityAndAcceptsWithoutMessageReference(t *testing.T) {
@@ -531,6 +646,180 @@ func TestNativeQMIListScansUIMAndNVWithTagMetadata(t *testing.T) {
 	}
 	if len(session.calls) < 2 || session.calls[0] != "get-iccid" || session.calls[1] != "get-imsi" {
 		t.Fatalf("calls = %v", session.calls)
+	}
+}
+
+func TestNativeQMIListRecoversCardCallControlFailureAfterEuiccRefresh(t *testing.T) {
+	manager, atOpener, id := newStartedNativeSMSManager(t)
+	cardCallControl := &qmi.QMIError{
+		Service:   qmi.ServiceWMS,
+		MessageID: qmi.WMSListMessages,
+		Result:    1,
+		ErrorCode: qmi.QMIErrCardCallControlRefFail,
+	}
+	failedWMS := &fakeQMISMSSession{
+		iccid:    "89634261387110862674",
+		imsi:     "515027106574535",
+		listErrs: map[fakeQMISMSListKey]error{{storage: qmiSMSStorageUIM, tag: qmi.TagTypeMTNotRead}: cardCallControl},
+	}
+	retriedWMS := &fakeQMISMSSession{
+		iccid: "89634261387110862674",
+		imsi:  "515027106574535",
+	}
+	recoveryUIM := &fakeDeviceQMIUIMSession{iccid: "89634261387110862674"}
+	var smsOpens int
+	manager.qmiSMSOpener = func(context.Context, string) (qmiSMSSession, error) {
+		smsOpens++
+		if smsOpens == 1 {
+			return failedWMS, nil
+		}
+		return retriedWMS, nil
+	}
+	manager.qmiEUICCOpener = func(context.Context, string) (qmiEUICCSession, error) {
+		return recoveryUIM, nil
+	}
+
+	scan, err := manager.ListSMSBoundSubscriber(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ListSMSBoundSubscriber: %v", err)
+	}
+	if scan.Transport != SMSTransportCellularQMI || scan.Identity.ICCID != retriedWMS.iccid ||
+		scan.Identity.IMSI != retriedWMS.imsi || len(scan.Messages) != 0 ||
+		!reflect.DeepEqual(scan.Storages, []string{"SM", "ME"}) {
+		t.Fatalf("recovered scan = %#v", scan)
+	}
+	if smsOpens != 2 || failedWMS.closeCount != 1 || retriedWMS.closeCount != 1 {
+		t.Fatalf("WMS opens/closes = %d/%d/%d", smsOpens, failedWMS.closeCount, retriedWMS.closeCount)
+	}
+	if recoveryUIM.resetCount != 1 || len(recoveryUIM.powerOff) != 1 ||
+		recoveryUIM.powerOff[0] != qmiEUICCSlot || len(recoveryUIM.powerOn) != 1 ||
+		recoveryUIM.powerOn[0] != qmiEUICCSlot {
+		t.Fatalf("UIM recovery reset/off/on = %d/%v/%v", recoveryUIM.resetCount, recoveryUIM.powerOff, recoveryUIM.powerOn)
+	}
+	if atOpener.openCount != 0 {
+		t.Fatalf("AT opener used %d times", atOpener.openCount)
+	}
+}
+
+func TestNativeQMIListFallsBackToModemResetWhenUIMRecoveryIsInsufficient(t *testing.T) {
+	manager, atOpener, id := newStartedNativeSMSManager(t)
+	nvRaw, _ := hex.DecodeString("000405912143F500004210203040500005C82293F904")
+	cardCallControl := &qmi.QMIError{
+		Service:   qmi.ServiceWMS,
+		MessageID: qmi.WMSListMessages,
+		Result:    1,
+		ErrorCode: qmi.QMIErrCardCallControlRefFail,
+	}
+	wmsSessions := []*fakeQMISMSSession{
+		{iccid: "89634261387110862674", imsi: "515027106574535", listErrs: map[fakeQMISMSListKey]error{{storage: qmiSMSStorageUIM, tag: qmi.TagTypeMTNotRead}: cardCallControl}},
+		{iccid: "89634261387110862674", imsi: "515027106574535", listErrs: map[fakeQMISMSListKey]error{{storage: qmiSMSStorageUIM, tag: qmi.TagTypeMTNotRead}: cardCallControl}},
+		{
+			iccid: "89634261387110862674",
+			imsi:  "515027106574535",
+			listErrs: map[fakeQMISMSListKey]error{
+				{storage: qmiSMSStorageUIM, tag: qmi.TagTypeMTNotRead}: cardCallControl,
+			},
+			lists: map[fakeQMISMSListKey][]qmiSMSListEntry{
+				{storage: qmiSMSStorageNV, tag: qmi.TagTypeMTNotRead}: {{Index: 9, Tag: qmi.TagTypeMTNotRead}},
+			},
+			reads: map[fakeQMISMSReadKey][]byte{
+				{storage: qmiSMSStorageNV, index: 9}: nvRaw,
+			},
+		},
+	}
+	var smsOpens int
+	manager.qmiSMSOpener = func(context.Context, string) (qmiSMSSession, error) {
+		if smsOpens >= len(wmsSessions) {
+			return nil, errors.New("unexpected WMS session")
+		}
+		session := wmsSessions[smsOpens]
+		smsOpens++
+		return session, nil
+	}
+	recoveryUIM := &fakeDeviceQMIUIMSession{iccid: "89634261387110862674"}
+	manager.qmiEUICCOpener = func(context.Context, string) (qmiEUICCSession, error) {
+		return recoveryUIM, nil
+	}
+	radio := &fakeQMIRadioSession{mode: qmi.ModeOnline}
+	var radioOpens int
+	manager.qmiRadioOpener = func(context.Context, string) (qmiRadioSession, error) {
+		radioOpens++
+		return radio, nil
+	}
+
+	scan, err := manager.ListSMSBoundSubscriber(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ListSMSBoundSubscriber: %v", err)
+	}
+	if len(scan.Messages) != 1 || scan.Messages[0].Index != 9 ||
+		scan.Messages[0].Text != "HELLO" || !reflect.DeepEqual(scan.Storages, []string{"ME"}) {
+		t.Fatalf("recovered scan = %#v", scan)
+	}
+	if smsOpens != 3 || radioOpens != 2 || radio.networkResets != 1 ||
+		len(radio.setModes) != 2 || radio.setModes[0] != qmi.ModeReset || radio.setModes[1] != qmi.ModeOnline {
+		t.Fatalf("WMS/radio recovery opens=%d/%d modes=%v network_resets=%d", smsOpens, radioOpens, radio.setModes, radio.networkResets)
+	}
+	if recoveryUIM.resetCount != 1 || len(recoveryUIM.powerOff) != 1 || len(recoveryUIM.powerOn) != 1 {
+		t.Fatalf("UIM recovery reset/off/on = %d/%v/%v", recoveryUIM.resetCount, recoveryUIM.powerOff, recoveryUIM.powerOn)
+	}
+	if atOpener.openCount != 0 {
+		t.Fatalf("AT opener used %d times", atOpener.openCount)
+	}
+}
+
+func TestNativeQMIListFallsBackToATWhenWMSCardControlAffectsBothStorages(t *testing.T) {
+	manager, atOpener, id := newStartedNativeSMSManager(t)
+	pdu := "000405912143F500004210203040500005C82293F904"
+	cardCallControl := &qmi.QMIError{
+		Service:   qmi.ServiceWMS,
+		MessageID: qmi.WMSListMessages,
+		Result:    1,
+		ErrorCode: qmi.QMIErrCardCallControlRefFail,
+	}
+	wmsSessions := make([]*fakeQMISMSSession, 3)
+	for index := range wmsSessions {
+		wmsSessions[index] = &fakeQMISMSSession{
+			iccid: "89634261387110862674",
+			imsi:  "515027106574535",
+			listErrs: map[fakeQMISMSListKey]error{
+				{storage: qmiSMSStorageUIM, tag: qmi.TagTypeMTNotRead}: cardCallControl,
+				{storage: qmiSMSStorageNV, tag: qmi.TagTypeMTNotRead}:  cardCallControl,
+			},
+		}
+	}
+	var smsOpens int
+	manager.qmiSMSOpener = func(context.Context, string) (qmiSMSSession, error) {
+		if smsOpens >= len(wmsSessions) {
+			return nil, errors.New("unexpected WMS session")
+		}
+		session := wmsSessions[smsOpens]
+		smsOpens++
+		return session, nil
+	}
+	recoveryUIM := &fakeDeviceQMIUIMSession{iccid: "89634261387110862674"}
+	manager.qmiEUICCOpener = func(context.Context, string) (qmiEUICCSession, error) {
+		return recoveryUIM, nil
+	}
+	radio := &fakeQMIRadioSession{mode: qmi.ModeOnline}
+	manager.qmiRadioOpener = func(context.Context, string) (qmiRadioSession, error) {
+		return radio, nil
+	}
+	atOpener.client = &transcriptClient{steps: []clientStep{
+		{command: "AT+CMGF=0", response: okResponse()},
+		{command: `AT+CPMS="SM"`, response: okResponse()},
+		{command: "AT+CMGL=4", response: okResponse("+CMGL: 7,0,,23", pdu)},
+		{command: `AT+CPMS="ME"`, response: okResponse()},
+		{command: "AT+CMGL=4", response: okResponse()},
+	}}
+
+	scan, err := manager.ListSMSBoundSubscriber(context.Background(), id)
+	if err != nil || scan.Transport != SMSTransportCellularAT ||
+		scan.Identity.IMSI != "515027106574535" || len(scan.Messages) != 1 ||
+		scan.Messages[0].Text != "HELLO" || !reflect.DeepEqual(scan.Storages, []string{"SM", "ME"}) {
+		t.Fatalf("AT fallback scan = (%#v, %v)", scan, err)
+	}
+	if smsOpens != 3 || radio.networkResets != 1 || atOpener.openCount != 1 {
+		t.Fatalf("recovery opens WMS/radio/AT = %d/%d/%d", smsOpens, radio.networkResets, atOpener.openCount)
 	}
 }
 
