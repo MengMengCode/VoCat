@@ -89,6 +89,30 @@ func (provider *QMIUIMAKAProvider) CheckReady(
 	return AKAEvidence{Ready: true, Application: "USIM"}, nil
 }
 
+// ReadICCID returns the active UICC identity through QMI-UIM. Native
+// Qualcomm WWAN firmware may reject all of the usual AT ICCID commands even
+// though the card is fully available through the QMI control plane.
+func (provider *QMIUIMAKAProvider) ReadICCID(ctx context.Context) (string, error) {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+
+	session, err := provider.session(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	iccid, err := session.GetICCID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("vocat: read QMI-UIM ICCID: %w", err)
+	}
+	iccid = normalizeQMIICCID(iccid)
+	if !validDigits(iccid, 18, 22) {
+		return "", errors.New("vocat: QMI-UIM returned no valid ICCID")
+	}
+	return iccid, nil
+}
+
 func (provider *QMIUIMAKAProvider) Authenticate(
 	ctx context.Context,
 	identity SIMIdentity,
@@ -152,10 +176,14 @@ func verifyQMIUIMIdentity(
 	if err != nil {
 		return fmt.Errorf("vocat: read QMI-UIM ICCID: %w", err)
 	}
-	if strings.TrimSpace(got) != want {
+	if normalizeQMIICCID(got) != normalizeQMIICCID(want) {
 		return ErrEC20IdentityChanged
 	}
 	return nil
+}
+
+func normalizeQMIICCID(value string) string {
+	return strings.TrimRight(strings.ToUpper(strings.TrimSpace(value)), "F")
 }
 
 func openQMIUSIMChannel(

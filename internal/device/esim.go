@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -691,6 +692,9 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	if iccid == "" {
 		return errors.New("esim: an ICCID is required")
 	}
+	manager.logEvent(slog.LevelInfo, "SIM profile switch started",
+		"category", "sim_switch", "event", "profile_switch_started",
+		"device_id", id, "target_iccid_last4", redactSubscriberID(iccid))
 	der, err := buildEnableProfileRequest(iccid)
 	if err != nil {
 		return err
@@ -729,6 +733,9 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 		// from leaving the modem's SIM cache unusable.
 		manager.startProfileSwitchRecovery(id)
 		manager.esimMu.Unlock()
+		manager.logEvent(slog.LevelWarn, "SIM profile switch transport failed",
+			"category", "sim_switch", "event", "profile_switch_transport_failed",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
 		return err
 	}
 	// A transport SW 9000 only means the APDU reached the eUICC. The real outcome
@@ -738,12 +745,21 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	if !ok {
 		manager.startProfileSwitchRecovery(id)
 		manager.esimMu.Unlock()
+		manager.logEvent(slog.LevelWarn, "SIM profile switch returned an invalid response",
+			"category", "sim_switch", "event", "profile_switch_invalid_response",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid))
 		return fmt.Errorf("esim: unexpected EnableProfile response %s", strings.ToUpper(hex.EncodeToString(payload)))
 	}
 	if err := enableProfileResponseError(byte(result), payload); err != nil {
 		manager.esimMu.Unlock()
+		manager.logEvent(slog.LevelWarn, "SIM profile switch rejected by eUICC",
+			"category", "sim_switch", "event", "profile_switch_rejected",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "result_code", result, "error", err)
 		return err
 	}
+	manager.logEvent(slog.LevelInfo, "SIM profile accepted by eUICC; modem recovery queued",
+		"category", "sim_switch", "event", "profile_switch_accepted",
+		"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "result_code", result)
 	manager.markCachedProfileEnabled(id, iccid)
 	// The eUICC accepted the target profile. Reset and repopulate the modem in
 	// a detached recovery so it survives an HTTP disconnect, but keep this API
@@ -754,16 +770,32 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	verifyContext, cancelVerify := context.WithTimeout(context.WithoutCancel(ctx), profileSwitchVerificationTimeout(manager))
 	defer cancelVerify()
 	if err := manager.waitForESIMRecovery(verifyContext, id); err != nil {
+		manager.logEvent(slog.LevelWarn, "SIM profile switch recovery wait failed",
+			"category", "sim_switch", "event", "profile_switch_recovery_wait_failed",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
 		return err
 	}
 	if err := manager.verifySwitchedICCID(verifyContext, id, iccid); err != nil {
+		manager.logEvent(slog.LevelWarn, "SIM profile switch identity verification failed",
+			"category", "sim_switch", "event", "profile_switch_identity_verification_failed",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
 		return err
 	}
 	// verifySwitchedICCID reads the live QMI-UIM/DMS identity, while the device
 	// overview is served from Manager's cached AT/QMI snapshot. Refresh that
 	// snapshot after the live identity has moved; otherwise the switch succeeds
 	// but the page keeps showing the previous SIM until an unrelated refresh.
-	return manager.refreshVerifiedProfileSnapshot(verifyContext, id, iccid)
+	err = manager.refreshVerifiedProfileSnapshot(verifyContext, id, iccid)
+	if err != nil {
+		manager.logEvent(slog.LevelWarn, "SIM profile switch snapshot refresh failed",
+			"category", "sim_switch", "event", "profile_switch_snapshot_refresh_failed",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
+		return err
+	}
+	manager.logEvent(slog.LevelInfo, "SIM profile switch completed",
+		"category", "sim_switch", "event", "profile_switch_completed",
+		"device_id", id, "target_iccid_last4", redactSubscriberID(iccid))
+	return nil
 }
 
 func (manager *Manager) startProfileSwitchRecovery(id string) {
@@ -773,11 +805,15 @@ func (manager *Manager) startProfileSwitchRecovery(id string) {
 		manager.esimRecoveries = make(map[string]chan struct{})
 	}
 	if manager.esimRecoveries[id] != nil {
+		manager.logEvent(slog.LevelDebug, "SIM profile recovery already in progress",
+			"category", "sim_switch", "event", "profile_switch_recovery_coalesced", "device_id", id)
 		manager.esimRecoveryMu.Unlock()
 		return
 	}
 	manager.esimRecoveries[id] = done
 	manager.esimRecoveryMu.Unlock()
+	manager.logEvent(slog.LevelInfo, "SIM profile modem recovery started",
+		"category", "sim_switch", "event", "profile_switch_recovery_started", "device_id", id)
 	go func() {
 		manager.recoverAfterProfileSwitch(id)
 		manager.esimRecoveryMu.Lock()
@@ -786,6 +822,8 @@ func (manager *Manager) startProfileSwitchRecovery(id string) {
 			close(done)
 		}
 		manager.esimRecoveryMu.Unlock()
+		manager.logEvent(slog.LevelInfo, "SIM profile modem recovery finished",
+			"category", "sim_switch", "event", "profile_switch_recovery_finished", "device_id", id)
 	}()
 }
 

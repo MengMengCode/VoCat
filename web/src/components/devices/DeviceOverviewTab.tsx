@@ -11,6 +11,7 @@ import { useI18n } from "../../lib/i18n";
 export interface DeviceOverviewTabProps {
   device: DeviceDetail;
   simOperatorDisplay: string;
+  customPhoneNumber?: string;
   trafficSpeedRx: string;
   trafficSpeedTx: string;
   trafficMinuteRx: string;
@@ -36,6 +37,7 @@ export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
         <OverviewSimPanel
           device={device}
           simOperatorDisplay={props.simOperatorDisplay}
+          customPhoneNumber={props.customPhoneNumber}
         />
         <OverviewNetworkPanel
           device={device}

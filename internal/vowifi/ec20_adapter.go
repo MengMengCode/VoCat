@@ -48,6 +48,12 @@ type EC20SensitiveATExecutor interface {
 }
 
 type EC20AdapterOptions struct {
+	// NativeICCID reads the subscriber identity from a native control plane
+	// such as QMI-UIM. handled=false keeps the legacy AT fallback for ordinary
+	// EC20/EC25 devices; handled=true makes a native read authoritative and
+	// prevents unsupported AT probes from being emitted.
+	NativeICCID func(context.Context, string) (iccid string, handled bool, err error)
+
 	// PureAirplanePolicy reports the independent user policy. The adapter only
 	// changes the transactional CFUN projection used by VoWiFi and never
 	// changes this policy.
@@ -143,9 +149,25 @@ func (adapter *EC20Adapter) ReadIdentity(
 	if imsi == "" {
 		return SIMIdentity{}, errors.New("vocat: EC20 returned no valid IMSI")
 	}
-	iccid, err := adapter.readICCID(ctx, deviceID)
-	if err != nil {
-		return SIMIdentity{}, err
+	iccid := ""
+	if adapter.options.NativeICCID != nil {
+		var handled bool
+		iccid, handled, err = adapter.options.NativeICCID(ctx, deviceID)
+		if err != nil {
+			return SIMIdentity{}, fmt.Errorf("read native ICCID: %w", err)
+		}
+		if handled {
+			iccid = strings.TrimSpace(iccid)
+			if !validDigits(iccid, 18, 22) {
+				return SIMIdentity{}, errors.New("vocat: native control plane returned no valid ICCID")
+			}
+		}
+	}
+	if iccid == "" {
+		iccid, err = adapter.readICCID(ctx, deviceID)
+		if err != nil {
+			return SIMIdentity{}, err
+		}
 	}
 
 	// Native OpenStick/410 WWAN firmware exposes the IMEI in ATI but may leave

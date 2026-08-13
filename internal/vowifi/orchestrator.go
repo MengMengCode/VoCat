@@ -254,6 +254,7 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 
 	proxy, err := orchestrator.deps.Proxy.Resolve(setupContext, ProxyRequest{
 		DeviceID:    orchestrator.options.DeviceID,
+		ICCID:       strings.TrimSpace(identity.ICCID),
 		HomeMCC:     strings.TrimSpace(identity.HomeMCC),
 		HomeMNC:     strings.TrimSpace(identity.HomeMNC),
 		CountryCode: strings.ToUpper(strings.TrimSpace(identity.HomeCountryCode)),

@@ -668,6 +668,31 @@ func TestEC20AdapterReadIdentitySupportsNative410ICCID(t *testing.T) {
 	transcript.assertDone()
 }
 
+func TestEC20AdapterReadIdentityUsesNativeICCIDReader(t *testing.T) {
+	transcript := &ec20Transcript{t: t, steps: []ec20TranscriptStep{
+		{command: "AT+CPIN?", lines: []string{"+CPIN: READY"}},
+		{command: "AT+CIMI", lines: []string{"515661234567890"}},
+		{command: "ATI", lines: []string{"Manufacturer: QUALCOMM", "IMEI: 864284040123456"}},
+		{command: "AT+CRSM=176,28589,0,0,4", lines: []string{`+CRSM: 144,0,"00000002"`}},
+	}}
+	adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{
+		NativeICCID: func(context.Context, string) (string, bool, error) {
+			return "89441000400316034372", true, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := adapter.ReadIdentity(context.Background(), "wwan0")
+	if err != nil {
+		t.Fatalf("ReadIdentity: %v", err)
+	}
+	if identity.ICCID != "89441000400316034372" {
+		t.Fatalf("identity ICCID = %q", identity.ICCID)
+	}
+	transcript.assertDone()
+}
+
 func successfulUSIMResponse() []byte {
 	res := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 	ck := bytes.Repeat([]byte{0x11}, 16)

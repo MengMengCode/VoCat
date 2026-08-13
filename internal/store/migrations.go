@@ -262,6 +262,55 @@ func migrationStatements(version int) []string {
 		return []string{`ALTER TABLE card_policies ADD COLUMN custom_phone_number TEXT NOT NULL DEFAULT ''`}
 	case 16:
 		return []string{`ALTER TABLE devices ADD COLUMN sim_pin TEXT NOT NULL DEFAULT ''`}
+	case 17:
+		// Migration 10 originally only added VoWiFi columns on the local
+		// Qualcomm branch. Existing databases at user_version=10 therefore
+		// never replay the later table additions that were merged into it.
+		return []string{
+			`CREATE TABLE IF NOT EXISTS automatic_tasks (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL,
+				enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+				device_id TEXT NOT NULL,
+				profile_iccid TEXT NOT NULL,
+				profile_aid TEXT NOT NULL DEFAULT '',
+				task_type TEXT NOT NULL CHECK (task_type IN ('sms', 'call', 'public_ip')),
+				environment TEXT NOT NULL CHECK (environment IN ('vowifi', 'cellular')),
+				interval_days INTEGER NOT NULL CHECK (interval_days BETWEEN 1 AND 365),
+				start_date TEXT NOT NULL,
+				run_time TEXT NOT NULL,
+				timezone TEXT NOT NULL DEFAULT 'Local',
+				payload_json TEXT NOT NULL DEFAULT '{}',
+				retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 10),
+				notify INTEGER NOT NULL DEFAULT 0 CHECK (notify IN (0, 1)),
+				next_run_at INTEGER NOT NULL,
+				last_run_at INTEGER NOT NULL DEFAULT 0,
+				last_status TEXT NOT NULL DEFAULT '',
+				last_error TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS automatic_tasks_due_idx ON automatic_tasks(enabled, next_run_at, id)`,
+			`CREATE INDEX IF NOT EXISTS automatic_tasks_device_idx ON automatic_tasks(device_id, next_run_at, id)`,
+			`CREATE TABLE IF NOT EXISTS automatic_task_runs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				task_id INTEGER NOT NULL,
+				device_id TEXT NOT NULL,
+				scheduled_at INTEGER NOT NULL,
+				started_at INTEGER NOT NULL DEFAULT 0,
+				finished_at INTEGER NOT NULL DEFAULT 0,
+				status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'success', 'failed')),
+				attempts INTEGER NOT NULL DEFAULT 0,
+				output TEXT NOT NULL DEFAULT '',
+				error TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				FOREIGN KEY (task_id) REFERENCES automatic_tasks(id) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS automatic_task_runs_task_idx ON automatic_task_runs(task_id, id DESC)`,
+			`CREATE INDEX IF NOT EXISTS automatic_task_runs_status_idx ON automatic_task_runs(status, id)`,
+		}
 	default:
 		return nil
 	}

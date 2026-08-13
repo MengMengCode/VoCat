@@ -782,6 +782,8 @@ func (manager *Manager) watch(
 ) {
 	defer manager.wg.Done()
 	defer close(item.watchDone)
+	var lastPhase vowifi.Phase
+	lastReason := ""
 	for {
 		if ctx.Err() != nil {
 			return
@@ -802,6 +804,16 @@ func (manager *Manager) watch(
 			manager.mu.Unlock()
 			if !current {
 				return
+			}
+			if state.Phase != lastPhase || state.LastReason != lastReason {
+				manager.logger.Info("VoWiFi state transition",
+					"category", "vowifi", "event", "state_transition",
+					"device_id", deviceID, "phase", state.Phase,
+					"sequence", state.Sequence, "attempt", state.Attempt,
+					"enabled", state.Enabled, "active", state.Active,
+					"reason", state.LastReason)
+				lastPhase = state.Phase
+				lastReason = state.LastReason
 			}
 			if state.Phase == vowifi.PhaseSIMReady {
 				manager.logger.Info(

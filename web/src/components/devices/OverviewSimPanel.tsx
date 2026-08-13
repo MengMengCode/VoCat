@@ -8,9 +8,10 @@ import { carrierIso, flagEmoji } from "../../lib/carrier";
 export interface OverviewSimPanelProps {
   device: DeviceDetail;
   simOperatorDisplay: string;
+  customPhoneNumber?: string;
 }
 
-export function OverviewSimPanel({ device, simOperatorDisplay }: OverviewSimPanelProps) {
+export function OverviewSimPanel({ device, simOperatorDisplay, customPhoneNumber }: OverviewSimPanelProps) {
   const { t } = useI18n();
   const [showSensitive, toggleSensitive] = useShowSensitive();
   const modem = device.modem;
@@ -42,7 +43,7 @@ export function OverviewSimPanel({ device, simOperatorDisplay }: OverviewSimPane
         <FieldRow label="IMSI" value={modem?.imsi} sensitive={sensitive} monospace copyable />
         <FieldRow
           label={t("本机号码")}
-          value={device.localPhone || modem?.phoneNumberStatus || "--"}
+          value={customPhoneNumber?.trim() || device.localPhone || modem?.phoneNumberStatus || "--"}
           sensitive={sensitive}
           monospace
           copyable={Boolean(device.localPhone)}

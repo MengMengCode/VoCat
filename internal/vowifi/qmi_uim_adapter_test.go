@@ -92,6 +92,26 @@ func TestQMIUIMAKAProviderCheckReadyUses410SlotOneAndFullAID(t *testing.T) {
 	}
 }
 
+func TestQMIUIMAKAProviderReadICCID(t *testing.T) {
+	session := &fakeQMIUIMSession{iccid: "894921007998876780FF"}
+	provider, err := newQMIUIMAKAProvider("/dev/wwan0qmi0", func(context.Context, string) (qmiUIMSession, error) {
+		return session, nil
+	})
+	if err != nil {
+		t.Fatalf("newQMIUIMAKAProvider: %v", err)
+	}
+	iccid, err := provider.ReadICCID(context.Background())
+	if err != nil {
+		t.Fatalf("ReadICCID: %v", err)
+	}
+	if iccid != "894921007998876780" {
+		t.Fatalf("ICCID = %q, want filler-stripped value", iccid)
+	}
+	if !session.closed {
+		t.Fatal("QMI session was not closed")
+	}
+}
+
 func TestQMIUIMAKAProviderAuthenticatesAndParsesVector(t *testing.T) {
 	response := []byte{0xdb, 0x04, 1, 2, 3, 4, 0x10}
 	response = append(response, bytes.Repeat([]byte{0x11}, 16)...)

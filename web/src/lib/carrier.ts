@@ -57,3 +57,9 @@ export function carrierBrandIso(spn?: string, imsi?: string): string {
   if (brand.includes("lebara") && digits.startsWith("20404")) return "gb";
   return carrierIso(imsi);
 }
+
+export function flagEmoji(iso?: string): string {
+  const code = String(iso ?? "").trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return "";
+  return [...code].map((char) => String.fromCodePoint(0x1f1e6 + char.charCodeAt(0) - 65)).join("");
+}

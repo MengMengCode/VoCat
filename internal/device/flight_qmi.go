@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
@@ -260,6 +261,9 @@ func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
 	if err != nil || !native {
 		return native, err
 	}
+	manager.logEvent(slog.LevelInfo, "QMI modem reset started for SIM switch",
+		"category", "control_plane", "event", "qmi_reset_started",
+		"device_id", id, "control_path", controlDevice, "reason", "sim_switch")
 	if manager.qmiRadioOpener == nil {
 		return true, errors.New("QMI DMS modem reset is unavailable")
 	}
@@ -274,6 +278,9 @@ func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
 	session, err := manager.qmiRadioOpener(openContext, controlDevice)
 	cancelOpen()
 	if err != nil {
+		manager.logEvent(slog.LevelWarn, "QMI modem reset session open failed",
+			"category", "control_plane", "event", "qmi_reset_open_failed",
+			"device_id", id, "control_path", controlDevice, "error", err)
 		return true, fmt.Errorf("open QMI DMS modem reset: %w", err)
 	}
 	resetContext, cancelReset := manager.withTimeout(ctx, manager.longTimeout)
@@ -285,6 +292,9 @@ func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
 	// state with no RF interface after an accepted EnableProfile.
 	_ = session.Close()
 	if err != nil {
+		manager.logEvent(slog.LevelWarn, "QMI modem reset failed",
+			"category", "control_plane", "event", "qmi_reset_failed",
+			"device_id", id, "control_path", controlDevice, "error", err)
 		return true, fmt.Errorf("reset modem through QMI DMS: %w", err)
 	}
 	onlineSession, err := manager.reopenNativeQMIRadioOnline(ctx, controlDevice)
@@ -294,9 +304,15 @@ func (manager *Manager) resetNativeQMIModemForProfileSwitchLocked(
 	defer onlineSession.Close()
 	if selection, ok := onlineSession.(qmiNetworkSelectionSession); ok {
 		if err := selection.ResetNetworkSelection(ctx); err != nil {
+			manager.logEvent(slog.LevelWarn, "QMI network selection restore after SIM switch failed",
+				"category", "roaming", "event", "qmi_selection_restore_failed",
+				"device_id", id, "control_path", controlDevice, "error", err)
 			return true, err
 		}
 	}
+	manager.logEvent(slog.LevelInfo, "QMI modem reset completed for SIM switch",
+		"category", "control_plane", "event", "qmi_reset_completed",
+		"device_id", id, "control_path", controlDevice)
 	return true, nil
 }
 
@@ -308,6 +324,9 @@ func (manager *Manager) reopenNativeQMIRadioOnline(ctx context.Context, controlD
 	defer cancel()
 	var lastErr error
 	for attempt := 0; attempt < 8; attempt++ {
+		manager.logEvent(slog.LevelInfo, "QMI radio online recovery attempt",
+			"category", "control_plane", "event", "qmi_online_recovery_attempt",
+			"control_path", controlDevice, "attempt", attempt+1, "max_attempts", 8)
 		session, err := manager.qmiRadioOpener(recoveryContext, controlDevice)
 		if err == nil {
 			setContext, cancelSet := context.WithTimeout(recoveryContext, manager.commandTimeout*2)
@@ -344,6 +363,9 @@ func (manager *Manager) reopenNativeQMIRadioOnline(ctx context.Context, controlD
 			}
 		}
 	}
+	manager.logEvent(slog.LevelWarn, "QMI radio online recovery failed",
+		"category", "control_plane", "event", "qmi_online_recovery_failed",
+		"control_path", controlDevice, "attempts", 8, "error", lastErr)
 	return nil, fmt.Errorf("restore QMI modem online mode: %w", lastErr)
 }
 
@@ -370,6 +392,9 @@ func (manager *Manager) setNativeQMIFlight(
 	session, err := manager.qmiRadioOpener(openContext, controlDevice)
 	cancelOpen()
 	if err != nil {
+		manager.logEvent(slog.LevelWarn, "QMI radio control session open failed",
+			"category", "control_plane", "event", "qmi_radio_open_failed",
+			"device_id", id, "control_path", controlDevice, "target_flight_mode", enabled, "error", err)
 		return FlightResult{}, true, fmt.Errorf("open QMI DMS radio control: %w", err)
 	}
 	defer session.Close()
@@ -378,6 +403,9 @@ func (manager *Manager) setNativeQMIFlight(
 	previousQMI, err := session.GetOperatingMode(readContext)
 	cancelRead()
 	if err != nil {
+		manager.logEvent(slog.LevelWarn, "QMI operating mode read failed",
+			"category", "control_plane", "event", "qmi_mode_read_failed",
+			"device_id", id, "control_path", controlDevice, "error", err)
 		return FlightResult{}, true, fmt.Errorf("read QMI operating mode: %w", err)
 	}
 	previous := qmiModeAsCFUN(previousQMI)
@@ -391,10 +419,18 @@ func (manager *Manager) setNativeQMIFlight(
 	}
 	changed := targetQMI != previousQMI
 	if changed {
+		manager.logEvent(slog.LevelInfo, "QMI radio mode transition started",
+			"category", "control_plane", "event", "qmi_mode_transition_started",
+			"device_id", id, "control_path", controlDevice, "previous_mode", previousQMI,
+			"target_mode", targetQMI, "target_flight_mode", enabled)
 		setContext, cancelSet := manager.withTimeout(ctx, manager.commandTimeout)
 		err = session.SetOperatingMode(setContext, targetQMI)
 		cancelSet()
 		if err != nil {
+			manager.logEvent(slog.LevelWarn, "QMI radio mode transition failed",
+				"category", "control_plane", "event", "qmi_mode_transition_failed",
+				"device_id", id, "control_path", controlDevice, "previous_mode", previousQMI,
+				"target_mode", targetQMI, "error", err)
 			return FlightResult{
 				PreviousMode: previous,
 				CurrentMode:  previous,
@@ -405,6 +441,9 @@ func (manager *Manager) setNativeQMIFlight(
 	}
 	currentQMI, err := manager.waitForQMIRadioState(ctx, session, enabled, targetQMI)
 	if err != nil {
+		manager.logEvent(slog.LevelWarn, "QMI radio mode verification failed",
+			"category", "control_plane", "event", "qmi_mode_verification_failed",
+			"device_id", id, "control_path", controlDevice, "target_flight_mode", enabled, "error", err)
 		currentRadioOff := isQMIRadioOffMode(currentQMI)
 		return FlightResult{
 			PreviousMode: previous,
@@ -424,6 +463,10 @@ func (manager *Manager) setNativeQMIFlight(
 		// session open or delaying the control-plane response.
 		manager.startNativeQMIRegistrationReconcile(id)
 	}
+	manager.logEvent(slog.LevelInfo, "QMI radio mode transition completed",
+		"category", "control_plane", "event", "qmi_mode_transition_completed",
+		"device_id", id, "control_path", controlDevice, "previous_mode", previousQMI,
+		"current_mode", currentQMI, "changed", changed, "flight_mode", currentRadioOff)
 	return FlightResult{
 		PreviousMode: previous,
 		CurrentMode:  current,

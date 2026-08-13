@@ -59,7 +59,7 @@ func TestMigrationFromAuthenticationSchema(t *testing.T) {
 		"device_proxy_bindings",
 		"notification_settings", "app_settings", "audit_events",
 		"log_events", "card_policies", "card_apn_profiles", "traffic_buckets",
-		"sms_send_attempts",
+		"sms_send_attempts", "automatic_tasks", "automatic_task_runs",
 	} {
 		var found string
 		err := database.db.QueryRowContext(ctx, `
@@ -67,6 +67,45 @@ func TestMigrationFromAuthenticationSchema(t *testing.T) {
 		`, table).Scan(&found)
 		if err != nil || found != table {
 			t.Fatalf("migrated table %q missing: %v", table, err)
+		}
+	}
+}
+
+func TestMigration17RepairsLegacySchema10AutomaticTaskTables(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-schema10.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 9; version++ {
+		for _, statement := range migrationStatements(version) {
+			if _, err := raw.ExecContext(ctx, statement); err != nil {
+				t.Fatalf("create v%d schema: %v", version, err)
+			}
+		}
+	}
+	for _, statement := range []string{
+		`ALTER TABLE devices ADD COLUMN vowifi_allow_sha1 INTEGER NOT NULL DEFAULT 0 CHECK (vowifi_allow_sha1 IN (0, 1))`,
+		`ALTER TABLE devices ADD COLUMN vowifi_use_modp1024 INTEGER NOT NULL DEFAULT 0 CHECK (vowifi_use_modp1024 IN (0, 1))`,
+	} {
+		if _, err := raw.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 10`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestStore(t, path)
+	defer database.Close()
+	for _, table := range []string{"automatic_tasks", "automatic_task_runs"} {
+		var found string
+		if err := database.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&found); err != nil || found != table {
+			t.Fatalf("repaired table %q missing: %v", table, err)
 		}
 	}
 }

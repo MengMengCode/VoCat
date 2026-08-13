@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -19,6 +20,11 @@ const (
 	qmiSMSStorageUIM uint8 = 0
 	qmiSMSStorageNV  uint8 = 1
 	qmiSMSFormatGW   uint8 = 0x06
+	// OpenStick 410 can return CardCallControlRefFail after an eUICC refresh.
+	// Repeating the eight-query WMS catch-up loop while the card is in that
+	// state monopolizes the shared QMI control port and makes eSIM/VoWiFi
+	// control requests look unstable. Probe again only after a cooldown.
+	qmiSMSWMSBackoff = 5 * time.Minute
 )
 
 type qmiSMSListEntry struct {
@@ -466,6 +472,50 @@ func isUnsupportedQMIWMSOperation(err error) bool {
 		qmiErr.ErrorCode == qmi.QMIErrOpDeviceUnsupported
 }
 
+func isQMIWMSCardCallControlFailure(err error) bool {
+	qmiErr := qmi.GetQMIError(err)
+	return qmiErr != nil && qmiErr.Service == qmi.ServiceWMS &&
+		qmiErr.ErrorCode == qmi.QMIErrCardCallControlRefFail
+}
+
+func (manager *Manager) qmiSMSScanSuspended(controlDevice string) bool {
+	controlDevice = strings.TrimSpace(controlDevice)
+	if manager == nil || controlDevice == "" {
+		return false
+	}
+	now := time.Now()
+	manager.qmiSMSBackoffMu.Lock()
+	defer manager.qmiSMSBackoffMu.Unlock()
+	until := manager.qmiSMSBackoffUntil[controlDevice]
+	if until.IsZero() {
+		return false
+	}
+	if now.Before(until) {
+		return true
+	}
+	delete(manager.qmiSMSBackoffUntil, controlDevice)
+	return false
+}
+
+func (manager *Manager) suspendQMIWMSScan(controlDevice string, cause error) {
+	controlDevice = strings.TrimSpace(controlDevice)
+	if manager == nil || controlDevice == "" {
+		return
+	}
+	now := time.Now()
+	until := now.Add(qmiSMSWMSBackoff)
+	manager.qmiSMSBackoffMu.Lock()
+	previous := manager.qmiSMSBackoffUntil[controlDevice]
+	manager.qmiSMSBackoffUntil[controlDevice] = until
+	manager.qmiSMSBackoffMu.Unlock()
+	if now.Before(previous) {
+		return
+	}
+	manager.logEvent(slog.LevelWarn, "QMI WMS SMS scan suspended",
+		"category", "sms", "event", "qmi_wms_scan_suspended",
+		"control_path", controlDevice, "cooldown_seconds", int(qmiSMSWMSBackoff/time.Second), "error", cause)
+}
+
 type qmiSMSStorage struct {
 	value uint8
 	name  string
@@ -496,6 +546,9 @@ func (manager *Manager) listSMSQMILocked(
 	controlDevice string,
 ) (SMSSubscriberScan, error) {
 	scan := SMSSubscriberScan{Transport: SMSTransportCellularQMI}
+	if manager.qmiSMSScanSuspended(controlDevice) {
+		return scan, nil
+	}
 	session, err := manager.openQMISMSSessionLocked(ctx, controlDevice)
 	if err != nil {
 		return scan, err
@@ -519,6 +572,10 @@ func (manager *Manager) listSMSQMILocked(
 			entries, listErr := session.ListMessages(listContext, storage.value, requestedTag)
 			cancel()
 			if listErr != nil {
+				if isQMIWMSCardCallControlFailure(listErr) {
+					manager.suspendQMIWMSScan(controlDevice, listErr)
+					return scan, nil
+				}
 				complete = false
 				lastListErr = fmt.Errorf("list QMI WMS %s messages with tag %d: %w", storage.name, requestedTag, listErr)
 				continue

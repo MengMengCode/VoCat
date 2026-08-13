@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -91,11 +92,15 @@ func (manager *Manager) startNativeQMIRegistrationReconcile(id string) bool {
 	}
 	manager.nativeQMIRegistrationMu.Lock()
 	if _, running := manager.nativeQMIRegistrationInFlight[id]; running {
+		manager.logEvent(slog.LevelDebug, "QMI NAS registration reconcile coalesced",
+			"category", "roaming", "event", "qmi_registration_reconcile_coalesced", "device_id", id)
 		manager.nativeQMIRegistrationMu.Unlock()
 		return false
 	}
 	manager.nativeQMIRegistrationInFlight[id] = struct{}{}
 	manager.nativeQMIRegistrationMu.Unlock()
+	manager.logEvent(slog.LevelInfo, "QMI NAS registration reconcile started",
+		"category", "roaming", "event", "qmi_registration_reconcile_started", "device_id", id)
 	go func() {
 		defer func() {
 			manager.nativeQMIRegistrationMu.Lock()
@@ -104,7 +109,16 @@ func (manager *Manager) startNativeQMIRegistrationReconcile(id string) bool {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), nativeQMIRegistrationBackgroundTimeout)
 		defer cancel()
-		_, _ = manager.ReRegisterOperator(ctx, id)
+		selection, err := manager.ReRegisterOperator(ctx, id)
+		if err != nil {
+			manager.logEvent(slog.LevelWarn, "QMI NAS registration reconcile failed",
+				"category", "roaming", "event", "qmi_registration_reconcile_failed",
+				"device_id", id, "error", err)
+			return
+		}
+		manager.logEvent(slog.LevelInfo, "QMI NAS registration reconcile completed",
+			"category", "roaming", "event", "qmi_registration_reconcile_completed",
+			"device_id", id, "operator", selection.Operator, "selection_mode", selection.Mode)
 	}()
 	return true
 }

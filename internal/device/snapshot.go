@@ -112,6 +112,17 @@ func (manager *Manager) readSnapshot(
 		snapshot.Channel = nativeQMI.channel
 	}
 	snapshot.Warnings = append(snapshot.Warnings, nativeQMIWarnings...)
+	// Native Qualcomm WWAN firmware can reject every AT ICCID command while
+	// QMI-UIM still exposes the active card. Read the authoritative identity
+	// first so a periodic snapshot does not emit WARN entries for expected AT
+	// fallback probes (and never attributes a native card from a stale AT port).
+	if iccid, native, iccidErr := manager.readNativeQMIICCID(ctx, id); native {
+		if iccidErr != nil {
+			snapshot.Warnings = append(snapshot.Warnings, "read native QMI ICCID: "+iccidErr.Error())
+		} else {
+			snapshot.ICCID = iccid
+		}
+	}
 	if snapshot.RegistrationSource == "" && (snapshot.OperatorName != "" || snapshot.OperatorCode != "") {
 		// Older firmware can omit registration queries while COPS still proves
 		// that an operator is selected.
@@ -130,25 +141,27 @@ func (manager *Manager) readSnapshot(
 		}
 	}
 
-	var ccidErr error
-	for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+ICCID"} {
-		var ccid modem.Response
-		ccid, ccidErr = manager.command(ctx, client, command)
-		if ccidErr != nil {
-			continue
+	if snapshot.ICCID == "" {
+		var ccidErr error
+		for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+ICCID"} {
+			var ccid modem.Response
+			ccid, ccidErr = manager.command(ctx, client, command)
+			if ccidErr != nil {
+				continue
+			}
+			snapshot.ICCID = parseICCIDIdentifier(
+				ccid,
+				[]string{"+CCID:", "+QCCID:", "+ICCID:", "ICCID:"},
+				18,
+				22,
+			)
+			if snapshot.ICCID != "" {
+				break
+			}
 		}
-		snapshot.ICCID = parseICCIDIdentifier(
-			ccid,
-			[]string{"+CCID:", "+QCCID:", "+ICCID:", "ICCID:"},
-			18,
-			22,
-		)
-		if snapshot.ICCID != "" {
-			break
+		if snapshot.ICCID == "" && ccidErr != nil {
+			snapshot.Warnings = append(snapshot.Warnings, "read ICCID: "+ccidErr.Error())
 		}
-	}
-	if snapshot.ICCID == "" && ccidErr != nil {
-		snapshot.Warnings = append(snapshot.Warnings, "read ICCID: "+ccidErr.Error())
 	}
 	if response, ok := optional("AT+CIMI"); ok {
 		snapshot.IMSI = parseIdentifier(response, []string{"+CIMI:"}, 10, 18)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 type Options struct {
 	Discoverer     modem.Discoverer
 	Opener         modem.Opener
+	Logger         *slog.Logger
 	CommandTimeout time.Duration
 	LongTimeout    time.Duration
 	SMSTimeout     time.Duration
@@ -41,6 +43,9 @@ type Manager struct {
 	qmiRadioOpener                qmiRadioSessionOpener
 	qmiSMSOpener                  qmiSMSSessionOpener
 	cardReaders                   *pcsc.Service
+	logger                        *slog.Logger
+	qmiSMSBackoffMu               sync.Mutex
+	qmiSMSBackoffUntil            map[string]time.Time
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
 	started                       bool
@@ -101,6 +106,8 @@ func NewManager(options Options) (*Manager, error) {
 		qmiRadioOpener:                openQMIRadioSession,
 		qmiSMSOpener:                  openQMISMSSession,
 		cardReaders:                   options.CardReaders,
+		logger:                        options.Logger,
+		qmiSMSBackoffUntil:            make(map[string]time.Time),
 		nativeQMIRegistrationInFlight: make(map[string]struct{}),
 		devices:                       make(map[string]*managedDevice),
 		ussdSessions:                  make(map[string]ussdSession),
@@ -108,6 +115,28 @@ func NewManager(options Options) (*Manager, error) {
 		esimCache:                     make(map[string]EsimInfo),
 		esimActiveName:                make(map[string]string),
 	}, nil
+}
+
+// logEvent emits secret-neutral, machine-filterable runtime events. The
+// service passes its loghub-backed logger here, so these records are available
+// through both /api/logs/history and /api/logs/stream. Keep identifiers out of
+// the message itself; callers should pass only redacted values as attributes.
+func (manager *Manager) logEvent(level slog.Level, message string, attrs ...any) {
+	if manager == nil || manager.logger == nil {
+		return
+	}
+	manager.logger.Log(context.Background(), level, message, attrs...)
+}
+
+func redactSubscriberID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) <= 4 {
+		return value
+	}
+	return "…" + value[len(value)-4:]
 }
 
 func (manager *Manager) Start(ctx context.Context) error {
@@ -201,6 +230,9 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		if state.client != nil {
 			_ = state.client.Close()
 			state.client = nil
+			manager.logEvent(slog.LevelWarn, "control-plane AT transport discarded",
+				"category", "control_plane", "event", "at_transport_discarded",
+				"device_id", state.candidate.ID, "reason", "device_disappeared")
 		}
 		state.opMu.Unlock()
 	}
@@ -312,9 +344,15 @@ func (manager *Manager) clientLocked(
 	}
 	client, err := manager.opener.Open(ctx, candidate.ATPort)
 	if err != nil {
+		manager.logEvent(slog.LevelWarn, "control-plane AT transport open failed",
+			"category", "control_plane", "event", "at_transport_open_failed",
+			"device_id", candidate.ID, "at_path", candidate.ATPort.OpenPath(), "error", err)
 		return nil, err
 	}
 	state.client = client
+	manager.logEvent(slog.LevelInfo, "control-plane AT transport opened",
+		"category", "control_plane", "event", "at_transport_opened",
+		"device_id", candidate.ID, "at_path", candidate.ATPort.OpenPath())
 	return client, nil
 }
 
@@ -337,6 +375,9 @@ func (manager *Manager) setResult(
 	}
 	if err != nil {
 		state.lastError = err.Error()
+		manager.logEvent(slog.LevelWarn, "device operation failed",
+			"category", "device", "event", "operation_failed",
+			"device_id", id, "recovering", state.recovering, "error", err)
 	} else {
 		state.lastError = ""
 		if snapshot != nil {

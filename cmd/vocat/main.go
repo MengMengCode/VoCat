@@ -187,7 +187,10 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	}
 
 	cardReaders := pcsc.New()
-	deviceManager, err := device.NewManager(device.Options{CardReaders: cardReaders})
+	deviceManager, err := device.NewManager(device.Options{
+		CardReaders: cardReaders,
+		Logger:      logger,
+	})
 	if err != nil {
 		return fmt.Errorf("create device manager: %w", err)
 	}
@@ -568,6 +571,21 @@ func configureVoWiFiRuntime(
 	}
 	homePLMN := vowifi.NewQMIUIMHomePLMNReader()
 	adapter, err := vowifi.NewEC20Adapter(mapper, vowifi.EC20AdapterOptions{
+		NativeICCID: func(callbackContext context.Context, deviceID string) (string, bool, error) {
+			deviceConfig, configErr := database.Device(callbackContext, deviceID)
+			if configErr != nil {
+				return "", false, configErr
+			}
+			if store.NormalizeDeviceType(deviceConfig.DeviceType) != store.DeviceTypeWiFi410 {
+				return "", false, nil
+			}
+			provider, providerErr := vowifi.NewQMIUIMAKAProvider(deviceConfig.ControlDevice)
+			if providerErr != nil {
+				return "", true, providerErr
+			}
+			iccid, readErr := provider.ReadICCID(callbackContext)
+			return iccid, true, readErr
+		},
 		RFOffMode: func(callbackContext context.Context, deviceID string) (int, error) {
 			deviceConfig, err := database.Device(callbackContext, deviceID)
 			if err != nil {
@@ -1045,12 +1063,24 @@ func pollDeviceSnapshots(
 	database *store.Store,
 	manager *device.Manager,
 ) {
+	previous := make(map[string]device.Snapshot)
+	redact := func(value string) string {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return ""
+		}
+		if len(value) <= 4 {
+			return value
+		}
+		return "…" + value[len(value)-4:]
+	}
 	refresh := func() {
 		discoveryContext, cancelDiscovery := context.WithTimeout(ctx, 10*time.Second)
 		_, err := manager.Discover(discoveryContext)
 		cancelDiscovery()
 		if err != nil {
-			logger.Debug("periodic modem discovery failed", "error", err)
+			logger.Warn("periodic modem discovery failed",
+				"category", "control_plane", "event", "device_discovery_failed", "error", err)
 			return
 		}
 		for _, entry := range manager.List() {
@@ -1061,9 +1091,51 @@ func pollDeviceSnapshots(
 			snapshot, err := manager.Refresh(refreshContext, entry.ID)
 			cancelRefresh()
 			if err != nil && ctx.Err() == nil {
-				logger.Warn("modem snapshot refresh failed", "device_id", entry.ID, "error", err)
+				logger.Warn("modem snapshot refresh failed",
+					"category", "control_plane", "event", "snapshot_refresh_failed",
+					"device_id", entry.ID, "error", err)
 			}
 			if err == nil && ctx.Err() == nil {
+				if old, ok := previous[entry.ID]; ok {
+					if old.ICCID != "" && snapshot.ICCID != "" && old.ICCID != snapshot.ICCID {
+						logger.Info("SIM identity changed",
+							"category", "sim_switch", "event", "sim_identity_changed",
+							"device_id", entry.ID,
+							"previous_iccid_last4", redact(old.ICCID),
+							"current_iccid_last4", redact(snapshot.ICCID),
+							"registration_status", snapshot.RegistrationStatus,
+							"operator", snapshot.OperatorCode)
+					}
+					if old.RegistrationStatus != snapshot.RegistrationStatus ||
+						old.OperatorCode != snapshot.OperatorCode || old.PSAttached != snapshot.PSAttached {
+						logger.Info("cellular registration state changed",
+							"category", "roaming", "event", "registration_state_changed",
+							"device_id", entry.ID,
+							"previous_status", old.RegistrationStatus,
+							"current_status", snapshot.RegistrationStatus,
+							"previous_operator", old.OperatorCode,
+							"current_operator", snapshot.OperatorCode,
+							"roaming", snapshot.RegistrationStatus == 5,
+							"ps_attached", snapshot.PSAttached,
+							"registration_source", snapshot.RegistrationSource)
+					}
+					if old.FlightMode != snapshot.FlightMode || old.RadioOff != snapshot.RadioOff {
+						logger.Info("cellular radio state changed",
+							"category", "control_plane", "event", "radio_state_changed",
+							"device_id", entry.ID,
+							"previous_flight_mode", old.FlightMode,
+							"current_flight_mode", snapshot.FlightMode,
+							"operating_mode", snapshot.OperatingMode)
+					}
+				} else {
+					logger.Debug("cellular control-plane snapshot observed",
+						"category", "control_plane", "event", "snapshot_initial",
+						"device_id", entry.ID, "operator", snapshot.OperatorCode,
+						"registration_status", snapshot.RegistrationStatus,
+						"roaming", snapshot.RegistrationStatus == 5,
+						"ps_attached", snapshot.PSAttached)
+				}
+				previous[entry.ID] = snapshot
 				enforceCardRegion(ctx, logger, database, manager, entry.ID, &snapshot)
 			}
 		}
