@@ -688,6 +688,9 @@ func (manager *Manager) ESIMListProfiles(ctx context.Context, id string) (EsimIn
 
 // ESIMSwitchProfile enables one profile by ICCID via ES10c EnableProfile.
 func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid string, aidHex string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	iccid = strings.TrimSpace(iccid)
 	if iccid == "" {
 		return errors.New("esim: an ICCID is required")
@@ -695,113 +698,275 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	manager.logEvent(slog.LevelInfo, "SIM profile switch started",
 		"category", "sim_switch", "event", "profile_switch_started",
 		"device_id", id, "target_iccid_last4", redactSubscriberID(iccid))
-	der, err := buildEnableProfileRequest(iccid)
-	if err != nil {
+	if _, err := buildEnableProfileRequest(iccid); err != nil {
 		return err
 	}
 	manager.esimMu.Lock()
+	defer manager.esimMu.Unlock()
 	if err := manager.waitForESIMRecovery(ctx, id); err != nil {
-		manager.esimMu.Unlock()
-		return err
-	}
-	channel, err := manager.openEuiccAID(ctx, id, targetEuiccAID(aidHex))
-	if err != nil {
-		manager.esimMu.Unlock()
 		return err
 	}
 
-	// EnableProfile request (SGP.22 ES10c, per lpac):
-	//   BF31 { A0 { 5A <iccid bcd> } 81 01 FF }   (refresh = yes)
-	// The profileIdentifier is an explicitly-tagged [0] CHOICE, so the ICCID
-	// element (5A) must be wrapped in A0 — omitting that wrapper makes the eUICC
-	// reject the command with result 0x7F (undefined error). refreshFlag (81)
-	// stays a sibling of A0, directly under BF31.
-	// EnableProfile is a non-idempotent commit. Once its APDU starts, a browser
-	// disconnect or reverse-proxy timeout must not cancel it halfway through and
-	// skip the modem reset, otherwise EC20 remains in SIM failure (+CME 13).
-	commitContext, cancelCommit := context.WithTimeout(context.WithoutCancel(ctx), csimAPDUTimeout)
-	payload, err := channel.es10(commitContext, der)
-	cancelCommit()
-	// Release the logical channel before any reset: openEuicc's csim holds
-	// opMu only for the duration of each APDU, so by here the lock is free.
-	closeContext, cancelClose := context.WithTimeout(context.Background(), csimAPDUTimeout)
-	channel.close(closeContext)
-	cancelClose()
-	if err != nil {
-		// The card may have committed immediately before the transport error. A
-		// detached reset is safe in either case and prevents an uncertain switch
-		// from leaving the modem's SIM cache unusable.
-		manager.startProfileSwitchRecovery(id)
-		manager.esimMu.Unlock()
-		manager.logEvent(slog.LevelWarn, "SIM profile switch transport failed",
-			"category", "sim_switch", "event", "profile_switch_transport_failed",
-			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
-		return err
+	// EnableProfile is allowed to disable the current profile as part of the
+	// card-side commit.  It is not a hardware transaction: if the modem loses
+	// the response after that commit, the eUICC can be left with no active
+	// profile.  Capture the current identity before sending the APDU so the
+	// service can compensate by re-enabling it if the requested profile does
+	// not become active.
+	previousICCID, previousKnown, previousErr := manager.currentActiveProfileICCID(ctx, id)
+	if previousErr != nil && !previousKnown {
+		return fmt.Errorf("%w: %v", ErrESIMSwitchPreviousUnknown, previousErr)
 	}
-	// A transport SW 9000 only means the APDU reached the eUICC. The real outcome
-	// is the EnableProfile result code (tag 80) inside the BF31 response — honour
-	// it so a rejected switch is surfaced instead of reported as "switched".
-	result, ok := enableProfileResult(payload)
-	if !ok {
-		manager.startProfileSwitchRecovery(id)
-		manager.esimMu.Unlock()
-		manager.logEvent(slog.LevelWarn, "SIM profile switch returned an invalid response",
-			"category", "sim_switch", "event", "profile_switch_invalid_response",
+	if strings.EqualFold(previousICCID, iccid) {
+		manager.markCachedProfileEnabled(id, iccid)
+		manager.logEvent(slog.LevelInfo, "SIM profile switch already satisfied",
+			"category", "sim_switch", "event", "profile_switch_already_active",
 			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid))
-		return fmt.Errorf("esim: unexpected EnableProfile response %s", strings.ToUpper(hex.EncodeToString(payload)))
+		return nil
 	}
-	if err := enableProfileResponseError(byte(result), payload); err != nil {
-		manager.esimMu.Unlock()
-		manager.logEvent(slog.LevelWarn, "SIM profile switch rejected by eUICC",
-			"category", "sim_switch", "event", "profile_switch_rejected",
-			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "result_code", result, "error", err)
-		return err
+
+	attempt, switchErr := manager.sendEnableProfile(ctx, id, iccid, aidHex)
+	if !attempt.attempted {
+		return switchErr
 	}
-	manager.logEvent(slog.LevelInfo, "SIM profile accepted by eUICC; modem recovery queued",
-		"category", "sim_switch", "event", "profile_switch_accepted",
-		"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "result_code", result)
+	if switchErr != nil {
+		manager.logEvent(slog.LevelWarn, "SIM profile switch APDU outcome is uncertain",
+			"category", "sim_switch", "event", "profile_switch_apdu_uncertain",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", switchErr)
+	} else {
+		manager.logEvent(slog.LevelInfo, "SIM profile accepted by eUICC; modem recovery queued",
+			"category", "sim_switch", "event", "profile_switch_accepted",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "result_code", 0)
+	}
 	// EnableProfile(refresh=yes) invalidates the modem-side WMS subscription
 	// and storage context even after the new profile is visible through UIM.
 	// Make the next SMS operation rebuild WMS before it attempts List Messages;
 	// this avoids interpreting the resulting standard INVALID_ARG (0x0030) as
 	// a card call-control failure and avoids an unnecessary modem reset.
 	manager.markQMIWMSContextPending(id)
-	manager.markCachedProfileEnabled(id, iccid)
-	// The eUICC accepted the target profile. Reset and repopulate the modem in
-	// a detached recovery so it survives an HTTP disconnect, but keep this API
-	// call pending until the live modem ICCID proves that the switch took effect.
+	// The eUICC may have committed immediately before a transport error. Always
+	// reset and verify after an APDU attempt, including a card-side rejection;
+	// only the live ICCID decides whether the transaction committed.
 	manager.startProfileSwitchRecovery(id)
-	manager.esimMu.Unlock()
 
 	verifyContext, cancelVerify := context.WithTimeout(context.WithoutCancel(ctx), profileSwitchVerificationTimeout(manager))
 	defer cancelVerify()
-	if err := manager.waitForESIMRecovery(verifyContext, id); err != nil {
+	recoveryErr := manager.waitForESIMRecovery(verifyContext, id)
+	var verifyErr error
+	if recoveryErr == nil {
+		verifyErr = manager.verifySwitchedICCID(verifyContext, id, iccid)
+	}
+	if verifyErr == nil && recoveryErr == nil {
+		// The cache is deliberately changed only after the driver plane proves
+		// that the target is active. A failed/partial switch therefore cannot
+		// make the UI claim that the target is enabled while the old profile is
+		// actually disabled.
+		manager.markCachedProfileEnabled(id, iccid)
+		// Native QMI already gives us the authoritative ICCID immediately. The
+		// slower AT snapshot is best-effort after that merge; it must not add up
+		// to another eight command-timeout windows before returning success.
+		if err := manager.refreshVerifiedProfileSnapshot(verifyContext, id, iccid); err != nil {
+			manager.logEvent(slog.LevelWarn, "SIM profile switch snapshot refresh failed",
+				"category", "sim_switch", "event", "profile_switch_snapshot_refresh_failed",
+				"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
+			return err
+		}
+		manager.logEvent(slog.LevelInfo, "SIM profile switch completed",
+			"category", "sim_switch", "event", "profile_switch_completed",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid))
+		return nil
+	}
+
+	if recoveryErr != nil {
 		manager.logEvent(slog.LevelWarn, "SIM profile switch recovery wait failed",
 			"category", "sim_switch", "event", "profile_switch_recovery_wait_failed",
-			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
-		return err
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", recoveryErr)
 	}
-	if err := manager.verifySwitchedICCID(verifyContext, id, iccid); err != nil {
+	if verifyErr != nil {
 		manager.logEvent(slog.LevelWarn, "SIM profile switch identity verification failed",
 			"category", "sim_switch", "event", "profile_switch_identity_verification_failed",
-			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
-		return err
+			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", verifyErr)
 	}
-	// verifySwitchedICCID reads the live driver-plane identity, while the device
-	// overview is served from Manager's cached AT/QMI snapshot. Refresh that
-	// snapshot after the live identity has moved; otherwise the switch succeeds
-	// but the page keeps showing the previous SIM until an unrelated refresh.
-	err = manager.refreshVerifiedProfileSnapshot(verifyContext, id, iccid)
+	failure := errors.Join(switchErr, recoveryErr, verifyErr)
+	if failure == nil {
+		failure = errors.New("target profile did not become active")
+	}
+	return manager.rollbackFailedProfileSwitch(id, iccid, aidHex, previousICCID, previousKnown, failure)
+}
+
+// enableProfileAttempt records whether an EnableProfile APDU was actually
+// sent.  An error before the APDU (for example, no logical channel) is safe to
+// return directly; after the APDU starts, the card may already have committed
+// even when the transport reports an error.
+type enableProfileAttempt struct {
+	attempted bool
+}
+
+// sendEnableProfile performs exactly one ES10c EnableProfile transaction. It
+// intentionally has no cache or recovery side effects so it can be reused for
+// the compensating rollback profile without recursively taking esimMu.
+func (manager *Manager) sendEnableProfile(ctx context.Context, id, iccid, aidHex string) (enableProfileAttempt, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	request, err := buildEnableProfileRequest(strings.TrimSpace(iccid))
 	if err != nil {
-		manager.logEvent(slog.LevelWarn, "SIM profile switch snapshot refresh failed",
-			"category", "sim_switch", "event", "profile_switch_snapshot_refresh_failed",
-			"device_id", id, "target_iccid_last4", redactSubscriberID(iccid), "error", err)
-		return err
+		return enableProfileAttempt{}, err
 	}
-	manager.logEvent(slog.LevelInfo, "SIM profile switch completed",
-		"category", "sim_switch", "event", "profile_switch_completed",
-		"device_id", id, "target_iccid_last4", redactSubscriberID(iccid))
-	return nil
+	channel, err := manager.openEuiccAID(ctx, id, targetEuiccAID(aidHex))
+	if err != nil {
+		return enableProfileAttempt{}, err
+	}
+	attempt := enableProfileAttempt{attempted: true}
+	commitContext, cancelCommit := context.WithTimeout(context.WithoutCancel(ctx), csimAPDUTimeout)
+	payload, sendErr := channel.es10(commitContext, request)
+	cancelCommit()
+	closeContext, cancelClose := context.WithTimeout(context.Background(), csimAPDUTimeout)
+	closeErr := channel.backend.close(closeContext)
+	cancelClose()
+	if sendErr != nil {
+		return attempt, errors.Join(sendErr, closeErr)
+	}
+	if closeErr != nil {
+		return attempt, fmt.Errorf("esim: close EnableProfile channel: %w", closeErr)
+	}
+	result, ok := enableProfileResult(payload)
+	if !ok {
+		return attempt, fmt.Errorf("esim: unexpected EnableProfile response %s", strings.ToUpper(hex.EncodeToString(payload)))
+	}
+	if err := enableProfileResponseError(byte(result), payload); err != nil {
+		return attempt, err
+	}
+	return attempt, nil
+}
+
+// currentActiveProfileICCID reads the profile that the modem currently
+// exposes. For native QMI devices we do not trust a stale cache when live UIM
+// and DMS reads fail; refusing to start without a rollback point is safer than
+// risking a no-profile state.
+func (manager *Manager) currentActiveProfileICCID(ctx context.Context, id string) (string, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	_, native, nativeErr := manager.nativeQMIControl(id)
+	if nativeErr != nil {
+		return "", false, nativeErr
+	}
+	if native {
+		live, _, uimErr := manager.readNativeQMIICCID(ctx, id)
+		if uimErr == nil && validProfileICCID(live) {
+			return live, true, nil
+		}
+		if dmsLive, _, dmsErr := manager.readNativeQMIDMSICCID(ctx, id); dmsErr == nil && validProfileICCID(dmsLive) {
+			return dmsLive, true, nil
+		} else if dmsErr != nil {
+			uimErr = errors.Join(uimErr, dmsErr)
+		}
+		if uimErr == nil {
+			uimErr = errors.New("native QMI returned no active ICCID")
+		}
+		return "", false, uimErr
+	}
+
+	// AT modems must also be read live.  A cached snapshot is deliberately not
+	// a rollback point: publishing it before the APDU was the exact race that
+	// could make the old profile look active after the card had already turned
+	// it off.
+	var lastErr error
+	for _, command := range []string{"AT+CCID", "AT+QCCID"} {
+		commandContext, cancel := context.WithTimeout(ctx, manager.commandTimeout)
+		response, err := manager.ExecuteAT(commandContext, id, command)
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if iccid := parseICCIDIdentifier(response, []string{"+CCID:", "+QCCID:"}, 18, 22); validProfileICCID(iccid) {
+			return iccid, true, nil
+		}
+		lastErr = errors.New("modem response contained no valid active ICCID")
+	}
+	// An inventory whose profiles are all disabled is the one safe exception:
+	// it proves there is no active profile to restore (for example, after the
+	// explicit Disable action).  Never use a cached *enabled* ICCID here.
+	if cached, ok := manager.cachedESIMInfo(id); ok && cached.EnabledProfile() == nil && len(cached.Profiles) > 0 {
+		return "", true, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("current active ICCID is unavailable")
+	}
+	return "", false, lastErr
+}
+
+func profileSwitchRollbackTimeout(manager *Manager) time.Duration {
+	timeout := manager.longTimeout + 90*time.Second
+	if timeout < 90*time.Second {
+		return 90 * time.Second
+	}
+	return timeout
+}
+
+// rollbackFailedProfileSwitch is the compensating half of the application
+// transaction. If the target was not proven active, restore the pre-switch
+// profile (when one existed) and verify that profile through the live modem.
+func (manager *Manager) rollbackFailedProfileSwitch(
+	id, targetICCID, aidHex, previousICCID string,
+	previousKnown bool,
+	switchErr error,
+) error {
+	rollbackContext, cancel := context.WithTimeout(context.Background(), profileSwitchRollbackTimeout(manager))
+	defer cancel()
+	current, currentKnown, currentErr := manager.currentActiveProfileICCID(rollbackContext, id)
+	if currentErr != nil {
+		manager.logEvent(slog.LevelWarn, "SIM profile rollback current identity read failed",
+			"category", "sim_switch", "event", "profile_switch_rollback_identity_failed",
+			"device_id", id, "target_iccid_last4", redactSubscriberID(targetICCID), "error", currentErr)
+	}
+	if currentKnown && strings.EqualFold(current, previousICCID) {
+		if previousICCID != "" {
+			manager.markCachedProfileEnabled(id, previousICCID)
+			manager.mergeVerifiedProfileSnapshot(id, previousICCID)
+		}
+		return fmt.Errorf("esim: target ICCID %s was not activated; previous profile remained active: %w", targetICCID, switchErr)
+	}
+	if !previousKnown || previousICCID == "" {
+		if currentKnown && current == "" {
+			return switchErr
+		}
+		return errors.Join(ErrESIMSwitchRollbackFailed,
+			fmt.Errorf("esim: target ICCID %s was not activated and there is no known previous profile to restore: %w", targetICCID, switchErr))
+	}
+
+	manager.logEvent(slog.LevelWarn, "SIM profile compensating rollback started",
+		"category", "sim_switch", "event", "profile_switch_rollback_started",
+		"device_id", id, "target_iccid_last4", redactSubscriberID(targetICCID),
+		"previous_iccid_last4", redactSubscriberID(previousICCID))
+	attempt, rollbackErr := manager.sendEnableProfile(rollbackContext, id, previousICCID, aidHex)
+	if attempt.attempted {
+		manager.markQMIWMSContextPending(id)
+		manager.startProfileSwitchRecovery(id)
+		if waitErr := manager.waitForESIMRecovery(rollbackContext, id); waitErr != nil {
+			rollbackErr = errors.Join(rollbackErr, waitErr)
+		} else if verifyErr := manager.verifySwitchedICCID(rollbackContext, id, previousICCID); verifyErr != nil {
+			rollbackErr = errors.Join(rollbackErr, verifyErr)
+		} else {
+			manager.markCachedProfileEnabled(id, previousICCID)
+			manager.mergeVerifiedProfileSnapshot(id, previousICCID)
+			manager.logEvent(slog.LevelWarn, "SIM profile compensating rollback completed",
+				"category", "sim_switch", "event", "profile_switch_rollback_completed",
+				"device_id", id, "previous_iccid_last4", redactSubscriberID(previousICCID))
+			return fmt.Errorf("esim: target ICCID %s was not activated; previous profile was restored: %w", targetICCID, switchErr)
+		}
+	}
+	if rollbackErr == nil {
+		rollbackErr = errors.New("rollback APDU was not accepted")
+	}
+	manager.logEvent(slog.LevelError, "SIM profile compensating rollback failed",
+		"category", "sim_switch", "event", "profile_switch_rollback_failed",
+		"device_id", id, "target_iccid_last4", redactSubscriberID(targetICCID),
+		"previous_iccid_last4", redactSubscriberID(previousICCID), "error", rollbackErr)
+	return errors.Join(ErrESIMSwitchRollbackFailed,
+		fmt.Errorf("esim: target ICCID %s was not activated and previous ICCID %s could not be restored: %w", targetICCID, previousICCID, errors.Join(switchErr, rollbackErr)))
 }
 
 func (manager *Manager) startProfileSwitchRecovery(id string) {
@@ -969,8 +1134,25 @@ func (manager *Manager) renameCachedProfile(id, iccid, nickname string) {
 // CFUN=1,1, so the reset error is intentionally followed by discovery retries.
 func (manager *Manager) recoverAfterProfileSwitch(id string) {
 	resetContext, cancelReset := context.WithTimeout(context.Background(), manager.longTimeout)
-	_ = manager.rebootForProfileSwitch(resetContext, id)
+	resetErr := manager.rebootForProfileSwitch(resetContext, id)
 	cancelReset()
+	// On native OpenStick/QMI devices, a successful DMS reset followed by a
+	// live UIM ICCID read is enough to prove that the subscriber cache has been
+	// repopulated.  Waiting for the AT-oriented Refresh retry loop as well used
+	// to make a healthy switch sit in recovery for up to eight command windows.
+	// Keep the slower path for AT modems and for a reset that did not complete.
+	if resetErr == nil {
+		if _, native, nativeErr := manager.nativeQMIControl(id); nativeErr == nil && native {
+			identityContext, cancelIdentity := context.WithTimeout(context.Background(), manager.commandTimeout*2)
+			live, _, identityErr := manager.readNativeQMIICCID(identityContext, id)
+			cancelIdentity()
+			if identityErr == nil && validProfileICCID(live) {
+				manager.mergeVerifiedProfileSnapshot(id, live)
+				manager.finishRecovery(id)
+				return
+			}
+		}
+	}
 	manager.refreshAfterProfileSwitch(id)
 }
 
@@ -1021,6 +1203,8 @@ var (
 	ErrESIMWrongProfileReenabling = errors.New("esim: profile cannot be re-enabled from the current profile state")
 	ErrESIMEnableCATBusy          = errors.New("esim: card application toolkit is busy; retry enabling later")
 	ErrESIMEnableUndefined        = errors.New("esim: eUICC returned undefinedError while enabling this profile; the card did not provide a more specific reason")
+	ErrESIMSwitchPreviousUnknown  = errors.New("esim: current profile could not be determined safely before switching")
+	ErrESIMSwitchRollbackFailed   = errors.New("esim: target profile switch failed and previous profile rollback failed")
 )
 
 // enableProfileResponseError maps the complete SGP.22 EnableProfileResult
@@ -1174,6 +1358,15 @@ func (manager *Manager) refreshVerifiedProfileSnapshot(ctx context.Context, id, 
 	if nativeQMI && identityErr == nil && strings.EqualFold(strings.TrimSpace(live), expected) {
 		manager.mergeVerifiedProfileSnapshot(id, live)
 		verifiedSnapshotMerged = true
+	}
+	if verifiedSnapshotMerged {
+		// QMI-UIM is the authoritative driver-plane identity on native WWAN
+		// devices.  The ordinary AT snapshot can remain unavailable for a few
+		// seconds while the modem reopens after ModeReset; retrying eight times
+		// here used to add roughly 16--144 seconds to every otherwise successful
+		// switch.  The merged ICCID is already visible to the UI, and the normal
+		// snapshot ticker will fill in RF/registration fields on its next pass.
+		return nil
 	}
 	const (
 		attempts = 8

@@ -1258,6 +1258,10 @@ func (s *Server) writeDeviceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "esim_disable_disallowed_by_policy", "This profile's policy does not allow it to be disabled.")
 	case errors.Is(err, device.ErrESIMDisableCATBusy):
 		writeError(w, http.StatusConflict, "esim_cat_busy", "The eUICC is busy with a SIM Toolkit operation. Wait a moment and retry disabling the profile.")
+	case errors.Is(err, device.ErrESIMSwitchPreviousUnknown):
+		writeError(w, http.StatusConflict, "esim_switch_state_unknown", "The modem could not confirm the current active profile safely; refresh the device and retry the switch.")
+	case errors.Is(err, device.ErrESIMSwitchRollbackFailed):
+		writeError(w, http.StatusServiceUnavailable, "esim_switch_rollback_failed", err.Error())
 	case errors.Is(err, device.ErrInvalidNetworkAPN):
 		writeError(w, http.StatusBadRequest, "invalid_apn", "APN must contain only letters, digits, dots, underscores, or hyphens")
 	case errors.Is(err, device.ErrRegionBlocked):
