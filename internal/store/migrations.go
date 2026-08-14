@@ -264,6 +264,123 @@ func migrationStatements(version int) []string {
 		return []string{
 			`ALTER TABLE devices ADD COLUMN sim_pin TEXT NOT NULL DEFAULT ''`,
 		}
+	case 17:
+		// Some development builds recorded automatic-task support in an older
+		// migration. Recreate the objects idempotently so databases from either
+		// history converge before later migrations run.
+		return []string{
+			`CREATE TABLE IF NOT EXISTS automatic_tasks (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL,
+				enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+				device_id TEXT NOT NULL,
+				profile_iccid TEXT NOT NULL,
+				profile_aid TEXT NOT NULL DEFAULT '',
+				task_type TEXT NOT NULL CHECK (task_type IN ('sms', 'call', 'public_ip')),
+				environment TEXT NOT NULL CHECK (environment IN ('vowifi', 'cellular')),
+				interval_days INTEGER NOT NULL CHECK (interval_days BETWEEN 1 AND 365),
+				start_date TEXT NOT NULL,
+				run_time TEXT NOT NULL,
+				timezone TEXT NOT NULL DEFAULT 'Local',
+				payload_json TEXT NOT NULL DEFAULT '{}',
+				retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 10),
+				notify INTEGER NOT NULL DEFAULT 0 CHECK (notify IN (0, 1)),
+				next_run_at INTEGER NOT NULL,
+				last_run_at INTEGER NOT NULL DEFAULT 0,
+				last_status TEXT NOT NULL DEFAULT '',
+				last_error TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS automatic_tasks_due_idx ON automatic_tasks(enabled, next_run_at, id)`,
+			`CREATE INDEX IF NOT EXISTS automatic_tasks_device_idx ON automatic_tasks(device_id, next_run_at, id)`,
+			`CREATE TABLE IF NOT EXISTS automatic_task_runs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				task_id INTEGER NOT NULL,
+				device_id TEXT NOT NULL,
+				scheduled_at INTEGER NOT NULL,
+				started_at INTEGER NOT NULL DEFAULT 0,
+				finished_at INTEGER NOT NULL DEFAULT 0,
+				status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'success', 'failed')),
+				attempts INTEGER NOT NULL DEFAULT 0,
+				output TEXT NOT NULL DEFAULT '',
+				error TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				FOREIGN KEY (task_id) REFERENCES automatic_tasks(id) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS automatic_task_runs_task_idx ON automatic_task_runs(task_id, id DESC)`,
+			`CREATE INDEX IF NOT EXISTS automatic_task_runs_status_idx ON automatic_task_runs(status, id)`,
+		}
+	case 18:
+		// A short-lived schema lineage kept the original card-policy CHECK,
+		// which rejected the supported VoWiFi + airplane-mode state. Rebuild
+		// both related tables so all released and development databases converge
+		// without dropping policies or custom APNs.
+		return []string{
+			`ALTER TABLE card_apn_profiles RENAME TO card_apn_profiles_v17`,
+			`ALTER TABLE card_policies RENAME TO card_policies_v17`,
+			`CREATE TABLE card_policies (
+				iccid TEXT PRIMARY KEY,
+				network_enabled INTEGER NOT NULL DEFAULT 0 CHECK (network_enabled IN (0, 1)),
+				vowifi_enabled INTEGER NOT NULL DEFAULT 0 CHECK (vowifi_enabled IN (0, 1)),
+				airplane_enabled INTEGER NOT NULL DEFAULT 0 CHECK (airplane_enabled IN (0, 1)),
+				apn TEXT NOT NULL DEFAULT '',
+				ip_version TEXT NOT NULL DEFAULT '',
+				source TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				custom_phone_number TEXT NOT NULL DEFAULT ''
+			)`,
+			`INSERT INTO card_policies (
+				iccid, network_enabled, vowifi_enabled, airplane_enabled,
+				apn, ip_version, source, created_at, updated_at, custom_phone_number
+			) SELECT
+				iccid, network_enabled, vowifi_enabled, airplane_enabled,
+				apn, ip_version, source, created_at, updated_at, custom_phone_number
+			FROM card_policies_v17`,
+			`CREATE TABLE card_apn_profiles_new (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				iccid TEXT NOT NULL,
+				apn TEXT NOT NULL,
+				ip_version TEXT NOT NULL DEFAULT 'IPV4V6' CHECK (ip_version IN ('IP', 'IPV6', 'IPV4V6')),
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				username TEXT NOT NULL DEFAULT '',
+				password TEXT NOT NULL DEFAULT '',
+				proxy TEXT NOT NULL DEFAULT '',
+				mcc TEXT NOT NULL DEFAULT '',
+				mnc TEXT NOT NULL DEFAULT '',
+				roaming_ip_version TEXT NOT NULL DEFAULT 'IP' CHECK (roaming_ip_version IN ('IP', 'IPV6', 'IPV4V6')),
+				auth_type TEXT NOT NULL DEFAULT 'NONE' CHECK (auth_type IN ('NONE', 'PAP', 'CHAP', 'PAP_OR_CHAP')),
+				UNIQUE (iccid, apn, ip_version),
+				FOREIGN KEY (iccid) REFERENCES card_policies(iccid) ON DELETE CASCADE
+			)`,
+			`INSERT INTO card_apn_profiles_new
+				SELECT id, iccid, apn, ip_version, created_at, updated_at,
+					username, password, proxy, mcc, mnc, roaming_ip_version, auth_type
+				FROM card_apn_profiles_v17`,
+			`DROP TABLE card_apn_profiles_v17`,
+			`DROP TABLE card_policies_v17`,
+			`ALTER TABLE card_apn_profiles_new RENAME TO card_apn_profiles`,
+			`CREATE INDEX card_apn_profiles_iccid_idx ON card_apn_profiles(iccid, id)`,
+		}
+	case 19:
+		// Compatibility columns written by the Qualcomm/IMS development build.
+		// The stable server may leave them unused, but retaining them makes a
+		// database created by that build safely readable after an upgrade.
+		return []string{
+			`ALTER TABLE devices ADD COLUMN ims_apn TEXT NOT NULL DEFAULT 'ims'`,
+			`ALTER TABLE devices ADD COLUMN ims_private_identity TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE devices ADD COLUMN ims_public_identity TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE devices ADD COLUMN ims_sms_center TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE devices ADD COLUMN ims_transport TEXT NOT NULL DEFAULT 'tcp'`,
+			`ALTER TABLE devices ADD COLUMN ims_allow_imsi_derived_identity INTEGER NOT NULL DEFAULT 1 CHECK (ims_allow_imsi_derived_identity IN (0, 1))`,
+			`ALTER TABLE devices ADD COLUMN vowifi_eap_method TEXT NOT NULL DEFAULT 'aka'`,
+			`ALTER TABLE devices ADD COLUMN vowifi_allow_sha1 INTEGER NOT NULL DEFAULT 0 CHECK (vowifi_allow_sha1 IN (0, 1))`,
+			`ALTER TABLE devices ADD COLUMN vowifi_use_modp1024 INTEGER NOT NULL DEFAULT 0 CHECK (vowifi_use_modp1024 IN (0, 1))`,
+		}
 	default:
 		return nil
 	}
