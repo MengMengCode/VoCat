@@ -97,6 +97,47 @@ func TestEnsureAdminRevokesSessionOnPasswordChange(t *testing.T) {
 	}
 }
 
+func TestResetAdminCredentialsChangesUsernameAndPasswordWithoutOldPassword(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
+	credentials, err := service.Login(ctx, "admin", "correct-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.ResetAdminCredentials(ctx, "new-admin", "replacement-password"); err != nil {
+		t.Fatalf("ResetAdminCredentials() error = %v", err)
+	}
+	if _, err := service.Login(ctx, "admin", "correct-password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("old credentials error = %v, want ErrInvalidCredentials", err)
+	}
+	if _, err := service.Login(ctx, "new-admin", "replacement-password"); err != nil {
+		t.Fatalf("new credentials login error = %v", err)
+	}
+	if _, err := service.Authenticate(ctx, credentials.SessionToken); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("old session error = %v, want ErrUnauthorized", err)
+	}
+}
+
+func TestResetAdminCredentialsValidatesInput(t *testing.T) {
+	service := newTestService(t)
+	for _, test := range []struct {
+		name     string
+		username string
+		password string
+	}{
+		{name: "empty username", password: "replacement-password"},
+		{name: "control whitespace", username: "bad\tname", password: "replacement-password"},
+		{name: "short password", username: "admin", password: "short"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := service.ResetAdminCredentials(context.Background(), test.username, test.password); err == nil {
+				t.Fatal("ResetAdminCredentials() accepted invalid input")
+			}
+		})
+	}
+}
+
 func TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
