@@ -1,0 +1,80 @@
+name: Pull request size limit
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-size-limit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  enforce-size-limit:
+    name: Enforce 5,000-line limit
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      MAX_CHANGED_LINES: "5000"
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Reject oversized pull request
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          api_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"
+          response="$({
+            curl --fail-with-body --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${api_url}"
+          })"
+
+          additions="$(jq -r '.additions' <<<"${response}")"
+          deletions="$(jq -r '.deletions' <<<"${response}")"
+          if [[ ! "${additions}" =~ ^[0-9]+$ || ! "${deletions}" =~ ^[0-9]+$ ]]; then
+            echo "Unable to read pull request line statistics." >&2
+            exit 1
+          fi
+
+          changed_lines=$((additions + deletions))
+          {
+            echo "### Pull request size"
+            echo
+            echo "- Additions: ${additions}"
+            echo "- Deletions: ${deletions}"
+            echo "- Total changed lines: ${changed_lines}"
+            echo "- Limit: ${MAX_CHANGED_LINES}"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+          if (( changed_lines <= MAX_CHANGED_LINES )); then
+            echo "Pull request is within the ${MAX_CHANGED_LINES}-line limit."
+            exit 0
+          fi
+
+          curl --fail-with-body --silent --show-error \
+            --request PATCH \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${api_url}" \
+            --data '{"state":"closed"}' >/dev/null
+
+          message="This pull request changes ${changed_lines} lines (${additions} additions + ${deletions} deletions), exceeding the repository limit of ${MAX_CHANGED_LINES} changed lines. It has been closed automatically. Please split the changes into smaller pull requests."
+          comment_payload="$(jq -nc --arg body "${message}" '{body: $body}')"
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --data "${comment_payload}" >/dev/null
+
+          echo "::error::Pull request changes ${changed_lines} lines; the maximum is ${MAX_CHANGED_LINES}."
+          exit 1

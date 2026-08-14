@@ -118,6 +118,24 @@ func (s *Service) EnsureAdminIfMissing(ctx context.Context, username string, pas
 	return true, nil
 }
 
+// ResetAdminCredentials replaces the single administrator without requiring
+// the previous credentials. It is intended for trusted local recovery flows
+// such as the root-only management CLI. Store.SetAdmin atomically revokes all
+// existing sessions when the credentials change.
+func (s *Service) ResetAdminCredentials(ctx context.Context, username string, password string) error {
+	username = strings.TrimSpace(username)
+	if len(username) < 1 || len(username) > 64 || strings.ContainsAny(username, "\r\n\t") {
+		return errors.New("administrator username must contain between 1 and 64 characters without control whitespace")
+	}
+	if len(password) < 12 || len(password) > 1024 {
+		return errors.New("administrator password must contain between 12 and 1024 characters")
+	}
+	if err := s.EnsureAdmin(ctx, username, password); err != nil {
+		return fmt.Errorf("auth: reset administrator credentials: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) Login(ctx context.Context, username string, password string) (Credentials, error) {
 	admin, err := s.store.AdminByUsername(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {

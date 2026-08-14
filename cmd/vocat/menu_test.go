@@ -72,3 +72,20 @@ func TestMenuIncludesWebPortOptionInBothLanguages(t *testing.T) {
 		}
 	}
 }
+
+func TestMenuCredentialResetPromptsDoNotRequestCurrentPassword(t *testing.T) {
+	for _, lang := range []string{"zh", "en"} {
+		menu := newMenu(lang)
+		prompts := strings.Join([]string{
+			menu.newUsername("admin"),
+			menu.newPassword(),
+			menu.confirmPassword(),
+		}, "\n")
+		if strings.Contains(strings.ToLower(prompts), "current password") || strings.Contains(prompts, "当前密码") {
+			t.Fatalf("%s credential reset still requests the current password: %q", lang, prompts)
+		}
+		if !strings.Contains(prompts, "admin") {
+			t.Fatalf("%s username prompt does not show the current username: %q", lang, prompts)
+		}
+	}
+}

@@ -88,7 +88,7 @@ func menuEnvFilePath() string {
 	return envFilePath
 }
 
-// runMenu is the interactive lifecycle menu: toggle language, change password,
+// runMenu is the interactive lifecycle menu: toggle language, reset credentials,
 // change the Web listener port, restart the systemd unit, self-update, or fully
 // uninstall vocat. It must run as root on the host (needs systemctl + the 0600
 // env file). Docker deployments do not use it.
@@ -128,7 +128,7 @@ func runMenu(logger *slog.Logger) error {
 				fmt.Println(menu.errorPrefix(err))
 			}
 		case "2":
-			if err := menuChangePassword(reader, menu); err != nil {
+			if err := menuResetAdminCredentials(reader, menu); err != nil {
 				fmt.Println(menu.errorPrefix(err))
 			}
 		case "3":
@@ -193,7 +193,7 @@ func loadMenuLanguage() (string, error) {
 	return "en", nil
 }
 
-func menuChangePassword(reader *bufio.Reader, m *menu) error {
+func menuResetAdminCredentials(reader *bufio.Reader, m *menu) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("%w: %v", errMenuConfig, err)
@@ -216,10 +216,14 @@ func menuChangePassword(reader *bufio.Reader, m *menu) error {
 		return fmt.Errorf("%w: %v", errMenuStore, err)
 	}
 
-	fmt.Print(m.currentPassword())
-	currentPw, err := readPasswordMasked()
+	fmt.Print(m.newUsername(admin.Username))
+	username, err := reader.ReadString('\n')
 	if err != nil {
-		return err
+		return fmt.Errorf("read administrator username: %w", err)
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		username = admin.Username
 	}
 	fmt.Print(m.newPassword())
 	newPw, err := readPasswordMasked()
@@ -235,10 +239,7 @@ func menuChangePassword(reader *bufio.Reader, m *menu) error {
 	if newPw != confirmPw {
 		return errPasswordsDiffer
 	}
-	if err := authService.ChangePassword(ctx, admin.Username, currentPw, newPw); err != nil {
-		if errors.Is(err, auth.ErrInvalidCredentials) {
-			return errCurrentWrong
-		}
+	if err := authService.ResetAdminCredentials(ctx, username, newPw); err != nil {
 		return fmt.Errorf("%w: %v", errMenuAuth, err)
 	}
 	fmt.Println(m.passwordChanged())
@@ -563,7 +564,6 @@ func menuUninstall(reader *bufio.Reader, m *menu) error {
 
 // menu-local sentinel errors so callers can map them to localized messages.
 var (
-	errCurrentWrong       = errors.New("menu: current password is incorrect")
 	errPasswordsDiffer    = errors.New("menu: passwords do not match")
 	errNoSystemctl        = errors.New("menu: systemctl not found")
 	errRestartFailed      = errors.New("menu: restart failed")
@@ -588,17 +588,17 @@ func (m *menu) msg(key string) string {
 	table := map[string][2]string{
 		"title":               {"vocat 管理菜单", "vocat management menu"},
 		"opt_lang":            {"1) 切换中英文", "1) Toggle language"},
-		"opt_change":          {"2) 修改账号密码", "2) Change admin password"},
+		"opt_change":          {"2) 修改账号密码", "2) Change admin credentials"},
 		"opt_port":            {"3) 修改 Web 监听端口", "3) Change Web listening port"},
 		"opt_restart":         {"4) 重启软件", "4) Restart software"},
 		"opt_update":          {"5) 更新软件", "5) Update software"},
 		"opt_uninstall":       {"0) 卸载软件", "0) Uninstall software"},
 		"prompt":              {"请选择: ", "Select: "},
 		"invalid":             {"无效选项，请重试。按 Ctrl+C 退出。", "Invalid choice, try again. Press Ctrl+C to exit."},
-		"cur_pw":              {"当前密码: ", "Current password: "},
+		"new_username":        {"新用户名（直接回车保留 %s）: ", "New username (Enter to keep %s): "},
 		"new_pw":              {"新密码 (至少 12 位): ", "New password (min 12 chars): "},
 		"confirm_pw":          {"确认新密码: ", "Confirm new password: "},
-		"pw_changed":          {"密码已修改。重启后仍然有效。", "Password changed. Survives restart."},
+		"pw_changed":          {"管理员账号密码已修改，现有 Web 会话已退出。", "Administrator credentials changed; existing Web sessions were signed out."},
 		"current_web_address": {"当前 Web 监听地址: %s", "Current Web listening address: %s"},
 		"new_web_port":        {"新端口 (1-65535，直接回车取消，当前 %s): ", "New port (1-65535, Enter to cancel, current %s): "},
 		"web_port_cancelled":  {"已取消修改端口。", "Web port change cancelled."},
@@ -632,10 +632,12 @@ func (m *menu) msg(key string) string {
 	return entry[zh]
 }
 
-func (m *menu) title() string           { return m.msg("title") }
-func (m *menu) prompt() string          { return m.msg("prompt") }
-func (m *menu) invalid() string         { return m.msg("invalid") }
-func (m *menu) currentPassword() string { return m.msg("cur_pw") }
+func (m *menu) title() string   { return m.msg("title") }
+func (m *menu) prompt() string  { return m.msg("prompt") }
+func (m *menu) invalid() string { return m.msg("invalid") }
+func (m *menu) newUsername(current string) string {
+	return fmt.Sprintf(m.msg("new_username"), current)
+}
 func (m *menu) newPassword() string     { return m.msg("new_pw") }
 func (m *menu) confirmPassword() string { return m.msg("confirm_pw") }
 func (m *menu) passwordChanged() string { return m.msg("pw_changed") }
@@ -670,11 +672,6 @@ func (m *menu) options() []string {
 
 func (m *menu) errorPrefix(err error) string {
 	switch {
-	case errors.Is(err, errCurrentWrong):
-		if m.lang == "en" {
-			return "Current password is incorrect."
-		}
-		return "当前密码不正确。"
 	case errors.Is(err, errPasswordsDiffer):
 		if m.lang == "en" {
 			return "Passwords do not match."
