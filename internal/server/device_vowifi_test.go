@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"vocat/internal/device"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 	vowifiruntime "vocat/internal/vowifi/runtime"
@@ -254,6 +255,50 @@ func TestVoWiFiEnableUpdatesPolicyAndQueuesRuntime(t *testing.T) {
 	}
 	if !stored.VoWiFiEnabled {
 		t.Fatal("VoWiFi policy was not persisted")
+	}
+}
+
+func TestVoWiFiEnablePersistsActiveCardPolicy(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	config := store.Device{ID: "ec20", Name: "EC20"}
+	if err := database.UpsertDevice(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	iccid := "8986001234567890123"
+	devices := fakeDeviceController{entry: device.Device{
+		ID:         "ec20",
+		Discovered: true,
+		Snapshot:   &device.Snapshot{DeviceID: "ec20", ICCID: iccid, IMSI: "310260123456789"},
+	}}
+	controller := &fakeVoWiFiController{state: vowifi.State{DeviceID: "ec20", Phase: vowifi.PhaseIdle}}
+	server := &Server{
+		store:               database,
+		devices:             devices,
+		vowifi:              controller,
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
+		maxRequestBodyBytes: 4096,
+	}
+	request := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/devices/ec20/vowifi",
+		bytes.NewBufferString(`{"enabled":true}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handleVoWiFiEnabled(response, request, config, true)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	policy, err := database.CardPolicy(context.Background(), iccid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.VoWiFiEnabled || !policy.AirplaneEnabled || policy.NetworkEnabled {
+		t.Fatalf("active card policy = %+v, want VoWiFi+airplane on and network off", policy)
 	}
 }
 

@@ -345,61 +345,150 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 	// which normally takes longer than the server's ordinary response deadline.
 	controller := http.NewResponseController(w)
 	_ = controller.SetWriteDeadline(time.Time{})
-	if err := s.quiesceVoWiFiForESIM(r.Context(), configID); err != nil {
+	transaction, err := s.quiesceVoWiFiForESIMTransaction(r.Context(), configID)
+	if err != nil {
 		writeError(w, http.StatusConflict, "vowifi_quiesce_failed", err.Error())
 		return
 	}
+	if transaction != nil && transaction.physicalID == "" {
+		transaction.physicalID = physicalID
+	}
 	releaseSubscriberChange, err := s.beginVoWiFiSubscriberChange(r.Context(), configID)
 	if err != nil {
+		if restoreErr := s.restoreESIMVoWiFiTransaction(transaction); restoreErr != nil {
+			s.logger.Error("restore VoWiFi after subscriber guard failure", "device_id", configID, "error", restoreErr)
+		}
 		writeError(w, http.StatusConflict, "vowifi_subscriber_change_failed", err.Error())
 		return
 	}
-	defer releaseSubscriberChange()
+	released := false
+	defer func() {
+		if !released {
+			releaseSubscriberChange()
+		}
+	}()
 	if err := s.devices.ESIMSwitchProfile(r.Context(), physicalID, iccid, request.AIDHex); err != nil {
+		// The runtime guard blocks all new VoWiFi work, so release it before
+		// restoring the old card.  A failed modem preflight must be invisible to
+		// the user: the old policy and live session are restored as one operation.
+		releaseSubscriberChange()
+		released = true
+		if restoreErr := s.restoreESIMVoWiFiTransaction(transaction); restoreErr != nil {
+			s.logger.Error("restore VoWiFi after failed eSIM switch", "device_id", configID, "error", restoreErr)
+		}
 		s.writeDeviceError(w, err)
+		return
+	}
+	// The device layer verifies the requested ICCID before returning.  The guard
+	// can now be released; the target card's saved strategy is then reconciled
+	// before acknowledging the switch to the caller.
+	releaseSubscriberChange()
+	released = true
+	if err := s.applyESIMCardPolicy(r.Context(), configID, physicalID, iccid); err != nil {
+		s.logger.Error("apply target card policy after eSIM switch", "device_id", configID, "iccid", iccid, "error", err)
+		writeError(w, http.StatusConflict, "card_policy_apply_failed", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"status": "switched", "iccid": iccid, "verified": true}})
 }
 
-// quiesceVoWiFiForESIM prevents an in-flight USIM AKA exchange from racing an
-// ES10c EnableProfile command. A profile switch changes the subscriber
-// identity, so the old card's desired VoWiFi session is intentionally left
-// disabled; the new card can then be enabled under its own policy.
+// esimVoWiFiTransaction captures the state changed while a profile switch is
+// being prepared.  Quiescing VoWiFi is deliberately temporary: a failed
+// EnableProfile/preflight must put the old subscriber back exactly where it
+// was, while a successful switch receives the target card's stored policy.
+type esimVoWiFiTransaction struct {
+	configID             string
+	physicalID           string
+	previousConfig       store.Device
+	configLoaded         bool
+	configChanged        bool
+	previousICCID        string
+	previousPolicy       store.CardPolicy
+	previousPolicyExists bool
+	previousRuntime      vowifi.State
+	runtimeKnown         bool
+}
+
+// quiesceVoWiFiForESIM is kept for profile disable/delete and the Telegram
+// command paths.  Those operations intentionally leave VoWiFi disabled; only
+// a switch gets the transaction/rollback semantics below.
 func (s *Server) quiesceVoWiFiForESIM(ctx context.Context, configID string) error {
+	_, err := s.quiesceVoWiFiForESIMTransaction(ctx, configID)
+	return err
+}
+
+func (s *Server) quiesceVoWiFiForESIMTransaction(ctx context.Context, configID string) (*esimVoWiFiTransaction, error) {
 	configID = strings.TrimSpace(configID)
+	transaction := &esimVoWiFiTransaction{configID: configID}
 	if configID == "" || s.vowifi == nil {
-		return nil
+		return transaction, nil
 	}
 	state, stateErr := s.vowifi.State(configID)
 	if stateErr != nil {
-		return fmt.Errorf("stop VoWiFi before subscriber change: %w", stateErr)
+		return nil, fmt.Errorf("stop VoWiFi before subscriber change: %w", stateErr)
 	}
+	transaction.previousRuntime = state
+	transaction.runtimeKnown = true
+	transaction.previousICCID = strings.TrimSpace(state.ICCID)
 
-	var previous *store.Device
 	if s.store != nil {
 		config, err := s.store.Device(ctx, configID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("load device policy before subscriber change: %w", err)
+			return nil, fmt.Errorf("load device policy before subscriber change: %w", err)
 		}
-		if err == nil && config.VoWiFiEnabled {
-			copy := config
-			previous = &copy
-			config.VoWiFiEnabled = false
-			if err := s.store.UpsertDevice(ctx, config); err != nil {
-				return fmt.Errorf("disable VoWiFi policy before subscriber change: %w", err)
+		if err == nil {
+			transaction.previousConfig = config
+			transaction.configLoaded = true
+			entry, physicalID, present := s.physicalForConfig(config)
+			if present {
+				transaction.physicalID = physicalID
+			}
+			if present && entry.Snapshot != nil {
+				transaction.previousICCID = strings.TrimSpace(entry.Snapshot.ICCID)
+			}
+			if transaction.previousICCID != "" {
+				policy, policyErr := s.store.CardPolicy(ctx, transaction.previousICCID)
+				if policyErr == nil {
+					transaction.previousPolicy = policy
+					transaction.previousPolicyExists = true
+				} else if !errors.Is(policyErr, store.ErrNotFound) {
+					return nil, fmt.Errorf("load card policy before subscriber change: %w", policyErr)
+				}
+			}
+			if config.VoWiFiEnabled {
+				transaction.configChanged = true
+				config.VoWiFiEnabled = false
+				if err := s.store.UpsertDevice(ctx, config); err != nil {
+					return nil, fmt.Errorf("disable VoWiFi policy before subscriber change: %w", err)
+				}
 			}
 		}
+	}
+
+	restoreOnFailure := func(operationErr error) (*esimVoWiFiTransaction, error) {
+		if transaction.configChanged && transaction.configLoaded {
+			if restoreErr := s.store.UpsertDevice(context.Background(), transaction.previousConfig); restoreErr != nil {
+				s.logger.Error("restore temporary VoWiFi policy after quiesce failure", "device_id", configID, "error", restoreErr)
+			}
+		}
+		// If stopping failed before the guard was acquired, request the old
+		// desired state again.  The runtime may still be finishing its cleanup;
+		// an asynchronous retry is safer than leaving the card permanently off.
+		if transaction.runtimeKnown && (transaction.previousRuntime.Enabled || transaction.previousRuntime.Active || transaction.previousConfig.VoWiFiEnabled) {
+			if current, currentErr := s.vowifi.State(configID); currentErr == nil && !current.Enabled && !current.Active {
+				if _, restoreErr := s.vowifi.RequestEnabled(configID, true); restoreErr != nil {
+					s.logger.Error("restore VoWiFi runtime after quiesce failure", "device_id", configID, "error", restoreErr)
+				}
+			}
+		}
+		return nil, operationErr
 	}
 
 	needsStop := state.Enabled || state.Active ||
 		(state.Phase != vowifi.PhaseIdle && state.Phase != vowifi.PhaseFailed)
 	if needsStop {
 		if _, err := s.vowifi.RequestEnabled(configID, false); err != nil {
-			if previous != nil {
-				_ = s.store.UpsertDevice(context.Background(), *previous)
-			}
-			return fmt.Errorf("stop VoWiFi before subscriber change: %w", err)
+			return restoreOnFailure(fmt.Errorf("stop VoWiFi before subscriber change: %w", err))
 		}
 	}
 
@@ -410,18 +499,120 @@ func (s *Server) quiesceVoWiFiForESIM(ctx context.Context, configID string) erro
 	for {
 		state, err := s.vowifi.State(configID)
 		if err != nil {
-			return fmt.Errorf("confirm VoWiFi stopped before subscriber change: %w", err)
+			return restoreOnFailure(fmt.Errorf("confirm VoWiFi stopped before subscriber change: %w", err))
 		}
 		if !state.Enabled && !state.Active &&
 			(state.Phase == vowifi.PhaseIdle || state.Phase == vowifi.PhaseFailed) {
-			return nil
+			return transaction, nil
 		}
 		select {
 		case <-waitContext.Done():
-			return fmt.Errorf("wait for VoWiFi to stop before subscriber change: %w", waitContext.Err())
+			return restoreOnFailure(fmt.Errorf("wait for VoWiFi to stop before subscriber change: %w", waitContext.Err()))
 		case <-ticker.C:
 		}
 	}
+}
+
+// restoreESIMVoWiFiTransaction restores the pre-switch policy and runtime.
+// It is called after releasing the subscriber guard because RequestEnabled is
+// intentionally rejected while that guard is held.
+func (s *Server) restoreESIMVoWiFiTransaction(transaction *esimVoWiFiTransaction) error {
+	if transaction == nil || !transaction.configLoaded || s.store == nil {
+		return nil
+	}
+	config := transaction.previousConfig
+	policy := transaction.previousPolicy
+	if !transaction.previousPolicyExists {
+		policy = defaultCardPolicy(transaction.previousICCID)
+		policy.APN = config.APN
+		policy.NetworkEnabled = config.NetworkEnabled
+		policy.VoWiFiEnabled = config.VoWiFiEnabled || transaction.previousRuntime.Enabled || transaction.previousRuntime.Active
+		policy.AirplaneEnabled = policy.VoWiFiEnabled
+		policy.Source = "rollback"
+	}
+	if transaction.previousConfig.VoWiFiEnabled || transaction.previousRuntime.Enabled || transaction.previousRuntime.Active {
+		// The live session is authoritative when an older build had a stale
+		// per-card policy.  Do not reproduce the old build's permanent disable.
+		policy.VoWiFiEnabled = true
+		policy.AirplaneEnabled = true
+		policy.NetworkEnabled = false
+	}
+	return s.applyESIMEnvironment(context.Background(), transaction.physicalID, config, policy)
+}
+
+func (s *Server) applyESIMCardPolicy(ctx context.Context, configID, physicalID, iccid string) error {
+	if s.store == nil {
+		return nil
+	}
+	config, err := s.store.Device(ctx, configID)
+	if err != nil {
+		return fmt.Errorf("load device after profile switch: %w", err)
+	}
+	policy, policyErr := s.store.CardPolicy(ctx, strings.TrimSpace(iccid))
+	if errors.Is(policyErr, store.ErrNotFound) {
+		policy = defaultCardPolicy(iccid)
+		policy.APN = config.APN
+		policy.Source = "default"
+	} else if policyErr != nil {
+		return fmt.Errorf("load target card policy: %w", policyErr)
+	}
+	return s.applyESIMEnvironment(ctx, physicalID, config, policy)
+}
+
+// applyESIMEnvironment persists one card's desired policy and reconciles the
+// modem/runtime to it.  It is shared by switch success and switch rollback so
+// both paths use identical VoWiFi/airplane/cellular ordering.
+func (s *Server) applyESIMEnvironment(ctx context.Context, physicalID string, config store.Device, policy store.CardPolicy) error {
+	if strings.TrimSpace(policy.ICCID) == "" {
+		// A unit/test path can lack a live ICCID.  Still restore the device row and
+		// runtime intent without manufacturing an invalid card-policy row.
+		config.VoWiFiEnabled = policy.VoWiFiEnabled
+		config.NetworkEnabled = policy.NetworkEnabled && !policy.VoWiFiEnabled && !policy.AirplaneEnabled
+		if err := s.store.UpsertDevice(ctx, config); err != nil {
+			return fmt.Errorf("persist device policy: %w", err)
+		}
+		if s.vowifi != nil {
+			state, stateErr := s.vowifi.State(config.ID)
+			if policy.VoWiFiEnabled {
+				if stateErr == nil && state.Enabled {
+					_, stateErr = s.vowifi.RequestReconnect(config.ID)
+				} else {
+					_, stateErr = s.vowifi.RequestEnabled(config.ID, true)
+				}
+			} else if stateErr == nil && (state.Enabled || state.Active) {
+				_, stateErr = s.vowifi.RequestEnabled(config.ID, false)
+			}
+			if stateErr != nil {
+				return fmt.Errorf("restore VoWiFi runtime: %w", stateErr)
+			}
+		}
+		return nil
+	}
+	if policy.IPVersion == "" {
+		policy.IPVersion = "IPV4V6"
+	}
+	if policy.VoWiFiEnabled {
+		policy.AirplaneEnabled = true
+		policy.NetworkEnabled = false
+	}
+	policy.Source = firstNonEmpty(policy.Source, "manual")
+	config.APN = policy.APN
+	config.VoWiFiEnabled = policy.VoWiFiEnabled
+	config.NetworkEnabled = policy.NetworkEnabled && !policy.VoWiFiEnabled && !policy.AirplaneEnabled
+	if err := s.store.UpsertCardPolicy(ctx, policy); err != nil {
+		return fmt.Errorf("persist target card policy: %w", err)
+	}
+	if s.devices == nil {
+		if err := s.store.UpsertDevice(ctx, config); err != nil {
+			return fmt.Errorf("persist device policy: %w", err)
+		}
+		return nil
+	}
+	snapshot := automaticTaskEnvironmentSnapshot{config: config, policy: policy}
+	if err := s.restoreAutomaticTaskEnvironment(physicalID, snapshot); err != nil {
+		return fmt.Errorf("reconcile target card policy: %w", err)
+	}
+	return nil
 }
 
 type voWiFiSubscriberChangeGuard interface {

@@ -102,8 +102,9 @@ func (controller *recordingVoWiFiInvalidator) BeginSubscriberChange(
 
 type recordingESIMDeviceController struct {
 	fakeDeviceController
-	events *[]string
-	guard  *recordingVoWiFiInvalidator
+	events    *[]string
+	guard     *recordingVoWiFiInvalidator
+	switchErr error
 }
 
 func (controller *recordingESIMDeviceController) ESIMSwitchProfile(context.Context, string, string, string) error {
@@ -118,7 +119,7 @@ func (controller *recordingESIMDeviceController) ESIMSwitchProfile(context.Conte
 	if controller.events != nil {
 		*controller.events = append(*controller.events, "switch")
 	}
-	return nil
+	return controller.switchErr
 }
 
 func (controller *recordingESIMDeviceController) ESIMDisableProfile(context.Context, string, string, string) error {
@@ -454,7 +455,73 @@ func TestEsimSwitchStopsVoWiFiAndPersistsDisabledPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if stored.VoWiFiEnabled {
-		t.Fatal("VoWiFi device policy remained enabled after profile switch")
+		t.Fatal("target card's default VoWiFi policy should remain disabled")
+	}
+}
+
+func TestEsimSwitchFailureRestoresVoWiFiPolicy(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	config := store.Device{ID: "dev1", Name: "410", VoWiFiEnabled: true}
+	if err := database.UpsertDevice(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	oldICCID := "8900000000000000002"
+	if err := database.UpsertCardPolicy(context.Background(), store.CardPolicy{
+		ICCID: oldICCID, VoWiFiEnabled: true, AirplaneEnabled: true, Source: "manual",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entry := device.Device{
+		ID:         "dev1",
+		Discovered: true,
+		Snapshot:   &device.Snapshot{DeviceID: "dev1", ICCID: oldICCID, IMSI: "310260123456789"},
+	}
+	controller := &recordingVoWiFiInvalidator{state: vowifi.State{
+		DeviceID: "dev1", Enabled: true, Active: true, Phase: vowifi.PhaseAccessReady,
+	}, events: new([]string)}
+	devices := &recordingESIMDeviceController{
+		fakeDeviceController: fakeDeviceController{entry: entry},
+		guard:                controller,
+		switchErr:            errors.New("enable profile rejected"),
+	}
+	server := &Server{
+		store:               database,
+		logger:              regionTestLogger(),
+		maxRequestBodyBytes: 4096,
+		devices:             devices,
+		vowifi:              controller,
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/esim/actions/switch",
+		strings.NewReader(`{"iccid":"8900000000000000001"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handleESIM(response, request, []string{"actions", "switch"}, "dev1", "dev1", true)
+	if response.Code == http.StatusOK {
+		t.Fatalf("failed switch unexpectedly succeeded: %s", response.Body.String())
+	}
+	stored, err := database.Device(context.Background(), "dev1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.VoWiFiEnabled {
+		t.Fatal("failed switch permanently disabled the old VoWiFi device policy")
+	}
+	policy, err := database.CardPolicy(context.Background(), oldICCID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.VoWiFiEnabled || !policy.AirplaneEnabled {
+		t.Fatalf("old card policy was not restored: %+v", policy)
+	}
+	if len(controller.enabled) < 2 || controller.enabled[0] || !controller.enabled[len(controller.enabled)-1] {
+		t.Fatalf("VoWiFi requests did not stop then restore the session: %v", controller.enabled)
 	}
 }
 

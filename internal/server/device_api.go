@@ -834,10 +834,53 @@ func (s *Server) handleVoWiFiEnabled(
 	}
 
 	previous := config.VoWiFiEnabled
+	entry, _, _ := s.physicalForConfig(config)
+	activeICCID := ""
+	if entry.Snapshot != nil {
+		activeICCID = strings.TrimSpace(entry.Snapshot.ICCID)
+	}
+	var previousCardPolicy store.CardPolicy
+	var nextCardPolicy store.CardPolicy
+	cardPolicyExists := false
+	if activeICCID != "" {
+		policy, policyErr := s.store.CardPolicy(r.Context(), activeICCID)
+		if policyErr == nil {
+			previousCardPolicy = policy
+			nextCardPolicy = policy
+			cardPolicyExists = true
+		} else if errors.Is(policyErr, store.ErrNotFound) {
+			nextCardPolicy = defaultCardPolicy(activeICCID)
+			nextCardPolicy.APN = config.APN
+		} else {
+			s.writeStoreError(w, policyErr)
+			return true
+		}
+		nextCardPolicy.VoWiFiEnabled = request.Enabled
+		if request.Enabled {
+			// VoWiFi owns an RF-off session.  Keep the per-card policy in the
+			// same safe shape used by the card-policy endpoint.
+			nextCardPolicy.AirplaneEnabled = true
+			nextCardPolicy.NetworkEnabled = false
+		} else if previous {
+			// Stopping VoWiFi must not briefly expose cellular attach before the
+			// caller explicitly turns airplane mode off.
+			nextCardPolicy.AirplaneEnabled = true
+		}
+		nextCardPolicy.Source = "manual"
+	}
+
 	config.VoWiFiEnabled = request.Enabled
 	if err := s.store.UpsertDevice(r.Context(), config); err != nil {
 		s.writeStoreError(w, err)
 		return true
+	}
+	if activeICCID != "" {
+		if err := s.store.UpsertCardPolicy(r.Context(), nextCardPolicy); err != nil {
+			config.VoWiFiEnabled = previous
+			_ = s.store.UpsertDevice(context.Background(), config)
+			s.writeStoreError(w, err)
+			return true
+		}
 	}
 	state, err := s.vowifi.RequestEnabled(config.ID, request.Enabled)
 	if err != nil {
@@ -863,6 +906,15 @@ func (s *Server) handleVoWiFiEnabled(
 				"device_id", config.ID,
 				"error", restoreErr,
 			)
+		}
+		if activeICCID != "" {
+			if cardPolicyExists {
+				if restoreErr := s.store.UpsertCardPolicy(context.Background(), previousCardPolicy); restoreErr != nil {
+					s.logger.Error("restore card policy after rejected VoWiFi operation", "device_id", config.ID, "iccid", activeICCID, "error", restoreErr)
+				}
+			} else if restoreErr := s.store.DeleteCardPolicy(context.Background(), activeICCID); restoreErr != nil && !errors.Is(restoreErr, store.ErrNotFound) {
+				s.logger.Error("remove new card policy after rejected VoWiFi operation", "device_id", config.ID, "iccid", activeICCID, "error", restoreErr)
+			}
 		}
 		s.writeVoWiFiError(w, err)
 		return true
