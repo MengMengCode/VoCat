@@ -84,6 +84,8 @@ func ResolveCarrierProfile(identity SIMIdentity) CarrierProfile {
 		profile.Source = CarrierSourceBuiltin
 		profile.EPDG = "weconnect.globe.com.ph"
 		profile.IKEIdentityType = 2 // USER_FQDN / ID_FQDN
+		profile.AllowSHA1 = true
+		profile.UseMODP1024 = true
 	}
 	return profile
 }
