@@ -712,8 +712,12 @@ func TestManagerCoalescesReconnectWhileLifecycleOperationIsBusy(t *testing.T) {
 	if _, err := manager.RequestReconnect("ec20"); err != nil {
 		t.Fatalf("second queued reconnect error = %v", err)
 	}
-	if _, err := manager.RequestEnabled("ec20", true); !errors.Is(err, ErrOperationInProgress) {
-		t.Fatalf("non-reconnect operation error = %v, want ErrOperationInProgress", err)
+	if _, err := manager.RequestEnabled("ec20", true); err != nil {
+		// RequestEnabled is a desired-state operation while a lifecycle worker
+		// is busy. Release the deliberately blocked operation before failing so
+		// t.Cleanup cannot wait forever in Manager.Close.
+		close(release)
+		t.Fatalf("repeated desired enable was rejected: %v", err)
 	}
 	manager.mu.Lock()
 	pending := manager.entries["ec20"].reconnectPending
