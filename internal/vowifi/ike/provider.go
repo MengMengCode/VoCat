@@ -395,6 +395,13 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 			break
 		}
 		if len(action.Response) == 0 {
+			if packet, parseErr := parseEAPPacket(eapPayload.Body); parseErr == nil {
+				return nil, fmt.Errorf(
+					"ike: EAP state machine produced no response: code=%d identifier=%d type=%d method_started=%t challenge_complete=%t failure_expected=%t",
+					packet.Code, packet.Identifier, packet.Type,
+					aka.methodStarted, aka.challengeComplete, aka.failureExpected,
+				)
+			}
 			return nil, errors.New("ike: EAP state machine produced no response")
 		}
 		messageID++
