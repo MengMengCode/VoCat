@@ -224,6 +224,82 @@ func TestMigration9NormalizesVoWiFiAirplanePolicy(t *testing.T) {
 	}
 }
 
+func TestMigration18RepairsLegacyVoWiFiAirplaneConstraint(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-rf-safe-policy.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`PRAGMA foreign_keys = ON`,
+		`CREATE TABLE card_policies (
+			iccid TEXT PRIMARY KEY,
+			network_enabled INTEGER NOT NULL DEFAULT 0 CHECK (network_enabled IN (0, 1)),
+			vowifi_enabled INTEGER NOT NULL DEFAULT 0 CHECK (vowifi_enabled IN (0, 1)),
+			airplane_enabled INTEGER NOT NULL DEFAULT 0 CHECK (airplane_enabled IN (0, 1)),
+			apn TEXT NOT NULL DEFAULT '',
+			ip_version TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			custom_phone_number TEXT NOT NULL DEFAULT '',
+			CHECK (NOT (vowifi_enabled = 1 AND airplane_enabled = 1))
+		)`,
+		`CREATE TABLE card_apn_profiles (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			iccid TEXT NOT NULL,
+			apn TEXT NOT NULL,
+			ip_version TEXT NOT NULL DEFAULT 'IPV4V6' CHECK (ip_version IN ('IP', 'IPV6', 'IPV4V6')),
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			username TEXT NOT NULL DEFAULT '',
+			password TEXT NOT NULL DEFAULT '',
+			proxy TEXT NOT NULL DEFAULT '',
+			mcc TEXT NOT NULL DEFAULT '',
+			mnc TEXT NOT NULL DEFAULT '',
+			roaming_ip_version TEXT NOT NULL DEFAULT 'IP' CHECK (roaming_ip_version IN ('IP', 'IPV6', 'IPV4V6')),
+			auth_type TEXT NOT NULL DEFAULT 'NONE' CHECK (auth_type IN ('NONE', 'PAP', 'CHAP', 'PAP_OR_CHAP')),
+			UNIQUE (iccid, apn, ip_version),
+			FOREIGN KEY (iccid) REFERENCES card_policies(iccid) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX card_apn_profiles_iccid_idx ON card_apn_profiles(iccid, id)`,
+		`INSERT INTO card_policies (
+			iccid, network_enabled, vowifi_enabled, airplane_enabled,
+			apn, ip_version, source, created_at, updated_at, custom_phone_number
+		) VALUES ('8900000000000000003', 0, 0, 0, 'ims', 'IPV4V6', 'legacy', 100, 100, '')`,
+		`INSERT INTO card_apn_profiles (
+			iccid, apn, ip_version, created_at, updated_at, username, password,
+			proxy, mcc, mnc, roaming_ip_version, auth_type
+		) VALUES ('8900000000000000003', 'ims', 'IPV4V6', 100, 100, '', '', '', '234', '15', 'IP', 'NONE')`,
+		`PRAGMA user_version = 17`,
+	} {
+		if _, err := raw.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("create legacy schema: %v", err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestStore(t, path)
+	defer database.Close()
+	if err := database.UpsertCardPolicy(ctx, CardPolicy{
+		ICCID: "8900000000000000003", VoWiFiEnabled: true, AirplaneEnabled: true,
+		APN: "ims", IPVersion: "IPV4V6", Source: "manual",
+	}); err != nil {
+		t.Fatalf("repaired policy rejected VoWiFi+airplane: %v", err)
+	}
+	policy, err := database.CardPolicy(ctx, "8900000000000000003")
+	if err != nil || !policy.VoWiFiEnabled || !policy.AirplaneEnabled {
+		t.Fatalf("repaired policy = %+v, %v", policy, err)
+	}
+	profiles, err := database.ListCardAPNProfiles(ctx, "8900000000000000003")
+	if err != nil || len(profiles) != 1 || profiles[0].APN != "ims" {
+		t.Fatalf("APN profiles after policy repair = %+v, %v", profiles, err)
+	}
+}
+
 func TestMigration8DefaultsExistingDevicesToPCIeType(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "device-type.db")
