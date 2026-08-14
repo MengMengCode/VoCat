@@ -126,6 +126,16 @@ func TestDeriveEPDGUsesExplicitPLMNAndNeverIMSIHeuristics(t *testing.T) {
 			want: "epdg.epc.mnc260.mcc310.pub.3gppnetwork.org",
 		},
 		{
+			name: "AT&T 310280 uses carrier endpoint",
+			identity: SIMIdentity{
+				ICCID:   "89012804332291663965",
+				IMSI:    "310280229187733",
+				HomeMCC: "310",
+				HomeMNC: "280",
+			},
+			want: "epdg.epc.att.net",
+		},
+		{
 			name: "explicit endpoint",
 			identity: SIMIdentity{
 				ICCID:   "one",

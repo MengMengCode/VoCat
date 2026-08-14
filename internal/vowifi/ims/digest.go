@@ -168,6 +168,7 @@ func authenticateAKA(
 	provider vowifi.AKAProvider,
 	identity vowifi.SIMIdentity,
 	challenge digestChallenge,
+	preference string,
 ) (akaMaterial, error) {
 	nonce, err := decodeAKANonce(challenge.Nonce)
 	if err != nil {
@@ -178,9 +179,18 @@ func authenticateAKA(
 	var akaChallenge vowifi.AKAChallenge
 	copy(akaChallenge.RAND[:], nonce[:16])
 	copy(akaChallenge.AUTN[:], nonce[16:32])
-	result, err := provider.Authenticate(ctx, identity, akaChallenge)
+	var result vowifi.AKAResult
+	if preferred, ok := provider.(vowifi.PreferredAKAProvider); ok && strings.TrimSpace(preference) != "" {
+		result, err = preferred.AuthenticateWithPreference(ctx, identity, akaChallenge, preference)
+	} else {
+		result, err = provider.Authenticate(ctx, identity, akaChallenge)
+	}
 	if err != nil {
-		return akaMaterial{}, fmt.Errorf("ims: USIM AKA authentication failed: %w", err)
+		application := "USIM"
+		if strings.EqualFold(strings.TrimSpace(preference), "isim_strict") {
+			application = "ISIM"
+		}
+		return akaMaterial{}, fmt.Errorf("ims: %s AKA authentication failed: %w", application, err)
 	}
 	if result.SynchronizationFailure || len(result.AUTS) > 0 {
 		if !result.SynchronizationFailure || len(result.AUTS) != 14 {

@@ -53,18 +53,18 @@ func (adapter *PCSCAdapter) ReadIdentity(ctx context.Context, deviceID string) (
 	mncLength := identity.MNCLength
 	if mncLength != 2 && mncLength != 3 {
 		if mcc, mnc, ok := assignedHomePLMN(identity.IMSI); ok {
-			return SIMIdentity{ICCID: identity.ICCID, IMSI: identity.IMSI, HomeMCC: mcc, HomeMNC: mnc, SMSC: identity.SMSC}, nil
+			return applyAssignedCarrierRoute(SIMIdentity{ICCID: identity.ICCID, IMSI: identity.IMSI, HomeMCC: mcc, HomeMNC: mnc, SMSC: identity.SMSC}), nil
 		}
 		return SIMIdentity{}, ErrEC20MNCUnavailable
 	}
 	if len(identity.IMSI) < 3+mncLength {
 		return SIMIdentity{}, errors.New("vocat: USB SIM IMSI is shorter than its EF_AD home PLMN")
 	}
-	return SIMIdentity{
+	return applyAssignedCarrierRoute(SIMIdentity{
 		ICCID: identity.ICCID, IMSI: identity.IMSI,
 		HomeMCC: identity.IMSI[:3], HomeMNC: identity.IMSI[3 : 3+mncLength],
 		SMSC: identity.SMSC,
-	}, nil
+	}), nil
 }
 
 func (adapter *PCSCAdapter) ReadSMSCenter(ctx context.Context, deviceID string) (string, error) {

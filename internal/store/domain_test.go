@@ -220,6 +220,124 @@ func TestMigration8DefaultsExistingDevicesToPCIeType(t *testing.T) {
 	}
 }
 
+func TestMigration19AcceptsDevelopmentDatabaseAndPreservesCardData(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "development-schema.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 16; version++ {
+		for _, statement := range migrationStatements(version) {
+			if _, err := raw.ExecContext(ctx, statement); err != nil {
+				t.Fatalf("create v%d schema: %v", version, err)
+			}
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `
+		INSERT INTO devices (id, name, created_at, updated_at)
+		VALUES ('ec20-1', 'EC20', 100, 100);
+		INSERT INTO card_policies (
+			iccid, network_enabled, vowifi_enabled, airplane_enabled,
+			apn, ip_version, source, created_at, updated_at, custom_phone_number
+		) VALUES (
+			'8900000000000000019', 0, 1, 1,
+			'ims', 'IPV4V6', 'user', 100, 100, '447700900019'
+		);
+		INSERT INTO card_apn_profiles (
+			iccid, apn, ip_version, created_at, updated_at,
+			username, password, proxy, mcc, mnc, roaming_ip_version, auth_type
+		) VALUES (
+			'8900000000000000019', 'mobile.example', 'IPV4V6', 100, 100,
+			'user', 'secret', '', '234', '10', 'IP', 'PAP'
+		);
+		PRAGMA user_version = 16;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestStore(t, path)
+	policy, err := database.CardPolicy(ctx, "8900000000000000019")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.VoWiFiEnabled || !policy.AirplaneEnabled || policy.CustomPhoneNumber != "447700900019" {
+		t.Fatalf("migrated card policy = %#v", policy)
+	}
+	profiles, err := database.ListCardAPNProfiles(ctx, "8900000000000000019")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 || profiles[0].APN != "mobile.example" || profiles[0].Username != "user" || profiles[0].AuthType != "PAP" {
+		t.Fatalf("migrated APN profiles = %#v", profiles)
+	}
+
+	var version int
+	if err := database.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 19 {
+		t.Fatalf("schema version = %d, want 19", version)
+	}
+	for _, column := range []string{
+		"ims_apn", "ims_private_identity", "ims_public_identity", "ims_sms_center",
+		"ims_transport", "ims_allow_imsi_derived_identity", "vowifi_eap_method",
+		"vowifi_allow_sha1", "vowifi_use_modp1024",
+	} {
+		var count int
+		if err := database.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = ?
+		`, column).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("migration 19 column %q count = %d", column, count)
+		}
+	}
+}
+
+func TestMigration19AcceptsDevelopmentColumnsAlreadyPresent(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "development-columns.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 18; version++ {
+		for _, statement := range migrationStatements(version) {
+			if _, err := raw.ExecContext(ctx, statement); err != nil {
+				t.Fatalf("create v%d schema: %v", version, err)
+			}
+		}
+	}
+	// The development build added these columns while still reporting schema
+	// 18. Migration 19 must treat that layout as compatible rather than fail on
+	// the first duplicate ALTER TABLE statement.
+	for _, statement := range migrationStatements(19) {
+		if _, err := raw.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("create development column: %v", err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 18`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database := openTestStore(t, path)
+	var version int
+	if err := database.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 19 {
+		t.Fatalf("schema version = %d, want 19", version)
+	}
+}
+
 func TestMigration4PreservesIMSRedeliveryAndUsesReceiptTime(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ims-redelivery.db")

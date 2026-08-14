@@ -97,9 +97,10 @@ type ec20RadioCheckpoint struct {
 }
 
 var (
-	_ SIMIdentityReader = (*EC20Adapter)(nil)
-	_ AKAProvider       = (*EC20Adapter)(nil)
-	_ RadioController   = (*EC20Adapter)(nil)
+	_ SIMIdentityReader    = (*EC20Adapter)(nil)
+	_ AKAProvider          = (*EC20Adapter)(nil)
+	_ PreferredAKAProvider = (*EC20Adapter)(nil)
+	_ RadioController      = (*EC20Adapter)(nil)
 )
 
 func NewEC20Adapter(
@@ -172,6 +173,7 @@ func (adapter *EC20Adapter) ReadIdentity(
 		HomeMCC: homeMCC,
 		HomeMNC: homeMNC,
 	}
+	identity = applyAssignedCarrierRoute(identity)
 	adapter.mu.Lock()
 	adapter.bindings[iccid] = ec20SIMBinding{
 		deviceID: deviceID,
@@ -208,6 +210,11 @@ func (adapter *EC20Adapter) readHomePLMN(
 	iccid string,
 	imsi string,
 ) (string, string, error) {
+	// AT&T 310/280 is a three-digit MNC. Prefer the assigned subscription
+	// prefix when EF_AD is stale or ambiguous after a profile switch.
+	if strings.HasPrefix(strings.TrimSpace(imsi), "310280") {
+		return "310", "280", nil
+	}
 	mncLength, efErr := adapter.readExplicitMNCLength(ctx, deviceID)
 	if efErr == nil {
 		if len(imsi) < 3+mncLength {
@@ -238,9 +245,10 @@ func assignedHomePLMN(imsi string) (mcc, mnc string, ok bool) {
 		prefix    string
 		mncLength int
 	}{
-		{prefix: "20404", mncLength: 2}, // Vodafone NL core; some Lebara subscriptions.
-		{prefix: "23415", mncLength: 2}, // Vodafone UK.
-		{prefix: "23487", mncLength: 2}, // Lebara Mobile UK.
+		{prefix: "20404", mncLength: 2},  // Vodafone NL core; some Lebara subscriptions.
+		{prefix: "23415", mncLength: 2},  // Vodafone UK.
+		{prefix: "23487", mncLength: 2},  // Lebara Mobile UK.
+		{prefix: "310280", mncLength: 3}, // AT&T / RedPocket GSMA.
 	}
 	for _, assignment := range assignments {
 		if strings.HasPrefix(imsi, assignment.prefix) {
@@ -392,9 +400,44 @@ func (adapter *EC20Adapter) Authenticate(
 	identity SIMIdentity,
 	challenge AKAChallenge,
 ) (AKAResult, error) {
+	return adapter.authenticateWithApplication(ctx, identity, challenge, "")
+}
+
+func (adapter *EC20Adapter) AuthenticateWithPreference(
+	ctx context.Context,
+	identity SIMIdentity,
+	challenge AKAChallenge,
+	preference string,
+) (AKAResult, error) {
+	return adapter.authenticateWithApplication(ctx, identity, challenge, preference)
+}
+
+func (adapter *EC20Adapter) authenticateWithApplication(
+	ctx context.Context,
+	identity SIMIdentity,
+	challenge AKAChallenge,
+	preference string,
+) (AKAResult, error) {
 	binding, err := adapter.bindingFor(identity)
 	if err != nil {
 		return AKAResult{}, err
+	}
+	if strings.EqualFold(strings.TrimSpace(preference), "isim_strict") && binding.application != "ISIM" {
+		aid, application, err := adapter.discoverPreferredAKAApplication(
+			ctx,
+			binding.deviceID,
+			isimAIDPrefix,
+			"ISIM",
+		)
+		if err != nil {
+			return AKAResult{}, err
+		}
+		binding.aid = aid
+		binding.application = application
+		binding.basicChannel = false
+		adapter.mu.Lock()
+		adapter.bindings[binding.iccid] = binding
+		adapter.mu.Unlock()
 	}
 	if binding.aid == "" {
 		if _, err := adapter.CheckReady(ctx, identity); err != nil {
@@ -404,6 +447,14 @@ func (adapter *EC20Adapter) Authenticate(
 		if err != nil {
 			return AKAResult{}, err
 		}
+	}
+	if strings.EqualFold(strings.TrimSpace(preference), "isim_strict") && binding.application != "ISIM" {
+		return AKAResult{}, fmt.Errorf(
+			"%w: ISIM strict requested, selected %s (%s)",
+			ErrEC20ApplicationAbsent,
+			binding.application,
+			binding.aid,
+		)
 	}
 	if err := adapter.verifyLiveICCID(ctx, binding); err != nil {
 		return AKAResult{}, err
@@ -907,6 +958,28 @@ func (adapter *EC20Adapter) discoverAKAApplication(
 	return usimAIDPrefix, "USIM", nil
 }
 
+func (adapter *EC20Adapter) discoverPreferredAKAApplication(
+	ctx context.Context,
+	deviceID string,
+	aidPrefix string,
+	application string,
+) (string, string, error) {
+	response, err := adapter.execute(ctx, deviceID, "AT+CUAD")
+	if err == nil {
+		data, parseErr := parseCUADData(response)
+		if parseErr == nil {
+			for _, candidate := range collectApplicationAIDs(data) {
+				if strings.HasPrefix(candidate, aidPrefix) {
+					return candidate, application, nil
+				}
+			}
+		}
+	}
+	// AT+CUAD is optional. Returning the standard AID prefix still lets CCHO
+	// perform the authoritative application probe on older EC20 firmware.
+	return aidPrefix, application, nil
+}
+
 func (adapter *EC20Adapter) openLogicalChannel(
 	ctx context.Context,
 	deviceID string,
@@ -1146,12 +1219,27 @@ func parseCRSMData(response modem.Response) ([]byte, error) {
 }
 
 func parseCUADData(response modem.Response) ([]byte, error) {
-	fields := parseCSV(valueAfterATPrefix(response, "+CUAD:"))
-	if len(fields) == 0 {
+	// EC20 firmware may split the BER-TLV stream across adjacent quoted chunks
+	// and continuation lines. Concatenating every hex fragment prevents an ISIM
+	// AID after a USIM entry from being silently discarded.
+	var encoded strings.Builder
+	collect := false
+	for _, line := range response.Lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToUpper(line), "+CUAD:") {
+			collect = true
+			line = strings.TrimSpace(line[len("+CUAD:"):])
+		} else if !collect {
+			continue
+		}
+		for _, fragment := range quotedHexFragments(line) {
+			encoded.WriteString(fragment)
+		}
+	}
+	if encoded.Len() == 0 {
 		return nil, errors.New("CUAD response has no data")
 	}
-	value := fields[len(fields)-1]
-	data, err := hex.DecodeString(strings.Trim(value, `"`))
+	data, err := hex.DecodeString(encoded.String())
 	if err != nil || len(data) == 0 {
 		return nil, errors.New("CUAD response data is invalid")
 	}
@@ -1161,11 +1249,48 @@ func parseCUADData(response modem.Response) ([]byte, error) {
 	return data, nil
 }
 
+func quotedHexFragments(line string) []string {
+	var fragments []string
+	for {
+		start := strings.IndexByte(line, '"')
+		if start < 0 {
+			break
+		}
+		line = line[start+1:]
+		end := strings.IndexByte(line, '"')
+		if end < 0 {
+			break
+		}
+		fragment := strings.ToUpper(strings.TrimSpace(line[:end]))
+		line = line[end+1:]
+		if fragment == "" || len(fragment)%2 != 0 {
+			continue
+		}
+		valid := true
+		for _, character := range fragment {
+			if (character < '0' || character > '9') && (character < 'A' || character > 'F') {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			fragments = append(fragments, fragment)
+		}
+	}
+	return fragments
+}
+
 func collectApplicationAIDs(data []byte) []string {
 	var result []string
 	var walk func([]byte)
 	walk = func(value []byte) {
 		for len(value) > 0 {
+			for len(value) > 0 && value[0] == 0xff {
+				value = value[1:]
+			}
+			if len(value) == 0 {
+				return
+			}
 			tag, constructed, body, consumed, err := decodeBERTLV(value)
 			if err != nil || consumed == 0 {
 				return

@@ -271,13 +271,22 @@ func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, 
 		mnc = "0" + mnc
 	}
 	domain := fmt.Sprintf("ims.mnc%s.mcc%s.3gppnetwork.org", mnc, mcc)
+	privateDomain := domain
+	publicDomain := domain
+	if vowifi.IsATT310280(identity) {
+		// AT&T provisions the IMPI and IMPU in its ISIM domains rather than
+		// the generic 3GPP PLMN IMS domain.
+		domain = "one.att.net"
+		privateDomain = "private.att.net"
+		publicDomain = "one.att.net"
+	}
 	privateIdentity := config.PrivateIdentity
 	if privateIdentity == "" {
-		privateIdentity = imsi + "@" + domain
+		privateIdentity = imsi + "@" + privateDomain
 	}
 	publicIdentity := config.PublicIdentity
 	if publicIdentity == "" {
-		publicIdentity = "sip:" + imsi + "@" + domain
+		publicIdentity = "sip:" + imsi + "@" + publicDomain
 	}
 	if strings.ContainsAny(privateIdentity+publicIdentity, "\r\n") ||
 		!strings.Contains(privateIdentity, "@") ||
@@ -536,6 +545,9 @@ func newSession(
 		}
 		protectedClientPort := provider.config.ProtectedClientPort
 		protectedServerPort := provider.config.ProtectedServerPort
+		if vowifi.IsATT310280(request.Identity) && protectedServerPort == 0 {
+			protectedServerPort = 6000
+		}
 		if securityEncryptionForIdentity(request.Identity) == "null" {
 			if protectedClientPort == 0 {
 				protectedClientPort = 5062
@@ -554,6 +566,10 @@ func newSession(
 			return nil, err
 		}
 		proposal.encryption = securityEncryptionForIdentity(request.Identity)
+		if vowifi.IsATT310280(request.Identity) {
+			proposal.integrityAlgorithms = []string{"hmac-sha-1-96"}
+			proposal.encryptionAlgorithmsList = []string{"aes-cbc"}
+		}
 		session.securityProposal = proposal
 		protectedTCP, err := net.ListenTCP(
 			"tcp",
@@ -732,7 +748,11 @@ func (session *Session) register(ctx context.Context, expires int) (*sipResponse
 		if err != nil {
 			return nil, err
 		}
-		material, err := authenticateAKA(ctx, session.provider.aka, session.request.Identity, challenge)
+		preference := ""
+		if vowifi.IsATT310280(session.request.Identity) {
+			preference = "isim_strict"
+		}
+		material, err := authenticateAKA(ctx, session.provider.aka, session.request.Identity, challenge, preference)
 		if err != nil {
 			return nil, err
 		}
@@ -792,6 +812,10 @@ func (session *Session) buildRegister(
 	authorizationHeader string,
 	authorization string,
 ) ([]byte, error) {
+	att310280 := vowifi.IsATT310280(session.request.Identity)
+	if att310280 {
+		expires = 18400
+	}
 	branch, err := randomHex(12)
 	if err != nil {
 		return nil, err
@@ -810,6 +834,17 @@ func (session *Session) buildRegister(
 		session.instanceID,
 		"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel",
 	)
+	if att310280 {
+		contact = fmt.Sprintf(
+			`<sip:%s@%s;transport=%s>;+g.3gpp.accesstype="wlan1";audio;+g.3gpp.smsip;`+
+				`+g.3gpp.icsi-ref="%s";+sip.instance="<%s>"`,
+			session.identity.user,
+			contactAddress,
+			session.transport,
+			"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel",
+			session.instanceID,
+		)
+	}
 	o2Germany := usesO2GermanyIMSProfile(session.request.Identity)
 	supported := "path, gruu"
 	allow := "REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS"
@@ -819,6 +854,13 @@ func (session *Session) buildRegister(
 		// than the other tested carriers do.
 		supported = "path, gruu, outbound, sec-agree, 100rel, timer"
 		allow = "INVITE, ACK, CANCEL, BYE, PRACK, UPDATE, INFO, MESSAGE, OPTIONS"
+	}
+	if att310280 {
+		supported = "path,sec-agree,gruu"
+	}
+	userAgent := strings.TrimSpace(session.provider.config.UserAgent)
+	if att310280 && (userAgent == "" || userAgent == "vocat/1") {
+		userAgent = "SimAdmin VoWiFi"
 	}
 	lines := []string{
 		"REGISTER " + requestURI + " SIP/2.0",
@@ -833,14 +875,23 @@ func (session *Session) buildRegister(
 		fmt.Sprintf("Expires: %d", expires),
 		"Supported: " + supported,
 		"Allow: " + allow,
-		"User-Agent: " + session.provider.config.UserAgent,
+		"User-Agent: " + userAgent,
 	}
 	if o2Germany {
 		lines = append(lines, "P-Preferred-Identity: <"+session.identity.public+">")
+	} else if att310280 {
+		lines = append(lines,
+			"P-Preferred-Identity: <"+session.identity.public+">",
+			`P-Visited-Network-ID: "one.att.net"`,
+			"P-Access-Network-Info: IEEE-802.11;i-wlan-node-id=000000000000;network-provided",
+			"Cellular-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=3102800000000;cell-info-age=0",
+			"Accept-Contact: *;+g.3gpp.smsip",
+			`Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
+		)
 	}
 	if session.securityOffered() {
 		lines = append(lines,
-			"Security-Client: "+session.securityProposal.headerValue(),
+			"Security-Client: "+session.securityClientValue(),
 			"Require: sec-agree",
 			"Proxy-Require: sec-agree",
 		)

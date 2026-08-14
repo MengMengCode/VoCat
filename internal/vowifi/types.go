@@ -317,6 +317,14 @@ type AKAProvider interface {
 	Authenticate(context.Context, SIMIdentity, AKAChallenge) (AKAResult, error)
 }
 
+// PreferredAKAProvider optionally lets an AKA provider select a carrier-
+// provisioned application such as ISIM. Providers that only expose USIM keep
+// implementing AKAProvider unchanged.
+type PreferredAKAProvider interface {
+	AKAProvider
+	AuthenticateWithPreference(context.Context, SIMIdentity, AKAChallenge, string) (AKAResult, error)
+}
+
 // RadioController owns the host/modem radio projection. EnterVoWiFiRFOff must
 // not toggle the independent pure-airplane policy; Restore must return to the
 // captured pre-transaction state.
