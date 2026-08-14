@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,7 +21,12 @@ var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrUnauthorized       = errors.New("unauthorized")
 	ErrInvalidCSRF        = errors.New("invalid csrf token")
+	ErrEmptyPassword      = errors.New("password cannot be empty")
 )
+
+const bcryptPasswordLimit = 72
+
+var longPasswordHashPrefix = []byte("$vocat-sha256$")
 
 type Options struct {
 	SessionTTL time.Duration
@@ -85,14 +91,14 @@ func (s *Service) EnsureAdmin(ctx context.Context, username string, password str
 	current, err := s.store.CurrentAdmin(ctx)
 	if err == nil &&
 		current.Username == username &&
-		bcrypt.CompareHashAndPassword(current.PasswordHash, []byte(password)) == nil {
+		comparePassword(current.PasswordHash, password) == nil {
 		return nil
 	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("auth: read configured admin: %w", err)
 	}
 
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), s.bcryptCost)
+	passwordHash, err := hashPassword(password, s.bcryptCost)
 	if err != nil {
 		return fmt.Errorf("auth: hash admin password: %w", err)
 	}
@@ -127,8 +133,8 @@ func (s *Service) ResetAdminCredentials(ctx context.Context, username string, pa
 	if len(username) < 1 || len(username) > 64 || strings.ContainsAny(username, "\r\n\t") {
 		return errors.New("administrator username must contain between 1 and 64 characters without control whitespace")
 	}
-	if len(password) < 6 || len(password) > 1024 {
-		return errors.New("administrator password must contain between 6 and 1024 characters")
+	if password == "" {
+		return ErrEmptyPassword
 	}
 	if err := s.EnsureAdmin(ctx, username, password); err != nil {
 		return fmt.Errorf("auth: reset administrator credentials: %w", err)
@@ -139,13 +145,13 @@ func (s *Service) ResetAdminCredentials(ctx context.Context, username string, pa
 func (s *Service) Login(ctx context.Context, username string, password string) (Credentials, error) {
 	admin, err := s.store.AdminByUsername(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {
-		_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte(password))
+		_ = comparePassword(s.dummyHash, password)
 		return Credentials{}, ErrInvalidCredentials
 	}
 	if err != nil {
 		return Credentials{}, fmt.Errorf("auth: find admin: %w", err)
 	}
-	if bcrypt.CompareHashAndPassword(admin.PasswordHash, []byte(password)) != nil {
+	if comparePassword(admin.PasswordHash, password) != nil {
 		return Credentials{}, ErrInvalidCredentials
 	}
 
@@ -284,24 +290,24 @@ func (s *Service) ChangePassword(
 	currentPassword string,
 	newPassword string,
 ) error {
-	if len(newPassword) < 6 || len(newPassword) > 1024 {
-		return errors.New("new password must contain between 6 and 1024 characters")
+	if newPassword == "" {
+		return ErrEmptyPassword
 	}
 	admin, err := s.store.AdminByUsername(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {
-		_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte(currentPassword))
+		_ = comparePassword(s.dummyHash, currentPassword)
 		return ErrInvalidCredentials
 	}
 	if err != nil {
 		return fmt.Errorf("auth: find admin: %w", err)
 	}
-	if bcrypt.CompareHashAndPassword(admin.PasswordHash, []byte(currentPassword)) != nil {
+	if comparePassword(admin.PasswordHash, currentPassword) != nil {
 		return ErrInvalidCredentials
 	}
-	if bcrypt.CompareHashAndPassword(admin.PasswordHash, []byte(newPassword)) == nil {
+	if comparePassword(admin.PasswordHash, newPassword) == nil {
 		return errors.New("new password must differ from the current password")
 	}
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), s.bcryptCost)
+	passwordHash, err := hashPassword(newPassword, s.bcryptCost)
 	if err != nil {
 		return fmt.Errorf("auth: hash new password: %w", err)
 	}
@@ -309,6 +315,36 @@ func (s *Service) ChangePassword(
 		return fmt.Errorf("auth: save new password: %w", err)
 	}
 	return nil
+}
+
+// hashPassword keeps ordinary bcrypt hashes compatible with existing
+// installations. bcrypt rejects inputs longer than 72 bytes, so only longer
+// passwords use a tagged SHA-256 pre-hash before bcrypt.
+func hashPassword(password string, cost int) ([]byte, error) {
+	material := []byte(password)
+	longPassword := len(material) > bcryptPasswordLimit
+	if longPassword {
+		digest := sha256.Sum256(material)
+		material = digest[:]
+	}
+	passwordHash, err := bcrypt.GenerateFromPassword(material, cost)
+	if err != nil {
+		return nil, err
+	}
+	if !longPassword {
+		return passwordHash, nil
+	}
+	return append(append([]byte(nil), longPasswordHashPrefix...), passwordHash...), nil
+}
+
+func comparePassword(passwordHash []byte, password string) error {
+	material := []byte(password)
+	if bytes.HasPrefix(passwordHash, longPasswordHashPrefix) {
+		digest := sha256.Sum256(material)
+		material = digest[:]
+		passwordHash = passwordHash[len(longPasswordHashPrefix):]
+	}
+	return bcrypt.CompareHashAndPassword(passwordHash, material)
 }
 
 func randomToken() (string, error) {

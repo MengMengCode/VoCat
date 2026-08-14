@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,13 +129,39 @@ func TestResetAdminCredentialsValidatesInput(t *testing.T) {
 	}{
 		{name: "empty username", password: "replacement-password"},
 		{name: "control whitespace", username: "bad\tname", password: "replacement-password"},
-		{name: "short password", username: "admin", password: "short"},
+		{name: "empty password", username: "admin", password: ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := service.ResetAdminCredentials(context.Background(), test.username, test.password); err == nil {
 				t.Fatal("ResetAdminCredentials() accepted invalid input")
 			}
 		})
+	}
+}
+
+func TestResetAdminCredentialsAcceptsPasswordsWithoutComplexityRules(t *testing.T) {
+	ctx := context.Background()
+	for _, password := range []string{"1", strings.Repeat("x", 256)} {
+		service := newTestService(t)
+		if err := service.ResetAdminCredentials(ctx, "admin", password); err != nil {
+			t.Fatalf("ResetAdminCredentials(%d-byte password) error = %v", len(password), err)
+		}
+		if _, err := service.Login(ctx, "admin", password); err != nil {
+			t.Fatalf("Login(%d-byte password) error = %v", len(password), err)
+		}
+	}
+}
+
+func TestChangePasswordAcceptsPasswordsWithoutComplexityRules(t *testing.T) {
+	ctx := context.Background()
+	for _, password := range []string{"1", strings.Repeat("long-password-", 32)} {
+		service := newTestService(t)
+		if err := service.ChangePassword(ctx, "admin", "correct-password", password); err != nil {
+			t.Fatalf("ChangePassword(%d-byte password) error = %v", len(password), err)
+		}
+		if _, err := service.Login(ctx, "admin", password); err != nil {
+			t.Fatalf("Login(%d-byte password) error = %v", len(password), err)
+		}
 	}
 }
 

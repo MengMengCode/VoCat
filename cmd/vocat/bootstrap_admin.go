@@ -23,14 +23,14 @@ func runBootstrapAdmin(args []string) error {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("usage: vocat bootstrap-admin [--database path] [--username name]")
 	}
-	reader := bufio.NewReader(io.LimitReader(os.Stdin, 2049))
+	reader := bufio.NewReader(os.Stdin)
 	password, err := reader.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return fmt.Errorf("read password: %w", err)
 	}
 	password = strings.TrimSuffix(strings.TrimSuffix(password, "\n"), "\r")
-	if len(password) < 6 || len(password) > 1024 {
-		return errors.New("bootstrap password must contain between 6 and 1024 characters")
+	if password == "" {
+		return errors.New("bootstrap password cannot be empty")
 	}
 	adminUsername := strings.TrimSpace(*username)
 	if len(adminUsername) < 1 || len(adminUsername) > 64 || strings.ContainsAny(adminUsername, "\r\n\t") {

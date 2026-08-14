@@ -506,7 +506,7 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, auth.ErrInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "current password is incorrect")
-		case strings.Contains(err.Error(), "between 6 and 1024"):
+		case errors.Is(err, auth.ErrEmptyPassword):
 			writeError(w, http.StatusBadRequest, "weak_password", err.Error())
 		case strings.Contains(err.Error(), "must differ"):
 			writeError(w, http.StatusBadRequest, "password_reused", err.Error())
