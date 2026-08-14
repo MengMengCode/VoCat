@@ -10,6 +10,7 @@
 *.dll
 *.so
 *.dylib
+/fix
 
 # ---- Cookie / secret files (NEVER commit) ----
 vc.jar
