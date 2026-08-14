@@ -16,6 +16,21 @@ type recordingAKA struct {
 	challenges []vowifi.AKAChallenge
 }
 
+type recordingPreferredAKA struct {
+	recordingAKA
+	preference string
+}
+
+func (aka *recordingPreferredAKA) AuthenticateWithPreference(
+	ctx context.Context,
+	identity vowifi.SIMIdentity,
+	challenge vowifi.AKAChallenge,
+	preference string,
+) (vowifi.AKAResult, error) {
+	aka.preference = preference
+	return aka.Authenticate(ctx, identity, challenge)
+}
+
 func (aka *recordingAKA) CheckReady(context.Context, vowifi.SIMIdentity) (vowifi.AKAEvidence, error) {
 	return vowifi.AKAEvidence{Ready: true, Application: "usim"}, nil
 }
@@ -60,6 +75,7 @@ func TestAuthenticateAKAMapsNonceToTypedChallenge(t *testing.T) {
 		aka,
 		vowifi.SIMIdentity{IMSI: "001010123456789"},
 		digestChallenge{Nonce: base64.StdEncoding.EncodeToString(nonceBytes)},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("authenticateAKA() error = %v", err)
@@ -93,12 +109,33 @@ func TestAuthenticateAKAReturnsSynchronizationEvidence(t *testing.T) {
 		aka,
 		vowifi.SIMIdentity{},
 		digestChallenge{Nonce: nonce},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("authenticateAKA() error = %v", err)
 	}
 	if !reflect.DeepEqual(material.auts, auts) || len(material.response) != 0 {
 		t.Fatalf("material = %#v", material)
+	}
+}
+
+func TestAuthenticateAKAUsesPreferredApplicationWhenSupported(t *testing.T) {
+	nonce := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	aka := &recordingPreferredAKA{recordingAKA: recordingAKA{
+		result: vowifi.AKAResult{RES: []byte{1, 2, 3, 4}},
+	}}
+	_, err := authenticateAKA(
+		context.Background(),
+		aka,
+		vowifi.SIMIdentity{IMSI: "310280000000001"},
+		digestChallenge{Nonce: nonce},
+		"isim_strict",
+	)
+	if err != nil {
+		t.Fatalf("authenticateAKA() error = %v", err)
+	}
+	if aka.preference != "isim_strict" {
+		t.Fatalf("preference = %q, want isim_strict", aka.preference)
 	}
 }
 

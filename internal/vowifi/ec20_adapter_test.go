@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -421,6 +422,7 @@ func TestAssignedHomePLMNIncludesLebaraUKCores(t *testing.T) {
 		"204040123456789": "204/04",
 		"234150123456789": "234/15",
 		"234870123456789": "234/87",
+		"310280000000001": "310/280",
 	}
 	for imsi, want := range tests {
 		mcc, mnc, ok := assignedHomePLMN(imsi)
@@ -428,6 +430,23 @@ func TestAssignedHomePLMNIncludesLebaraUKCores(t *testing.T) {
 			t.Errorf("assignedHomePLMN(%q) = %q, %v; want %q", imsi, got, ok, want)
 		}
 	}
+}
+
+func TestEC20AdapterTreatsATT310280AsThreeDigitMNC(t *testing.T) {
+	t.Parallel()
+	transcript := &ec20Transcript{t: t, steps: identityTranscriptStepsWithoutEFAD("310280000000001")}
+	adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := adapter.ReadIdentity(context.Background(), "ec20-1")
+	if err != nil {
+		t.Fatalf("ReadIdentity: %v", err)
+	}
+	if identity.HomeMCC != "310" || identity.HomeMNC != "280" {
+		t.Fatalf("home PLMN = %s/%s, want 310/280", identity.HomeMCC, identity.HomeMNC)
+	}
+	transcript.assertDone()
 }
 
 func TestEC20AdapterRadioTransactionRestoresCFUNAndPDPContexts(
@@ -597,4 +616,79 @@ func synchronizationFailureUSIMResponse() []byte {
 	raw := []byte{0xdc, byte(len(auts))}
 	raw = append(raw, auts...)
 	return append(raw, 0x90, 0x00)
+}
+
+func TestCollectApplicationAIDsSkipsCUADPadding(t *testing.T) {
+	t.Parallel()
+	response := modem.Response{Lines: []string{
+		`+CUAD: "61184F10A0000000871002FFFFFFFF890302000050045553494DFFFFFFFFFFFFFFFFFFFFFFFF""61184F10A0000000871004FFFFFFFF890302000050044953494DFFFFFFFFFFFFFFFFFFFFFFFF"`,
+		`"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"`,
+	}}
+	data, err := parseCUADData(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aids := collectApplicationAIDs(data)
+	want := []string{
+		"A0000000871002FFFFFFFF8903020000",
+		"A0000000871004FFFFFFFF8903020000",
+	}
+	if !reflect.DeepEqual(aids, want) {
+		t.Fatalf("AIDs = %v, want %v", aids, want)
+	}
+}
+
+func TestEC20AdapterISIMStrictUsesCUADFullAID(t *testing.T) {
+	var challenge AKAChallenge
+	for index := range challenge.RAND {
+		challenge.RAND[index] = byte(index)
+		challenge.AUTN[index] = byte(0xf0 + index)
+	}
+	authAPDU := buildUSIMAuthenticateAPDU(challenge)
+	authCommand := fmt.Sprintf(
+		`AT+CGLA=1,%d,"%s"`,
+		len(authAPDU)*2,
+		strings.ToUpper(hex.EncodeToString(authAPDU)),
+	)
+	encodedResponse := strings.ToUpper(hex.EncodeToString(successfulUSIMResponse()))
+	fullISIM := "A0000000871004FFFFFFFF8903020000"
+	cuad := `61184F10A0000000871002FFFFFFFF890302000050045553494D61184F10A0000000871004FFFFFFFF890302000050044953494D`
+	transcript := &ec20Transcript{
+		t: t,
+		steps: []ec20TranscriptStep{
+			{command: "AT+CPIN?", lines: []string{"+CPIN: READY"}},
+			{command: "AT+CIMI", lines: []string{"310280000000001"}},
+			{command: "AT+CCID", lines: []string{"+CCID: 8901000000000000001"}},
+			{command: "AT+CGSN", lines: []string{"860000000000001"}},
+			{command: "AT+CUAD", lines: []string{`+CUAD: "` + cuad + `"`}},
+			{command: "AT+CCID", lines: []string{"+CCID: 8901000000000000001"}},
+			{command: `AT+CCHO="` + fullISIM + `"`, lines: []string{"+CCHO: 1"}},
+			{
+				command:   authCommand,
+				sensitive: true,
+				lines: []string{fmt.Sprintf(
+					`+CGLA: %d,"%s"`,
+					len(encodedResponse),
+					encodedResponse,
+				)},
+			},
+			{command: "AT+CCHC=1"},
+		},
+	}
+	adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := adapter.ReadIdentity(context.Background(), "ec20-1")
+	if err != nil {
+		t.Fatalf("ReadIdentity: %v", err)
+	}
+	result, err := adapter.AuthenticateWithPreference(context.Background(), identity, challenge, "isim_strict")
+	if err != nil {
+		t.Fatalf("AuthenticateWithPreference: %v", err)
+	}
+	if !bytes.Equal(result.RES, []byte{1, 2, 3, 4, 5, 6, 7, 8}) {
+		t.Fatalf("RES = %x", result.RES)
+	}
+	transcript.assertDone()
 }

@@ -345,11 +345,14 @@ FIRST_INSTALL=0
 INITIAL_ADMIN_PASSWORD=""
 
 bootstrap_admin() {
+    local candidate="${1:-$BINARY_PATH}"
     local secret result
     secret=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
     [ -n "$secret" ] || die "Failed to generate a random secret." "Failed to generate a random secret."
-    result=$(printf '%s\n' "$secret" | "$BINARY_PATH" bootstrap-admin --database /opt/vocat/data/vocat.db --username admin) || \
-        die "Failed to initialize the administrator." "Failed to initialize the administrator."
+    result=$(printf '%s\n' "$secret" | "$candidate" bootstrap-admin --database /opt/vocat/data/vocat.db --username admin) || \
+        die \
+            "待安装版本无法读取或升级现有数据库；当前程序尚未被替换，请检查数据库与版本兼容性。" \
+            "The candidate version cannot read or migrate the existing database; the installed program was not replaced. Check database and version compatibility."
     if [ "$result" = "created" ]; then
         FIRST_INSTALL=1
         INITIAL_ADMIN_PASSWORD="$secret"
@@ -532,9 +535,12 @@ fi
 resolve_target_version
 skip_if_equal
 download_and_verify
-install_binary
 ensure_data_dir
-bootstrap_admin
+# Validate the database with the downloaded binary before replacing the
+# installed program. In particular, a release with an older schema must never
+# overwrite a newer working binary and leave the service in a restart loop.
+bootstrap_admin "${VOCAT_TMP}/vocat"
+install_binary
 setup_env
 write_service
 enable_and_start

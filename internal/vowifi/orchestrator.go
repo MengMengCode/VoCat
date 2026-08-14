@@ -645,18 +645,13 @@ func DeriveEPDG(identity SIMIdentity) (string, error) {
 		}
 		return strings.ToLower(configured), nil
 	}
+	if IsATT310280(identity) {
+		return att310280EPDG, nil
+	}
 	if err := identity.validate(); err != nil {
 		return "", err
 	}
-	mnc := strings.TrimSpace(identity.HomeMNC)
-	for len(mnc) < 3 {
-		mnc = "0" + mnc
-	}
-	return fmt.Sprintf(
-		"epdg.epc.mnc%s.mcc%s.pub.3gppnetwork.org",
-		mnc,
-		strings.TrimSpace(identity.HomeMCC),
-	), nil
+	return standardEPDGHostname(identity.HomeMCC, identity.HomeMNC), nil
 }
 
 func normalizeProxyRoute(route ProxyRoute) (ProxyRoute, error) {

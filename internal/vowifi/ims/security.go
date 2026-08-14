@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"vocat/internal/vowifi"
 )
 
 type SecurityMode string
@@ -141,6 +143,19 @@ func (proposal securityProposal) headerValue() string {
 		}
 	}
 	return strings.Join(values, ", ")
+}
+
+func (session *Session) securityClientValue() string {
+	if vowifi.IsATT310280(session.request.Identity) {
+		return fmt.Sprintf(
+			"ipsec-3gpp; alg=hmac-sha-1-96; ealg=aes-cbc; prot=esp; mod=trans; spi-c=%d; spi-s=%d; port-c=%d; port-s=%d",
+			session.securityProposal.spiClient,
+			session.securityProposal.spiServer,
+			session.securityProposal.portClient,
+			session.securityProposal.portServer,
+		)
+	}
+	return session.securityProposal.headerValue()
 }
 
 func (proposal securityProposal) encryptionAlgorithm() string {
