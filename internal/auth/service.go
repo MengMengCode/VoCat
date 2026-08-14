@@ -127,8 +127,8 @@ func (s *Service) ResetAdminCredentials(ctx context.Context, username string, pa
 	if len(username) < 1 || len(username) > 64 || strings.ContainsAny(username, "\r\n\t") {
 		return errors.New("administrator username must contain between 1 and 64 characters without control whitespace")
 	}
-	if len(password) < 12 || len(password) > 1024 {
-		return errors.New("administrator password must contain between 12 and 1024 characters")
+	if len(password) < 6 || len(password) > 1024 {
+		return errors.New("administrator password must contain between 6 and 1024 characters")
 	}
 	if err := s.EnsureAdmin(ctx, username, password); err != nil {
 		return fmt.Errorf("auth: reset administrator credentials: %w", err)
@@ -284,8 +284,8 @@ func (s *Service) ChangePassword(
 	currentPassword string,
 	newPassword string,
 ) error {
-	if len(newPassword) < 12 || len(newPassword) > 1024 {
-		return errors.New("new password must contain between 12 and 1024 characters")
+	if len(newPassword) < 6 || len(newPassword) > 1024 {
+		return errors.New("new password must contain between 6 and 1024 characters")
 	}
 	admin, err := s.store.AdminByUsername(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {

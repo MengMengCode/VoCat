@@ -596,7 +596,7 @@ func (m *menu) msg(key string) string {
 		"prompt":              {"请选择: ", "Select: "},
 		"invalid":             {"无效选项，请重试。按 Ctrl+C 退出。", "Invalid choice, try again. Press Ctrl+C to exit."},
 		"new_username":        {"新用户名（直接回车保留 %s）: ", "New username (Enter to keep %s): "},
-		"new_pw":              {"新密码 (至少 12 位): ", "New password (min 12 chars): "},
+		"new_pw":              {"新密码 (至少 6 位): ", "New password (min 6 chars): "},
 		"confirm_pw":          {"确认新密码: ", "Confirm new password: "},
 		"pw_changed":          {"管理员账号密码已修改，现有 Web 会话已退出。", "Administrator credentials changed; existing Web sessions were signed out."},
 		"current_web_address": {"当前 Web 监听地址: %s", "Current Web listening address: %s"},

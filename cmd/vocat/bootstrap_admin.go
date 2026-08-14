@@ -29,8 +29,8 @@ func runBootstrapAdmin(args []string) error {
 		return fmt.Errorf("read password: %w", err)
 	}
 	password = strings.TrimSuffix(strings.TrimSuffix(password, "\n"), "\r")
-	if len(password) < 12 || len(password) > 1024 {
-		return errors.New("bootstrap password must contain between 12 and 1024 characters")
+	if len(password) < 6 || len(password) > 1024 {
+		return errors.New("bootstrap password must contain between 6 and 1024 characters")
 	}
 	adminUsername := strings.TrimSpace(*username)
 	if len(adminUsername) < 1 || len(adminUsername) > 64 || strings.ContainsAny(adminUsername, "\r\n\t") {
