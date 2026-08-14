@@ -79,7 +79,7 @@ func TestProxyResolverDoesNotLeakBindingToAnotherProfileOnSameDevice(t *testing.
 	}
 }
 
-func TestProxyResolverDoesNotUseCountryRuleWithoutDeviceBinding(t *testing.T) {
+func TestProxyResolverUsesCountryRuleWithoutICCIDBinding(t *testing.T) {
 	database := testStore(t)
 	if err := database.UpsertUpstreamProxy(context.Background(), store.UpstreamProxy{
 		ID: "legacy", Name: "Legacy", Addr: "127.0.0.1:1080", Enabled: true,
@@ -98,8 +98,42 @@ func TestProxyResolverDoesNotUseCountryRuleWithoutDeviceBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if route.Mode != vowifi.ProxyModeDirect {
-		t.Fatalf("route = %#v, want direct", route)
+	if route.Mode != vowifi.ProxyModeSOCKS5 || route.ID != "legacy" {
+		t.Fatalf("route = %#v, want MCC country fallback", route)
+	}
+}
+
+func TestProxyResolverPrefersICCIDBindingOverCountryRule(t *testing.T) {
+	database := testStore(t)
+	for _, proxy := range []store.UpstreamProxy{
+		{ID: "profile", Name: "Profile", Addr: "127.0.0.1:1080", Enabled: true},
+		{ID: "country", Name: "Country", Addr: "127.0.0.1:1081", Enabled: true},
+	} {
+		if err := database.UpsertUpstreamProxy(context.Background(), proxy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.UpsertCountryRule(context.Background(), store.CountryRule{
+		CountryCode: "GB", CountryName: "United Kingdom", UpstreamProxyID: "country", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertDevice(context.Background(), store.Device{ID: "ec20", Name: "EC20"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertDeviceProxyBinding(context.Background(), store.DeviceProxyBinding{
+		DeviceID: "ec20", ICCID: "89441000400128014257", ProfileName: "Physical SIM", UpstreamProxyID: "profile",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	route, err := (ProxyResolver{Store: database}).Resolve(context.Background(), vowifi.ProxyRequest{
+		DeviceID: "ec20", ICCID: "89441000400128014257", HomeMCC: "234",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.ID != "profile" {
+		t.Fatalf("route = %#v, want ICCID binding", route)
 	}
 }
 

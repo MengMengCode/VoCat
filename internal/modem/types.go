@@ -57,6 +57,7 @@ type Candidate struct {
 	Ports            []Port `json:"ports"`
 	QMIControl       string `json:"qmiControl,omitempty"`
 	NetworkInterface string `json:"networkInterface,omitempty"`
+	DiscoveryIssue   string `json:"discoveryIssue,omitempty"`
 }
 
 func (c Candidate) HasATPort() bool {

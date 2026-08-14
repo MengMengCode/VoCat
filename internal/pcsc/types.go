@@ -31,6 +31,10 @@ type Reader struct {
 	Product      string
 	CardPresent  bool
 	ATR          string
+	// DiscoveryIssue is set when USB sees a smart-card reader but pcscd cannot
+	// expose it yet. Keeping the physical reader visible lets the UI explain the
+	// missing service/driver instead of silently showing an empty device list.
+	DiscoveryIssue string
 }
 
 type Selector struct {

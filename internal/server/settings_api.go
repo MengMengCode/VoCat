@@ -429,17 +429,18 @@ func (s *Server) handleNotificationTest(
 		return
 	}
 
+	notificationContext := s.notificationDestinationContext(r.Context())
 	switch channel {
 	case "webhook":
-		err = sendWebhookNotificationTest(r.Context(), resolved)
+		err = sendWebhookNotificationTest(notificationContext, resolved)
 	case "telegram":
-		err = sendTelegramNotificationTest(r.Context(), resolved)
+		err = sendTelegramNotificationTest(notificationContext, resolved)
 	case "email":
-		err = sendEmailNotificationTest(r.Context(), resolved)
+		err = sendEmailNotificationTest(notificationContext, resolved)
 	case "bark":
-		err = sendBarkNotificationTest(r.Context(), resolved)
+		err = sendBarkNotificationTest(notificationContext, resolved)
 	case "wecom":
-		err = sendWecomNotificationTest(r.Context(), resolved)
+		err = sendWecomNotificationTest(notificationContext, resolved)
 	}
 	if err != nil {
 		redacted := store.RedactText(err.Error(), provider)
@@ -1073,6 +1074,39 @@ func dialRestricted(
 	return nil, fmt.Errorf("dial public notification destination: %w", errors.Join(failures...))
 }
 
+type notificationAllowedNetworksKey struct{}
+
+func (s *Server) notificationDestinationContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	access := s.currentAccessConfig()
+	return context.WithValue(ctx, notificationAllowedNetworksKey{}, append([]netip.Prefix(nil), access.cidrs...))
+}
+
+func notificationAddressAllowed(ctx context.Context, address netip.Addr) bool {
+	address = address.Unmap()
+	// Even an administrator-provided exception must never turn a notification
+	// endpoint into a loopback or cloud-metadata request. Private/LAN and
+	// benchmark ranges may be explicitly allowed for local push gateways and
+	// DNS Fake-IP deployments, but these process-local destinations stay closed.
+	if !address.IsValid() || address.IsUnspecified() || address.IsLoopback() ||
+		address.IsMulticast() || address.IsLinkLocalUnicast() ||
+		address == netip.MustParseAddr("100.100.100.200") {
+		return false
+	}
+	if publicNotificationAddress(address) {
+		return true
+	}
+	prefixes, _ := ctx.Value(notificationAllowedNetworksKey{}).([]netip.Prefix)
+	for _, prefix := range prefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
 func resolvePublicAddresses(ctx context.Context, host string) ([]netip.Addr, error) {
 	normalized := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 	if normalized == "" || normalized == "localhost" ||
@@ -1084,7 +1118,7 @@ func resolvePublicAddresses(ctx context.Context, host string) ([]netip.Addr, err
 	}
 	if literal, err := netip.ParseAddr(normalized); err == nil {
 		literal = literal.Unmap()
-		if !publicNotificationAddress(literal) {
+		if !notificationAddressAllowed(ctx, literal) {
 			return nil, fmt.Errorf("%w: %s", errUnsafeDestination, literal)
 		}
 		return []netip.Addr{literal}, nil
@@ -1099,7 +1133,7 @@ func resolvePublicAddresses(ctx context.Context, host string) ([]netip.Addr, err
 	result := make([]netip.Addr, 0, len(addresses))
 	for _, address := range addresses {
 		address = address.Unmap()
-		if !publicNotificationAddress(address) {
+		if !notificationAddressAllowed(ctx, address) {
 			return nil, fmt.Errorf("%w: %s", errUnsafeDestination, address)
 		}
 		result = append(result, address)

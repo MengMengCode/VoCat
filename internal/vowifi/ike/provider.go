@@ -554,6 +554,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 		keys,
 		initiatorSPI,
 		responseHeader.ResponderSPI,
+		messageID+1,
 		natDetected,
 		provider.config.KeepaliveInterval,
 	)
@@ -647,6 +648,41 @@ func legacyIKEProfile(mcc, mnc string) bool {
 	return plmn == "23415" || plmn == "2044"
 }
 
+func advertiseEAPOnlyAuthentication(mcc, mnc string) bool {
+	// O2 Germany's 262-03 ePDG rejects an explicit RFC 5998 EAP-only notify;
+	// other tested PLMNs still require it for the Android-compatible exchange.
+	return !o2GermanyIKECompatibility(mcc, mnc)
+}
+
+func o2GermanyIKECompatibility(mcc, mnc string) bool {
+	plmn := strings.TrimSpace(mcc) + strings.TrimLeft(strings.TrimSpace(mnc), "0")
+	return plmn == "2623"
+}
+
+func buildInitialEAPAuth(
+	idi payload,
+	requestedIDr payload,
+	childOfferBody []byte,
+	tsi payload,
+	tsr payload,
+	eapOnly bool,
+) []payload {
+	payloads := []payload{idi, requestedIDr}
+	if eapOnly {
+		payloads = append(payloads, makeNotify(notifyEAPOnlyAuth, nil))
+	}
+	payloads = append(payloads,
+		makeNotify(notifyMOBIKESupported, nil),
+		makeNotify(notifyInitialContact, nil),
+	)
+	return append(payloads,
+		payload{Type: payloadSA, Body: append([]byte(nil), childOfferBody...)},
+		tsi,
+		tsr,
+		configurationRequest(),
+	)
+}
+
 func buildInitialEAPOnlyAuth(
 	idi payload,
 	requestedIDr payload,
@@ -654,15 +690,7 @@ func buildInitialEAPOnlyAuth(
 	tsi payload,
 	tsr payload,
 ) []payload {
-	return []payload{
-		idi,
-		requestedIDr,
-		makeNotify(notifyEAPOnlyAuth, nil),
-		{Type: payloadSA, Body: append([]byte(nil), childOfferBody...)},
-		tsi,
-		tsr,
-		configurationRequest(),
-	}
+	return buildInitialEAPAuth(idi, requestedIDr, childOfferBody, tsi, tsr, true)
 }
 
 func ikeOffer(group uint16, allowSHA1 bool) proposal {

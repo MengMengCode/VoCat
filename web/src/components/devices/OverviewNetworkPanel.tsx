@@ -77,11 +77,7 @@ export function OverviewNetworkPanel({ device, trafficMinuteRx, trafficMinuteTx,
     : "";
 
   if (!developerActive) {
-    return (
-      <div className="ui-panel-muted p-4">
-        <div className="text-xs font-bold uppercase tracking-wider text-gray-500">{t("网络")}</div>
-      </div>
-    );
+    return null;
   }
 
   return (

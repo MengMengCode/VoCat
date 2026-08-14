@@ -19,8 +19,6 @@ const maxConfigBytes = 1 << 20
 type Config struct {
 	Address             string
 	DatabasePath        string
-	AdminUsername       string
-	AdminPassword       string
 	SessionTTL          time.Duration
 	SecureCookies       bool
 	ShutdownTimeout     time.Duration
@@ -28,25 +26,25 @@ type Config struct {
 }
 
 type fileConfig struct {
-	Address             *string `json:"address"`
-	DatabasePath        *string `json:"database_path"`
-	AdminUsername       *string `json:"admin_username"`
-	AdminPassword       *string `json:"admin_password"`
+	Address      *string `json:"address"`
+	DatabasePath *string `json:"database_path"`
+	// Retain the legacy keys only so upgrades do not reject an existing config
+	// file. They are deliberately ignored: administrator credentials are read
+	// exclusively from SQLite.
+	LegacyAdminUsername *string `json:"admin_username"`
+	LegacyAdminPassword *string `json:"admin_password"`
 	SessionTTL          *string `json:"session_ttl"`
 	SecureCookies       *bool   `json:"secure_cookies"`
 	ShutdownTimeout     *string `json:"shutdown_timeout"`
 	MaxRequestBodyBytes *int64  `json:"max_request_body_bytes"`
 }
 
-// Default returns a configuration suitable for a first local deployment.
-// Operators should replace the bootstrap password through
-// VOCAT_ADMIN_PASSWORD before exposing the service.
+// Default returns the non-secret process configuration. Administrator
+// credentials are initialized separately and stored only in SQLite.
 func Default() Config {
 	return Config{
 		Address:             "0.0.0.0:7575",
 		DatabasePath:        "./data/vocat.db",
-		AdminUsername:       "admin",
-		AdminPassword:       "admin",
 		SessionTTL:          24 * time.Hour,
 		SecureCookies:       false,
 		ShutdownTimeout:     10 * time.Second,
@@ -116,12 +114,6 @@ func applyFile(cfg *Config, values fileConfig) error {
 	if values.DatabasePath != nil {
 		cfg.DatabasePath = *values.DatabasePath
 	}
-	if values.AdminUsername != nil {
-		cfg.AdminUsername = *values.AdminUsername
-	}
-	if values.AdminPassword != nil {
-		cfg.AdminPassword = *values.AdminPassword
-	}
 	if values.SessionTTL != nil {
 		duration, err := time.ParseDuration(*values.SessionTTL)
 		if err != nil {
@@ -154,8 +146,6 @@ func applyEnvironment(cfg *Config) error {
 
 	applyString("VOCAT_ADDR", &cfg.Address)
 	applyString("VOCAT_DATABASE_PATH", &cfg.DatabasePath)
-	applyString("VOCAT_ADMIN_USERNAME", &cfg.AdminUsername)
-	applyString("VOCAT_ADMIN_PASSWORD", &cfg.AdminPassword)
 
 	if value, ok := os.LookupEnv("VOCAT_SESSION_TTL"); ok {
 		duration, err := time.ParseDuration(value)
@@ -203,16 +193,6 @@ func (cfg Config) Validate() error {
 	if strings.TrimSpace(cfg.DatabasePath) == "" {
 		return errors.New("database_path must not be empty")
 	}
-	username := strings.TrimSpace(cfg.AdminUsername)
-	if username == "" || len(username) > 64 {
-		return errors.New("admin_username must contain between 1 and 64 characters")
-	}
-	if strings.ContainsAny(username, "\r\n\t") {
-		return errors.New("admin_username must not contain control whitespace")
-	}
-	if cfg.AdminPassword == "" {
-		return errors.New("admin_password must not be empty")
-	}
 	if cfg.SessionTTL < 5*time.Minute || cfg.SessionTTL > 30*24*time.Hour {
 		return errors.New("session_ttl must be between 5m and 720h")
 	}
@@ -223,10 +203,4 @@ func (cfg Config) Validate() error {
 		return errors.New("max_request_body_bytes must be between 1024 and 10485760")
 	}
 	return nil
-}
-
-// UsesDefaultCredentials reports whether the documented bootstrap credentials
-// are still active.
-func (cfg Config) UsesDefaultCredentials() bool {
-	return cfg.AdminUsername == "admin" && cfg.AdminPassword == "admin"
 }

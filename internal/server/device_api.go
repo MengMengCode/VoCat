@@ -15,6 +15,7 @@ import (
 	"vocat/internal/device"
 	"vocat/internal/i18n"
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 	vowifiruntime "vocat/internal/vowifi/runtime"
@@ -1710,6 +1711,10 @@ func deviceStatus(entry device.Device) map[string]any {
 }
 
 func storedDeviceConfig(config store.Device) map[string]any {
+	simPIN := ""
+	if strings.TrimSpace(config.SIMPIN) != "" {
+		simPIN = store.SecretMask
+	}
 	return map[string]any{
 		"id":                              config.ID,
 		"name":                            config.Name,
@@ -1720,6 +1725,7 @@ func storedDeviceConfig(config store.Device) map[string]any {
 		"usb_path":                        config.USBPath,
 		"audio_device":                    config.AudioDevice,
 		"modem_imei":                      config.ModemIMEI,
+		"sim_pin":                         simPIN,
 		"apn":                             config.APN,
 		"ims_apn":                         config.IMSAPN,
 		"ims_private_identity":            config.IMSPrivateIdentity,
@@ -1748,6 +1754,17 @@ func storedDeviceConfig(config store.Device) map[string]any {
 
 func fillConfigFromPhysical(config *store.Device, entry device.Device) {
 	candidate := entry.Candidate
+	if candidate.HardwareKind == pcsc.HardwareKind {
+		config.DeviceType = store.DeviceTypeUSBSIMReader
+		config.ControlDevice = candidate.ReaderName
+		config.ATPort = ""
+		config.Interface = ""
+		config.DeviceBackend = "pcsc"
+		config.ESIMTransport = "pcsc"
+		config.NetworkEnabled = false
+		config.SMSEnabled = true
+		config.VoWiFiEnabled = true
+	}
 	if config.Interface == "" {
 		config.Interface = candidate.NetworkInterface
 	}
@@ -1774,65 +1791,77 @@ func fillConfigFromPhysical(config *store.Device, entry device.Device) {
 func modemSummary(snapshot *device.Snapshot, phone string, phoneSource string) map[string]any {
 	if snapshot == nil {
 		return map[string]any{
-			"operator":              "",
-			"native_mcc":            "",
-			"native_mnc":            "",
-			"operator_country_code": "",
-			"card_mcc":              "",
-			"card_mnc":              "",
-			"card_country":          "",
-			"service_blocked":       false,
-			"blocked_reason":        "",
-			"network_mode":          "",
-			"radio_band":            "",
-			"radio_channel":         0,
-			"signal_dbm":            0,
-			"signal_sinr":           0,
-			"imei":                  "",
-			"iccid":                 "",
-			"reg_status":            0,
-			"reg_status_text":       "not refreshed",
-			"sim_inserted":          false,
-			"phone_number":          phone,
-			"phone_number_source":   phoneSource,
-			"model":                 "",
+			"operator":                  "",
+			"native_mcc":                "",
+			"native_mnc":                "",
+			"native_spn":                "",
+			"operator_country_code":     "",
+			"card_mcc":                  "",
+			"card_mnc":                  "",
+			"card_country":              "",
+			"home_carrier_name":         "",
+			"home_carrier_plmn":         "",
+			"home_carrier_country_code": "",
+			"service_blocked":           false,
+			"blocked_reason":            "",
+			"network_mode":              "",
+			"radio_band":                "",
+			"radio_channel":             0,
+			"signal_dbm":                0,
+			"signal_sinr":               0,
+			"imei":                      "",
+			"iccid":                     "",
+			"reg_status":                0,
+			"reg_status_text":           "not refreshed",
+			"sim_inserted":              false,
+			"phone_number":              phone,
+			"phone_number_source":       phoneSource,
+			"model":                     "",
 		}
 	}
 	mcc, mnc := splitPLMN(snapshot.OperatorCode)
 	_, operatorCountryCode, _ := device.CarrierForPLMN(snapshot.OperatorCode)
 	cardMCC, cardMNC := device.CardMCCMNC(snapshot.IMSI)
+	homePLMN, homeCarrier, homeCountry, _ := device.CarrierForSIM(device.CarrierIdentity{
+		IMSI: snapshot.IMSI,
+		SPN:  snapshot.SPN,
+	})
 	blockedReason := device.RegionBlockReason(snapshot.IMSI)
 	return map[string]any{
-		"operator":              snapshot.OperatorName,
-		"native_mcc":            mcc,
-		"native_mnc":            mnc,
-		"operator_country_code": operatorCountryCode,
-		"card_mcc":              cardMCC,
-		"card_mnc":              cardMNC,
-		"card_country":          countryNameForMCC(cardMCC),
-		"service_blocked":       blockedReason != "",
-		"blocked_reason":        blockedReason,
-		"network_mode":          snapshot.AccessTech,
-		"network_duplex":        "",
-		"radio_band":            snapshot.Band,
-		"radio_channel":         parseDecimal(snapshot.Channel),
-		"signal_dbm":            pointerInt(snapshot.RSSIDBm),
-		"signal_rsrp":           pointerInt(snapshot.RSRP),
-		"signal_rsrq":           pointerInt(snapshot.RSRQ),
-		"signal_sinr":           pointerInt(snapshot.SINR),
-		"imei":                  snapshot.IMEI,
-		"iccid":                 snapshot.ICCID,
-		"imsi":                  snapshot.IMSI,
-		"firmware":              snapshot.Firmware,
-		"model":                 snapshot.Model,
-		"reg_status":            snapshot.RegistrationStatus,
-		"reg_status_text":       registrationText(snapshot),
-		"ps_attached":           snapshot.PSAttached,
-		"sim_inserted":          snapshot.SIMStatus != "",
-		"operating_mode":        snapshot.OperatingMode,
-		"phone_number":          phone,
-		"phone_number_source":   phoneSource,
-		"phone_number_status":   phoneStatus(snapshot),
+		"operator":                  snapshot.OperatorName,
+		"native_mcc":                mcc,
+		"native_mnc":                mnc,
+		"native_spn":                snapshot.SPN,
+		"operator_country_code":     operatorCountryCode,
+		"card_mcc":                  cardMCC,
+		"card_mnc":                  cardMNC,
+		"card_country":              countryNameForMCC(cardMCC),
+		"home_carrier_name":         homeCarrier,
+		"home_carrier_plmn":         homePLMN,
+		"home_carrier_country_code": homeCountry,
+		"service_blocked":           blockedReason != "",
+		"blocked_reason":            blockedReason,
+		"network_mode":              snapshot.AccessTech,
+		"network_duplex":            "",
+		"radio_band":                snapshot.Band,
+		"radio_channel":             parseDecimal(snapshot.Channel),
+		"signal_dbm":                pointerInt(snapshot.RSSIDBm),
+		"signal_rsrp":               pointerInt(snapshot.RSRP),
+		"signal_rsrq":               pointerInt(snapshot.RSRQ),
+		"signal_sinr":               pointerInt(snapshot.SINR),
+		"imei":                      snapshot.IMEI,
+		"iccid":                     snapshot.ICCID,
+		"imsi":                      snapshot.IMSI,
+		"firmware":                  snapshot.Firmware,
+		"model":                     snapshot.Model,
+		"reg_status":                snapshot.RegistrationStatus,
+		"reg_status_text":           registrationText(snapshot),
+		"ps_attached":               snapshot.PSAttached,
+		"sim_inserted":              snapshot.SIMStatus != "",
+		"operating_mode":            snapshot.OperatingMode,
+		"phone_number":              phone,
+		"phone_number_source":       phoneSource,
+		"phone_number_status":       phoneStatus(snapshot),
 	}
 }
 

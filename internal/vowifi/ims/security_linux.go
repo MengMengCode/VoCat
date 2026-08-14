@@ -92,6 +92,14 @@ func runIPCommand(ctx context.Context, command string, operation xfrmOperation) 
 	if message == "" {
 		message = err.Error()
 	}
+	if strings.Contains(strings.ToLower(message), "protocol not supported") ||
+		strings.Contains(strings.ToLower(message), "operation not supported") {
+		return fmt.Errorf(
+			"%s: host kernel lacks XFRM/IPsec support; install matching kmod-ipsec and kmod-ipsec4/6 (OpenWrt), or enable CONFIG_XFRM_USER and ESP in the kernel: %s",
+			operation.description,
+			message,
+		)
+	}
 	// Operation descriptions contain no SPI keys or subscriber identity.
 	return fmt.Errorf("%s: %s", operation.description, message)
 }

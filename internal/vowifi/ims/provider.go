@@ -39,6 +39,7 @@ type Config struct {
 	PCSCF              string
 	LocalAddress       string
 	Transport          string
+	TransportByPLMN    map[string]string
 	Port               int
 	RegistrationExpiry time.Duration
 	TransactionTimeout time.Duration
@@ -115,6 +116,19 @@ func normalizeConfig(config Config) (Config, error) {
 	if config.Transport != "" && config.Transport != "udp" && config.Transport != "tcp" {
 		return Config{}, fmt.Errorf("ims: unsupported SIP transport %q", config.Transport)
 	}
+	transportByPLMN := make(map[string]string, len(config.TransportByPLMN))
+	for plmn, transport := range config.TransportByPLMN {
+		plmn = strings.TrimSpace(plmn)
+		transport = strings.ToLower(strings.TrimSpace(transport))
+		if !digitsBetween(plmn, 5, 6) {
+			return Config{}, fmt.Errorf("ims: invalid transport override PLMN %q", plmn)
+		}
+		if transport != "udp" && transport != "tcp" {
+			return Config{}, fmt.Errorf("ims: unsupported SIP transport %q for PLMN %s", transport, plmn)
+		}
+		transportByPLMN[plmn] = transport
+	}
+	config.TransportByPLMN = transportByPLMN
 	if strings.TrimSpace(config.UserAgent) == "" {
 		config.UserAgent = "vocat/1"
 	}
@@ -251,7 +265,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 	if provider.config.PCSCF != "" && !pcscfProvenByTunnel(endpoint, tunnel.PCSCF, provider.config.Port) {
 		return nil, errors.New("ims: configured P-CSCF is not proven by the SWu tunnel")
 	}
-	transport := provider.config.Transport
+	transport := transportForIdentity(effectiveConfig, request.Identity)
 	if transport == "" {
 		transport = transportHint
 	}
@@ -291,6 +305,33 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 		return nil, err
 	}
 	return session, nil
+}
+
+func transportForIdentity(config Config, identity vowifi.SIMIdentity) string {
+	mcc := strings.TrimSpace(identity.HomeMCC)
+	mnc := strings.TrimSpace(identity.HomeMNC)
+	if transport := config.TransportByPLMN[mcc+mnc]; transport != "" {
+		return transport
+	}
+	// A two-digit MNC and its three-digit zero-padded representation are
+	// equivalent PLMNs; accept either spelling in deployment overrides.
+	if len(mnc) == 2 {
+		if transport := config.TransportByPLMN[mcc+"0"+mnc]; transport != "" {
+			return transport
+		}
+	}
+	if len(mnc) == 3 && strings.HasPrefix(mnc, "0") {
+		if transport := config.TransportByPLMN[mcc+strings.TrimPrefix(mnc, "0")]; transport != "" {
+			return transport
+		}
+	}
+	return config.Transport
+}
+
+func usesO2GermanyIMSProfile(identity vowifi.SIMIdentity) bool {
+	mcc := strings.TrimSpace(identity.HomeMCC)
+	mnc := strings.TrimLeft(strings.TrimSpace(identity.HomeMNC), "0")
+	return mcc+mnc == "2623"
 }
 
 type identitySet struct {
@@ -850,6 +891,13 @@ func (session *Session) buildRegister(
 	transportUpper := strings.ToUpper(session.transport)
 	requestURI := "sip:" + session.identity.domain
 	routeURI := "sip:" + session.endpoint.address() + ";transport=" + session.transport + ";lr"
+	o2Germany := usesO2GermanyIMSProfile(session.request.Identity)
+	supported := "path, sec-agree"
+	allow := "REGISTER, MESSAGE, INVITE, ACK, CANCEL, BYE, OPTIONS"
+	if o2Germany {
+		supported = "path, gruu, outbound, sec-agree, 100rel, timer"
+		allow = "INVITE, ACK, CANCEL, BYE, PRACK, UPDATE, INFO, MESSAGE, OPTIONS"
+	}
 	contact := fmt.Sprintf(
 		"<sip:%s@%s;transport=%s>;+g.3gpp.accesstype=\"wlan1\";+sip.instance=\"<%s>\";"+
 			"+g.3gpp.smsip;audio;"+
@@ -871,9 +919,12 @@ func (session *Session) buildRegister(
 		fmt.Sprintf("CSeq: %d REGISTER", cseq),
 		"Contact: " + contact,
 		fmt.Sprintf("Expires: %d", expires),
-		"Supported: path, sec-agree",
-		"Allow: REGISTER, MESSAGE, INVITE, ACK, CANCEL, BYE, OPTIONS",
+		"Supported: " + supported,
+		"Allow: " + allow,
 		"User-Agent: " + session.provider.config.UserAgent,
+	}
+	if o2Germany {
+		lines = append(lines, "P-Preferred-Identity: <"+session.identity.public+">")
 	}
 	if session.securityOffered() {
 		lines = append(

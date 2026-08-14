@@ -39,6 +39,26 @@ func TestUSBSIMReaderAutomaticTasksRequireVoWiFi(t *testing.T) {
 	}
 }
 
+func TestAutomaticTaskAvailabilityHidesRestrictedPaths(t *testing.T) {
+	for _, test := range []struct {
+		available   bool
+		taskType    string
+		environment string
+		wantError   bool
+	}{
+		{false, "sms", "vowifi", false},
+		{false, "call", "vowifi", false},
+		{false, "sms", "cellular", true},
+		{false, "public_ip", "cellular", true},
+		{true, "public_ip", "cellular", false},
+	} {
+		err := validateAutomaticTaskAvailability(test.available, test.taskType, test.environment)
+		if (err != nil) != test.wantError {
+			t.Fatalf("availability(%v, %q, %q) = %v", test.available, test.taskType, test.environment, err)
+		}
+	}
+}
+
 func TestAutomaticSMSRetrySafetyPreventsDuplicateSubmission(t *testing.T) {
 	unsafe := []byte(`{"data":{"parts_attempted":1,"parts_accepted":1,"retry_safe":false}}`)
 	if automaticSMSRetrySafe(unsafe) {

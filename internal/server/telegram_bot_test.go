@@ -127,8 +127,11 @@ func TestTelegramCarrierPresentationSeparatesHomeAndServingNetworks(t *testing.T
 	if got := telegramHomeCarrier("234336570710174"); !strings.Contains(got, "🇬🇧") || !strings.Contains(got, "23433") {
 		t.Fatalf("home carrier = %q", got)
 	}
-	if got := telegramHomeCarrier("204040123456789", "Lebara"); !strings.Contains(got, "Lebara") || !strings.Contains(got, "20404") || !strings.Contains(got, "🇬🇧") || strings.Contains(got, "🇳🇱") {
-		t.Fatalf("branded foreign-core carrier = %q", got)
+	if got := telegramHomeCarrier("454006395879502", "Saily"); !strings.Contains(got, "1O1O / csl / Club Sim") || !strings.Contains(got, "45400") || !strings.Contains(got, "🇭🇰") || strings.Contains(got, "Saily") {
+		t.Fatalf("profile brand overrode home carrier = %q", got)
+	}
+	if got := telegramHomeCarrier("999991234567890", "Unknown Brand"); got != "Unknown Brand" {
+		t.Fatalf("unknown home carrier did not fall back to SPN: %q", got)
 	}
 	flight := &device.Snapshot{FlightMode: true, OperatorName: "stale network", RegistrationStatus: 1}
 	if got := telegramCurrentNetwork(flight); got != "--（飞行模式）" {

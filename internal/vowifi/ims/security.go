@@ -72,6 +72,10 @@ type securityProposal struct {
 	spiServer  uint32
 	portClient int
 	portServer int
+	// encryption is an optional carrier-selected preference used when a
+	// caller constructs a proposal directly (for example the O2 integrity-only
+	// profile). The general proposal still advertises all compatible mechanisms.
+	encryption string
 	mechanisms []securityMechanism
 }
 
@@ -141,12 +145,16 @@ func newSecurityProposal(localIP net.IP, configuredClientPort int, configuredSer
 func (proposal securityProposal) headerValue() string {
 	mechanisms := proposal.mechanisms
 	if len(mechanisms) == 0 {
+		encryption := strings.ToLower(strings.TrimSpace(proposal.encryption))
+		if encryption == "" {
+			encryption = securityEncryptionAES
+		}
 		mechanisms = []securityMechanism{{
 			name:       securityProtocolIPSec3GPP,
 			algorithm:  securityAlgorithmSHA1,
 			protocol:   "esp",
 			mode:       "trans",
-			encryption: securityEncryptionAES,
+			encryption: encryption,
 			spiClient:  proposal.spiClient,
 			spiServer:  proposal.spiServer,
 			portClient: proposal.portClient,

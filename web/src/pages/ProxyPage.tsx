@@ -241,7 +241,7 @@ export default function ProxyPage() {
     <div className="mx-auto max-w-7xl">
       <PageHeader
         title={t("代理管理")}
-        subtitle={t("管理 VoWiFi 上游代理和 eSIM Profile 绑定")}
+        subtitle={t("管理 VoWiFi 上游代理以及实体 SIM / eSIM Profile 绑定")}
         actions={<Button variant="primary" icon={<AddRegular />} onClick={() => openUpstreamDialog()}>{t("新增代理")}</Button>}
       />
       <UpstreamSection

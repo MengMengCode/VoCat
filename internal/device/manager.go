@@ -27,6 +27,7 @@ type Options struct {
 
 type Manager struct {
 	mu                            sync.RWMutex
+	uiccMu                        sync.Mutex // serializes multi-command UICC/APDU transactions
 	esimMu                        sync.Mutex // serializes eSIM card access (list/switch/download)
 	esimRecoveryMu                sync.Mutex
 	esimRecoveries                map[string]chan struct{}
@@ -55,6 +56,22 @@ type Manager struct {
 	ussdSessions                  map[string]ussdSession
 }
 
+// LockUICC and UnlockUICC let VoWiFi AKA share the same transaction boundary
+// as eSIM ES10 operations. A logical-channel exchange spans multiple APDUs and
+// must not be interleaved with another UICC client.
+func (manager *Manager) LockUICC()   { manager.uiccMu.Lock() }
+func (manager *Manager) UnlockUICC() { manager.uiccMu.Unlock() }
+
+func (manager *Manager) lockESIM() {
+	manager.esimMu.Lock()
+	manager.uiccMu.Lock()
+}
+
+func (manager *Manager) unlockESIM() {
+	manager.uiccMu.Unlock()
+	manager.esimMu.Unlock()
+}
+
 // ussdSession tracks an open USSD dialog on a device so a follow-up Continue or
 // Cancel can be routed back to the right modem. The modem owns the actual
 // network session; this map only records which device a session id belongs to.
@@ -66,6 +83,8 @@ type ussdSession struct {
 type managedDevice struct {
 	opMu              sync.Mutex
 	candidate         modem.Candidate
+	backend           string
+	lastICCID         string
 	client            modem.Client
 	snapshot          *Snapshot
 	lastError         string
@@ -74,6 +93,7 @@ type managedDevice struct {
 	recovering        bool
 	preFlightMode     *int
 	resetClientOnLock bool
+	simPIN            string
 }
 
 func NewManager(options Options) (*Manager, error) {
@@ -96,6 +116,9 @@ func NewManager(options Options) (*Manager, error) {
 	if options.ScanTimeout <= 0 {
 		// AT+COPS=? can take well over a minute while the modem sweeps every band.
 		options.ScanTimeout = 150 * time.Second
+	}
+	if options.CardReaders == nil {
+		options.CardReaders = pcsc.New()
 	}
 	return &Manager{
 		discoverer:                    options.Discoverer,
@@ -192,9 +215,25 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	candidates, err := manager.discoverer.Discover(ctx)
-	if err != nil {
-		return nil, err
+	candidates, modemErr := manager.discoverer.Discover(ctx)
+	readers, readerErr := manager.cardReaders.Readers(ctx)
+	if readerErr == nil {
+		for _, reader := range readers {
+			candidates = append(candidates, modem.Candidate{
+				ID: pcsc.DeviceID(reader), HardwareKind: pcsc.HardwareKind,
+				ReaderName: reader.Name, USBPath: reader.USBPath,
+				VendorID: reader.VendorID, ProductID: reader.ProductID,
+				Manufacturer: reader.Manufacturer, Product: reader.Product,
+				DiscoveryIssue: reader.DiscoveryIssue,
+			})
+		}
+	}
+	if modemErr != nil && readerErr != nil &&
+		!errors.Is(readerErr, pcsc.ErrUnsupported) && !errors.Is(readerErr, pcsc.ErrUnavailable) {
+		return nil, errors.Join(modemErr, readerErr)
+	}
+	if modemErr != nil && len(candidates) == 0 {
+		return nil, modemErr
 	}
 	seen := make(map[string]struct{}, len(candidates))
 
@@ -431,14 +470,91 @@ func (manager *Manager) Refresh(ctx context.Context, id string) (Snapshot, error
 		return Snapshot{}, err
 	}
 	candidate := manager.candidateFor(state)
+	if candidate.HardwareKind == pcsc.HardwareKind {
+		return manager.refreshCardReader(ctx, id, state, candidate)
+	}
 	client, err := manager.clientLocked(ctx, state, candidate)
 	if err != nil {
 		manager.setResult(id, state, nil, err)
 		return Snapshot{}, err
 	}
 	snapshot, err := manager.readSnapshot(ctx, id, candidate, client)
+	if err == nil && strings.TrimSpace(snapshot.ICCID) != "" {
+		state.lastICCID = strings.TrimSpace(snapshot.ICCID)
+	}
 	manager.setResult(id, state, &snapshot, err)
 	return snapshot, err
+}
+
+func (manager *Manager) refreshCardReader(ctx context.Context, id string, state *managedDevice, candidate modem.Candidate) (Snapshot, error) {
+	result := Snapshot{
+		DeviceID: id, Port: candidate.ReaderName, Responsive: true,
+		Manufacturer: candidate.Manufacturer, Model: candidate.Product,
+		AccessTech: "Wi-Fi", RegistrationSource: "pcsc", OperatingMode: 4,
+		ModeKnown: true, FlightMode: true, RadioOff: true, UpdatedAt: time.Now().UTC(),
+	}
+	previousICCID := state.lastICCID
+	card, err := manager.cardReaders.Snapshot(ctx, pcsc.Selector{USBPath: candidate.USBPath, ReaderName: candidate.ReaderName}, state.simPIN)
+	if err != nil {
+		switch {
+		case errors.Is(err, pcsc.ErrNoCard):
+			err = nil
+		case errors.Is(err, pcsc.ErrPINRequired), errors.Is(err, pcsc.ErrPINTriesLow), errors.Is(err, pcsc.ErrPINRejected):
+			result.SIMStatus = "SIM PIN"
+			result.Warnings = []string{err.Error()}
+			err = nil
+		default:
+			manager.setResult(id, state, &result, err)
+			return result, err
+		}
+	} else {
+		result.SIMStatus = "READY"
+		result.SIMReady = true
+		result.ICCID = card.Identity.ICCID
+		result.IMSI = card.Identity.IMSI
+		result.SPN = card.Identity.SPN
+		result.MNCLength = card.Identity.MNCLength
+		result.SIMChanged = previousICCID != "" && !strings.EqualFold(previousICCID, result.ICCID)
+		state.lastICCID = result.ICCID
+	}
+	manager.setResult(id, state, &result, err)
+	return result, err
+}
+
+// SetSIMPin updates the in-memory PIN used for protected smart-card reads.
+// The value is never copied into snapshots or logs.
+func (manager *Manager) SetSIMPin(id, pin string) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	state := manager.devices[id]
+	if state == nil || !state.discovered {
+		return ErrNotFound
+	}
+	state.simPIN = strings.TrimSpace(pin)
+	return nil
+}
+
+// SetBackend selects the control plane for a device. AT remains available for
+// UICC, RF, SMS, voice and diagnostics even when registration/data use QMI.
+func (manager *Manager) SetBackend(id, backend string) error {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	if backend != "at" && backend != "qmi" && backend != "pcsc" {
+		return fmt.Errorf("unsupported device backend %q", backend)
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	state := manager.devices[id]
+	if state == nil || !state.discovered {
+		return ErrNotFound
+	}
+	state.backend = backend
+	return nil
+}
+
+func (manager *Manager) backendFor(state *managedDevice) string {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	return state.backend
 }
 
 func (manager *Manager) ExecuteAT(

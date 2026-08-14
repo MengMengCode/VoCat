@@ -330,6 +330,12 @@ func (manager *Manager) openEuiccAID(ctx context.Context, id, aidHex string) (*e
 			qmiRecovered = true
 			continue
 		}
+		if transientAttempts == 0 && errors.Is(err, errNoLogicalChannel) &&
+			manager.releaseStaleEuiccChannel(ctx, id) {
+			// A canceled AT+CSIM transaction can leave channel 1 allocated on
+			// EC20-class firmware. Release that orphan once, then retry the open.
+			continue
+		}
 		if !isTransientEuiccCME(err) {
 			return nil, err
 		}
@@ -344,6 +350,11 @@ func (manager *Manager) openEuiccAID(ctx context.Context, id, aidHex string) (*e
 		case <-time.After(delay):
 		}
 	}
+}
+
+func (manager *Manager) releaseStaleEuiccChannel(ctx context.Context, id string) bool {
+	_, sw, err := manager.csim(ctx, id, []byte{0x00, 0x70, 0x80, 0x01, 0x00})
+	return err == nil && sw == 0x9000
 }
 
 func (manager *Manager) openEuiccOnce(ctx context.Context, id string) (*euiccChannel, error) {
@@ -664,8 +675,8 @@ func validProfileICCID(iccid string) bool {
 
 // ESIMListProfiles reads the eUICC profile list via ES10c GetProfilesInfo.
 func (manager *Manager) ESIMListProfiles(ctx context.Context, id string) (EsimInfo, error) {
-	manager.esimMu.Lock()
-	defer manager.esimMu.Unlock()
+	manager.lockESIM()
+	defer manager.unlockESIM()
 	if manager.esimRecoveryActive(id) {
 		if cached, ok := manager.cachedESIMInfo(id); ok {
 			return cached, nil
@@ -701,8 +712,8 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	if _, err := buildEnableProfileRequest(iccid); err != nil {
 		return err
 	}
-	manager.esimMu.Lock()
-	defer manager.esimMu.Unlock()
+	manager.lockESIM()
+	defer manager.unlockESIM()
 	if err := manager.waitForESIMRecovery(ctx, id); err != nil {
 		return err
 	}

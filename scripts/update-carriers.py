@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Refresh VoCat's offline PLMN name table from Android's carrier database.
+"""Refresh VoCat's offline carrier table from Android's carrier database.
 
-The AOSP carrier ID table is maintained for Android's own carrier recognition.
-Only unconstrained MCC/MNC records are used here: MVNO matches that also require
-an SPN, IMSI prefix, GID or ICCID prefix must not rename the serving MNO.
+The compact ``c`` map remains the MCC/MNC-only fallback.  The ``r`` list keeps
+Android's SIM-identity rules (IMSI, ICCID, SPN and GID) so travel eSIMs and
+MVNOs sharing an MNO's PLMN can be identified without hard-coded exceptions.
 """
 
 from __future__ import annotations
@@ -125,10 +125,61 @@ def aosp_carriers(text: str) -> dict[str, str]:
     return carriers
 
 
+RULE_FIELDS = {
+    "mccmnc_tuple": "m",
+    "imsi_prefix_xpattern": "x",
+    "spn": "s",
+    "gid1": "g1",
+    "gid2": "g2",
+    "iccid_prefix": "i",
+}
+
+
+def textproto_strings(block: str, field: str) -> list[str]:
+    return [
+        json.loads(value)
+        for value in re.findall(
+            rf"^\s*{re.escape(field)}:\s*(\"(?:\\.|[^\"\\])*\")",
+            block,
+            re.M,
+        )
+    ]
+
+
+def aosp_identity_rules(text: str) -> list[dict[str, object]]:
+    """Return rules VoCat can evaluate using values read directly from a SIM.
+
+    Android combines different fields with AND and repeated values of one field
+    with OR. Rules that also require APN, PNN/PLMN or carrier certificates are
+    omitted until those inputs are available; treating an unavailable input as
+    a wildcard would incorrectly identify subscriptions.
+    """
+
+    supported = set(RULE_FIELDS)
+    rules: list[dict[str, object]] = []
+    for carrier in braced_blocks(text, "carrier_id"):
+        name = textproto_string(carrier, "carrier_name").strip()
+        if not name:
+            continue
+        for attribute in braced_blocks(carrier, "carrier_attribute"):
+            fields = set(re.findall(r"^\s*([a-zA-Z0-9_]+)\s*:", attribute, re.M))
+            if not fields.issubset(supported) or fields == {"mccmnc_tuple"}:
+                continue
+            rule: dict[str, object] = {"n": name}
+            for source_field, output_field in RULE_FIELDS.items():
+                values = textproto_strings(attribute, source_field)
+                if values:
+                    rule[output_field] = values
+            if rule.get("m"):
+                rules.append(rule)
+    return rules
+
+
 def main() -> None:
     with urllib.request.urlopen(SOURCE_URL, timeout=30) as response:
         source = base64.b64decode(response.read()).decode("utf-8")
     names = aosp_carriers(source)
+    identity_rules = aosp_identity_rules(source)
     table = json.loads(FRONTEND_TABLE.read_text(encoding="utf-8"))
     countries: dict[str, str] = table["i"]
     countries.update({str(mcc): "us" for mcc in range(310, 317)})
@@ -149,19 +200,23 @@ def main() -> None:
         "c": dict(sorted(carriers.items())),
         "i": dict(sorted(countries.items())),
         "t": sorted(set(table["t"])),
+        "r": identity_rules,
         "meta": {
             "source": "Android Open Source Project carrier_list.textpb",
             "source_url": SOURCE_URL.removesuffix("?format=TEXT"),
             "aosp_version": version_match.group(1) if version_match else "unknown",
             "aosp_generic_records": len(names),
+            "aosp_identity_rules": len(identity_rules),
         },
     }
-    encoded = json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n"
-    FRONTEND_TABLE.write_text(encoded, encoding="utf-8", newline="\n")
-    BACKEND_TABLE.write_text(encoded, encoding="utf-8", newline="\n")
+    frontend_encoded = json.dumps(output, ensure_ascii=False, indent=4) + "\n"
+    backend_encoded = json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n"
+    FRONTEND_TABLE.write_text(frontend_encoded, encoding="utf-8", newline="\n")
+    BACKEND_TABLE.write_text(backend_encoded, encoding="utf-8", newline="\n")
     print(
         f"updated {len(carriers)} PLMN records "
-        f"({len(names)} generic AOSP records, version {output['meta']['aosp_version']})"
+        f"({len(names)} generic records, {len(identity_rules)} identity rules, "
+        f"version {output['meta']['aosp_version']})"
     )
 
 

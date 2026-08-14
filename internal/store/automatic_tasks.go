@@ -99,6 +99,16 @@ func (s *Store) DeleteAutomaticTask(ctx context.Context, id int64) error {
 }
 
 func (s *Store) ClaimDueAutomaticTasks(ctx context.Context, now time.Time, limit int) ([]AutomaticTaskRun, error) {
+	return s.claimDueAutomaticTasks(ctx, now, limit, false)
+}
+
+// ClaimDueAvailableAutomaticTasks excludes task types and environments that
+// are not exposed in the standard product surface.
+func (s *Store) ClaimDueAvailableAutomaticTasks(ctx context.Context, now time.Time, limit int) ([]AutomaticTaskRun, error) {
+	return s.claimDueAutomaticTasks(ctx, now, limit, true)
+}
+
+func (s *Store) claimDueAutomaticTasks(ctx context.Context, now time.Time, limit int, availableOnly bool) ([]AutomaticTaskRun, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -107,8 +117,12 @@ func (s *Store) ClaimDueAutomaticTasks(ctx context.Context, now time.Time, limit
 		return nil, err
 	}
 	defer tx.Rollback()
+	availability := ""
+	if availableOnly {
+		availability = " AND task_type <> 'public_ip' AND environment <> 'cellular'"
+	}
 	rows, err := tx.QueryContext(ctx, automaticTaskSelect+`
-		WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at, id LIMIT ?`, now.Unix(), limit)
+		WHERE enabled = 1 AND next_run_at <= ?`+availability+` ORDER BY next_run_at, id LIMIT ?`, now.Unix(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -236,6 +250,19 @@ func (s *Store) ListAutomaticTaskRuns(ctx context.Context, limit int) ([]Automat
 // the total run count, so the UI can page through the full history instead of
 // a fixed recent window.
 func (s *Store) ListAutomaticTaskRunsPaginated(ctx context.Context, limit, offset int) ([]AutomaticTaskRun, int, error) {
+	return s.listAutomaticTaskRunsPaginated(ctx, limit, offset, "")
+}
+
+// ListAvailableAutomaticTaskRunsPaginated omits history belonging to task
+// types and environments that are not exposed in the standard product surface.
+func (s *Store) ListAvailableAutomaticTaskRunsPaginated(ctx context.Context, limit, offset int) ([]AutomaticTaskRun, int, error) {
+	const where = ` WHERE task_id IN (
+		SELECT id FROM automatic_tasks WHERE task_type <> 'public_ip' AND environment <> 'cellular'
+	)`
+	return s.listAutomaticTaskRunsPaginated(ctx, limit, offset, where)
+}
+
+func (s *Store) listAutomaticTaskRunsPaginated(ctx context.Context, limit, offset int, where string) ([]AutomaticTaskRun, int, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -246,10 +273,10 @@ func (s *Store) ListAutomaticTaskRunsPaginated(ctx context.Context, limit, offse
 		offset = 0
 	}
 	total := 0
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM automatic_task_runs`).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM automatic_task_runs`+where).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count automatic task runs: %w", err)
 	}
-	rows, err := s.db.QueryContext(ctx, automaticTaskRunSelect+` ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := s.db.QueryContext(ctx, automaticTaskRunSelect+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -5,6 +5,10 @@
  * 富文本片段（嵌套链接/代码块的说明框）不走字典，在组件里按语言分支渲染。
  */
 export const EN_DICT: Record<string, string> = {
+	"未知设备": "Unknown device",
+	"系统已发现 USB 读卡器，但 PC/SC 服务未运行；请安装并启动 pcscd 后重新扫描。": "The USB card reader was found, but the PC/SC service is not running. Install and start pcscd, then scan again.",
+	"系统已发现 USB 读卡器，但 PC/SC 驱动未加载；请安装 libccid 或厂商驱动后重新扫描。": "The USB card reader was found, but its PC/SC driver is not loaded. Install libccid or the vendor driver, then scan again.",
+	硬件路径: "Hardware Path",
 	"USB SIM 读卡器（仅 WiFi Calling）": "USB SIM Reader (WiFi Calling only)",
 	"仅在 SIM 启用 PIN 时填写": "Only enter this when SIM PIN is enabled",
 	"留空表示不修改；仅在 SIM 启用 PIN 时填写": "Leave blank to keep unchanged; only enter this when SIM PIN is enabled",
@@ -83,6 +87,22 @@ export const EN_DICT: Record<string, string> = {
   "设备绑定": "Device Bindings",
   "Profile 绑定": "Profile Bindings",
   "添加 Profile 绑定": "Add Profile Bindings",
+  "SIM / Profile 绑定": "SIM / Profile Bindings",
+  "添加 SIM / Profile 绑定": "Add SIM / Profile Bindings",
+  "VoWiFi 会按当前 ICCID 选择代理。实体 SIM 和 eSIM Profile 都可以绑定；同一 ICCID 只能绑定一个代理。":
+    "VoWiFi selects its proxy by the active ICCID. Both physical SIMs and eSIM profiles can be bound, and each ICCID can use only one proxy.",
+  "从当前 SIM 卡和已安装的 eSIM Profile 中选择": "Select from the current SIM and installed eSIM profiles",
+  "个 SIM / Profile": "SIMs / profiles",
+  "当前 SIM 卡": "Current SIM",
+  "当前使用中": "Currently active",
+  "SIM / Profile": "SIM / Profile",
+  "没有可显示的 SIM / Profile": "No SIMs or profiles to display",
+  "尚未绑定 SIM / Profile": "No SIMs or profiles bound",
+  "请确认设备在线并已读取到 SIM 卡 ICCID。": "Make sure the device is online and its SIM ICCID has been read.",
+  "点击添加，从 SIM / Profile 列表中选择。": "Click Add and select from the SIM / profile list.",
+  "管理 VoWiFi 上游代理以及实体 SIM / eSIM Profile 绑定": "Manage VoWiFi upstream proxies and physical SIM / eSIM profile bindings",
+  "点击“新增代理”创建 SOCKS5 上游代理，再按 ICCID 绑定实体 SIM 或 eSIM Profile；未绑定的卡默认直连。":
+    "Create a SOCKS5 upstream proxy, then bind a physical SIM or eSIM profile by ICCID. Unbound SIMs use a direct connection.",
   "VoWiFi 会按当前 ICCID 选择代理。同一 ICCID 只能绑定一个代理，一个代理可以绑定多台设备上的多个 Profile。":
     "VoWiFi selects its proxy by the active ICCID. An ICCID can use only one proxy, while one proxy can serve profiles across multiple devices.",
   "从设备已安装的 eSIM Profile 中选择": "Select from eSIM profiles installed on the devices",
@@ -157,6 +177,7 @@ export const EN_DICT: Record<string, string> = {
   短信检测: "SMS Test",
   自动任务: "Automatic Tasks",
   "按周期切换指定 eSIM Profile，并在设备串行队列中执行短信、通话或漫游公网 IP 任务": "Switch to a selected eSIM profile on schedule, then run SMS, call, or roaming public-IP jobs in a per-device queue",
+	"按周期切换指定 eSIM Profile，并在设备串行队列中执行短信或通话任务": "Switch to a selected eSIM profile on schedule, then run SMS or call jobs in a per-device queue",
   添加任务: "Add Task",
   "设备 / Profile": "Device / Profile",
   执行环境: "Environment",
@@ -193,7 +214,7 @@ export const EN_DICT: Record<string, string> = {
   任务类型: "Task Type",
   开启漫游流量并获取一次公网IP: "Enable roaming data and get the public IP once",
   "基站直连（自动选网）": "Cellular (automatic network selection)",
-  "该任务固定使用基站直连和自动选网；执行时会开启漫游数据，并通过模块接口访问 ipinfo.io。需要开启开发者模式。": "This task always uses cellular direct mode with automatic network selection. It enables roaming data and accesses ipinfo.io through the modem interface. Developer mode is required.",
+	"该任务固定使用基站直连和自动选网；执行时会开启漫游数据，并通过模块接口访问 ipinfo.io。": "This task always uses cellular direct mode with automatic network selection. It enables roaming data and accesses ipinfo.io through the modem interface.",
   首次执行日期: "First Run Date",
   执行时间: "Run Time",
   执行周期: "Interval",
@@ -331,8 +352,8 @@ export const EN_DICT: Record<string, string> = {
     "Opening to the public internet greatly expands the attack surface. Use a strong password and switch back to Internal Only as soon as possible.",
   额外放行网段: "Additional Allowed Ranges",
   添加网段: "Add Range",
-  "在内置内网网段之外始终放行的 CIDR 或单个 IP（例如 203.0.113.0/24）。":
-    "CIDRs or single IPs always allowed in addition to the built-in internal ranges (e.g. 203.0.113.0/24).",
+  "在内置内网网段之外始终放行的 CIDR 或单个 IP；也允许通知推送访问这些目标地址（例如 198.18.0.0/15）。":
+    "CIDRs or single IPs always allowed in addition to the built-in internal ranges; notification delivery may also access these destinations (e.g. 198.18.0.0/15).",
   暂无额外放行网段: "No additional allowed ranges",
   信任代理请求头: "Trust Proxy Headers",
   "仅在系统位于可信反向代理之后时开启，按 X-Forwarded-For 判定来源；否则客户端可伪造该头绕过内网限制。":
@@ -754,8 +775,8 @@ export const EN_DICT: Record<string, string> = {
   "扫描中...": "Scanning...",
   "扫描可用网络": "Scan Available Networks",
   "不可注册": "Unavailable",
-  "已连接到运营商 ePDG，但运营商拒绝了此 SIM 的 EAP-AKA 鉴权。通常表示该 Profile 未开通 IMS/WiFi Calling；重复重连不会解决，需要换用支持 VoWiFi 的运营商 Profile。":
-    "The carrier ePDG was reached, but it rejected EAP-AKA authentication for this SIM. The profile usually has no IMS/Wi-Fi Calling entitlement; reconnecting will not fix it, so use a carrier profile that supports VoWiFi.",
+  "已连接到运营商 ePDG，但 EAP-AKA 流程被拒绝。可能是初始身份、运营商 IKE/EAP 兼容性或订阅策略问题；请根据错误详情确认失败阶段。":
+    "The carrier ePDG was reached, but the EAP-AKA flow was rejected. This can be caused by the initial identity, carrier IKE/EAP interoperability, or subscription policy; check the error details for the failing stage.",
   "扫描结果只代表模组在当前位置实际收到的运营商信号，不代表模组支持的全部运营商；禁用网络表示当前 SIM 不允许注册。":
     "Scan results show only networks the modem can currently receive, not every operator the hardware supports. A forbidden network cannot be used by the current SIM.",
   "扫描网络失败": "Network scan failed",

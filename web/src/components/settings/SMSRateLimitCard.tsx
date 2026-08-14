@@ -38,7 +38,7 @@ export function SMSRateLimitCard({
         <Input
           type="number"
           min={1}
-          max={value?.maxSmsHourlyLimit ?? 1000}
+          max={value?.maxSmsHourlyLimit ?? 20}
           value={Number.isFinite(limit) ? limit : ""}
           disabled={loading || saving}
           onChange={(event) => onLimitChange(Number(event.target.value))}
@@ -46,8 +46,8 @@ export function SMSRateLimitCard({
         />
         <p className="text-xs leading-5 text-gray-500 dark:text-gray-400">
           {zh
-            ? `采用滚动一小时窗口，网页、TG Bot、自动任务、API、VoWiFi 与基站发送全部计入；接收短信不受限制。关闭开发者模式后恢复为 ${value?.defaultSmsHourlyLimit ?? 10} 条/小时。`
-            : `Uses a rolling one-hour window across the web UI, Telegram bot, automatic tasks, API, VoWiFi, and cellular sending. Receiving is unlimited. Disabling developer mode restores ${value?.defaultSmsHourlyLimit ?? 10} messages/hour.`}
+            ? "采用滚动一小时窗口，网页、TG Bot、自动任务、API、VoWiFi 与基站发送全部计入；接收短信不受限制。"
+            : "Uses a rolling one-hour window across the web UI, Telegram bot, automatic tasks, API, VoWiFi, and cellular sending. Receiving is unlimited."}
         </p>
         <Button variant="primary" loading={saving} disabled={loading} onClick={onSave} className="w-full !border-0">
           {zh ? "保存短信速率限制" : "Save SMS rate limit"}

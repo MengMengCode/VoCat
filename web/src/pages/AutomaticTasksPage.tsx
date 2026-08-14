@@ -7,7 +7,7 @@ import {
   SendClockRegular,
 } from "@fluentui/react-icons";
 import { api, apiMessage } from "../api";
-import type { DeviceListItem, DevicesResponse } from "../types";
+import type { DeviceListItem, DevicesResponse, SystemInfo } from "../types";
 import type { EsimProfileGroup } from "../components/devices/types";
 import {
   Button,
@@ -140,6 +140,7 @@ export default function AutomaticTasksPage() {
   const [runsPage, setRunsPage] = useState(1);
   const [runsPageSize, setRunsPageSize] = useState(20);
   const [devices, setDevices] = useState<DeviceListItem[]>([]);
+	const [advancedTasksAvailable, setAdvancedTasksAvailable] = useState(false);
   const [profiles, setProfiles] = useState<ProfileOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [profileLoading, setProfileLoading] = useState(false);
@@ -155,12 +156,14 @@ export default function AutomaticTasksPage() {
   const load = useCallback(async (initial = false) => {
     if (initial) setLoading(true);
     try {
-      const [taskData, deviceData] = await Promise.all([
+      const [taskData, deviceData, systemInfo] = await Promise.all([
         api<{ tasks?: AutomaticTask[] }>("/automatic-tasks"),
         api<DevicesResponse>("/devices"),
+		api<SystemInfo>("/system/info"),
       ]);
       setTasks(taskData.tasks || []);
       setDevices(deviceData.devices || []);
+		setAdvancedTasksAvailable(!!systemInfo.developer);
     } catch (error) {
       message.error(apiMessage(error));
     } finally {
@@ -272,6 +275,9 @@ export default function AutomaticTasksPage() {
 	if (devices.find((device) => device.id === deviceId)?.deviceType === "usb_sim_reader") {
 	  next = { ...next, taskType: next.taskType === "public_ip" ? "sms" : next.taskType, environment: "vowifi" };
 	}
+	if (!advancedTasksAvailable && (next.taskType === "public_ip" || next.environment === "cellular")) {
+	  next = { ...next, taskType: "sms", environment: "vowifi" };
+	}
     setForm(next);
     setOpen(true);
     void loadProfiles(deviceId, next.profileIccid);
@@ -282,7 +288,7 @@ export default function AutomaticTasksPage() {
     setForm((current) => ({
 	  ...current, deviceId, profileIccid: "", profileAid: "",
 	  taskType: reader && current.taskType === "public_ip" ? "sms" : current.taskType,
-	  environment: reader ? "vowifi" : current.environment,
+	  environment: reader || !advancedTasksAvailable ? "vowifi" : current.environment,
 	}));
     void loadProfiles(deviceId);
   }
@@ -293,7 +299,7 @@ export default function AutomaticTasksPage() {
   }
 
   function chooseTaskType(taskType: TaskType) {
-	if (deviceByID.get(form.deviceId)?.deviceType === "usb_sim_reader" && taskType === "public_ip") return;
+	if ((!advancedTasksAvailable || deviceByID.get(form.deviceId)?.deviceType === "usb_sim_reader") && taskType === "public_ip") return;
     setForm((current) => ({
       ...current,
       taskType,
@@ -308,6 +314,7 @@ export default function AutomaticTasksPage() {
 	if (deviceByID.get(form.deviceId)?.deviceType === "usb_sim_reader" && (form.environment !== "vowifi" || form.taskType === "public_ip")) {
 	  return message.warning(t("USB SIM读卡器仅支持VoWiFi短信和通话任务"));
 	}
+	if (!advancedTasksAvailable && (form.environment !== "vowifi" || form.taskType === "public_ip")) return;
     if (form.taskType !== "public_ip" && !form.phone.trim()) return message.warning(t("请输入号码"));
     if (form.taskType === "sms" && !form.message.trim()) return message.warning(t("请输入短信内容"));
     setSaving(true);
@@ -393,9 +400,9 @@ export default function AutomaticTasksPage() {
 	const taskTypeOptions = [
 	  { value: "sms", label: t("发送短信") },
 	  { value: "call", label: t("拨打电话并自动挂断") },
-	  ...(!selectedTaskDeviceIsReader ? [{ value: "public_ip", label: t("开启漫游流量并获取一次公网 IP") }] : []),
+	  ...(advancedTasksAvailable && !selectedTaskDeviceIsReader ? [{ value: "public_ip", label: t("开启漫游流量并获取一次公网 IP") }] : []),
 	];
-	const environmentOptions = selectedTaskDeviceIsReader
+	const environmentOptions = selectedTaskDeviceIsReader || !advancedTasksAvailable
 	  ? [{ value: "vowifi", label: "VoWiFi" }]
 	  : [{ value: "vowifi", label: "VoWiFi" }, { value: "cellular", label: t("基站直连（自动选网）") }];
 
@@ -403,7 +410,9 @@ export default function AutomaticTasksPage() {
     <div className="mx-auto max-w-7xl">
       <PageHeader
         title={t("自动任务")}
-        subtitle={t("按周期切换指定 eSIM Profile，并在设备串行队列中执行短信、通话或漫游公网 IP 任务")}
+		subtitle={advancedTasksAvailable
+		  ? t("按周期切换指定 eSIM Profile，并在设备串行队列中执行短信、通话或漫游公网 IP 任务")
+		  : t("按周期切换指定 eSIM Profile，并在设备串行队列中执行短信或通话任务")}
         actions={<Button variant="primary" icon={<AddRegular />} onClick={() => edit()} disabled={!devices.length}>{t("添加任务")}</Button>}
       />
 
@@ -475,8 +484,8 @@ export default function AutomaticTasksPage() {
             </tbody>
           </table>
         </div>
-        {!runs.length ? <div className="p-8 text-center text-sm text-gray-400">{t("暂无执行记录")}</div> : null}
-        {runsTotal > 0 ? (
+		{!runs.length ? <div className="p-8 text-center text-sm text-gray-400">{t("暂无执行记录")}</div> : null}
+		{runsTotal > 0 ? (
           <div className="border-t border-gray-100 px-5 py-3 dark:border-white/10">
             <Pagination
               page={runsPage}
@@ -501,7 +510,7 @@ export default function AutomaticTasksPage() {
           {form.taskType !== "public_ip" ? <div><label className={fieldLabel}>{t("号码")}</label><Input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} placeholder="+447700900123" /></div> : null}
           {form.taskType === "call" ? <div><label className={fieldLabel}>{t("自动挂断")}</label><Input type="number" min={1} max={600} value={form.durationSeconds} suffix="s" onChange={(event) => setForm({ ...form, durationSeconds: Number(event.target.value) })} /></div> : null}
           {form.taskType === "sms" ? <div className="md:col-span-2"><label className={fieldLabel}>{t("短信内容")}</label><Textarea rows={4} value={form.message} onChange={(event) => setForm({ ...form, message: event.target.value })} /></div> : null}
-          {form.taskType === "public_ip" ? <div className="md:col-span-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">{t("该任务固定使用基站直连和自动选网；执行时会开启漫游数据，并通过模块接口访问 ipinfo.io。需要开启开发者模式。")}</div> : null}
+		  {advancedTasksAvailable && form.taskType === "public_ip" ? <div className="md:col-span-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">{t("该任务固定使用基站直连和自动选网；执行时会开启漫游数据，并通过模块接口访问 ipinfo.io。")}</div> : null}
 
           <div><label className={fieldLabel}>{t("首次执行日期")}</label><Input type="date" value={form.startDate} onChange={(event) => setForm({ ...form, startDate: event.target.value })} /></div>
           <div><label className={fieldLabel}>{t("执行时间")}</label><Input type="time" value={form.runTime} onChange={(event) => setForm({ ...form, runTime: event.target.value })} /></div>

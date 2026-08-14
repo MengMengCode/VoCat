@@ -300,6 +300,80 @@ func TestSysFSDiscoveryRetainsNativeWWANWhileQMIPortRecovers(t *testing.T) {
 	}
 }
 
+func TestSysFSDiscoveryFindsPCIeMHIWWANWithoutUSBBus(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	wwanRoot := filepath.Join(sysRoot, "class", "wwan")
+	for _, name := range []string{"wwan0at1", "wwan0qmi0", "wwan0at0"} {
+		mustMkdir(t, filepath.Join(wwanRoot, name))
+	}
+	mustMkdir(t, filepath.Join(sysRoot, "class", "net", "wwan0"))
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %#v, want one MHI device", candidates)
+	}
+	candidate := candidates[0]
+	if candidate.ID != "mhi-wwan0" || candidate.HardwareKind != "wwan" {
+		t.Fatalf("identity = %#v", candidate)
+	}
+	if candidate.ATPort.Path != filepath.Join(devRoot, "wwan0at0") || candidate.ATPort.Role != PortRoleAT {
+		t.Fatalf("AT port = %#v", candidate.ATPort)
+	}
+	if candidate.QMIControl != filepath.Join(devRoot, "wwan0qmi0") {
+		t.Fatalf("QMI control = %q", candidate.QMIControl)
+	}
+	if candidate.NetworkInterface != "wwan0" {
+		t.Fatalf("network interface = %q", candidate.NetworkInterface)
+	}
+}
+
+func TestSysFSDiscoveryFindsWWANFromDevNodesWithoutClassDirectory(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	for _, name := range []string{"wwan2at0", "wwan2qmi0"} {
+		mustWrite(t, filepath.Join(devRoot, name), "")
+	}
+	mustMkdir(t, filepath.Join(sysRoot, "class", "net", "wwan2"))
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %#v, want one WWAN device", candidates)
+	}
+	if candidates[0].ATPort.Path != filepath.Join(devRoot, "wwan2at0") ||
+		candidates[0].QMIControl != filepath.Join(devRoot, "wwan2qmi0") ||
+		candidates[0].NetworkInterface != "wwan2" {
+		t.Fatalf("candidate = %#v", candidates[0])
+	}
+}
+
+func TestParseWWANPortName(t *testing.T) {
+	for _, test := range []struct {
+		name, index, kind string
+		port              int
+		ok                bool
+	}{
+		{"wwan0at0", "0", "at", 0, true},
+		{"wwan12qmi3", "12", "qmi", 3, true},
+		{"wwan0", "", "", 0, false},
+		{"wwanXat0", "", "", 0, false},
+		{"cdc-wdm0", "", "", 0, false},
+	} {
+		index, kind, port, ok := parseWWANPortName(test.name)
+		if index != test.index || kind != test.kind || port != test.port || ok != test.ok {
+			t.Fatalf("parseWWANPortName(%q) = %q, %q, %d, %v", test.name, index, kind, port, ok)
+		}
+	}
+}
+
 func mustWrite(t *testing.T, path, value string) {
 	t.Helper()
 	mustMkdir(t, filepath.Dir(path))

@@ -55,6 +55,25 @@ func TestCarrierForPLMNReturnsCountryCode(t *testing.T) {
 	}
 }
 
+func TestCountryForMCCUsesEmbeddedCountryIndex(t *testing.T) {
+	tests := map[string]string{
+		"234": "GB",
+		"262": "DE",
+		"310": "US",
+		"460": "CN",
+	}
+	for mcc, want := range tests {
+		if got, ok := CountryForMCC(mcc); !ok || got != want {
+			t.Errorf("CountryForMCC(%q) = (%q, %v), want %q", mcc, got, ok, want)
+		}
+	}
+	for _, invalid := range []string{"", "23", "999", "abcd"} {
+		if got, ok := CountryForMCC(invalid); ok || got != "" {
+			t.Errorf("CountryForMCC(%q) = (%q, %v), want unknown", invalid, got, ok)
+		}
+	}
+}
+
 func TestCarrierForIMSIHandlesTwoAndThreeDigitMNCs(t *testing.T) {
 	tests := []struct {
 		imsi        string
@@ -64,6 +83,7 @@ func TestCarrierForIMSIHandlesTwoAndThreeDigitMNCs(t *testing.T) {
 		{imsi: "234336570710174", wantPLMN: "23433", wantCountry: "GB"},
 		{imsi: "234159609054263", wantPLMN: "23415", wantCountry: "GB"},
 		{imsi: "234870123456789", wantPLMN: "23487", wantCountry: "GB"},
+		{imsi: "454006395879502", wantPLMN: "45400", wantCountry: "HK"},
 		{imsi: "310260123456789", wantPLMN: "310260", wantCountry: "US"},
 	}
 	for _, item := range tests {
@@ -71,5 +91,22 @@ func TestCarrierForIMSIHandlesTwoAndThreeDigitMNCs(t *testing.T) {
 		if !ok || plmn != item.wantPLMN || name == "" || country != item.wantCountry {
 			t.Errorf("CarrierForIMSI(%q) = (%q, %q, %q, %v), want PLMN %q and country %q", item.imsi, plmn, name, country, ok, item.wantPLMN, item.wantCountry)
 		}
+	}
+}
+
+func TestCarrierForSIMUsesAndroidGIDRuleBeforePLMNFallback(t *testing.T) {
+	plmn, name, country, ok := CarrierForSIM(CarrierIdentity{
+		IMSI: "454006395879502", ICCID: "89852350126077295027",
+		SPN: "Saily", GID1: "536E617065", GID2: "536E617065000012", MNCLength: 2,
+	})
+	if !ok || plmn != "45400" || name != "Webbing" || country != "HK" {
+		t.Fatalf("CarrierForSIM exact rule = (%q, %q, %q, %v)", plmn, name, country, ok)
+	}
+
+	plmn, name, country, ok = CarrierForSIM(CarrierIdentity{
+		IMSI: "454006395879502", SPN: "Saily", MNCLength: 2,
+	})
+	if !ok || plmn != "45400" || name != "1O1O / csl / Club Sim" || country != "HK" {
+		t.Fatalf("CarrierForSIM generic fallback = (%q, %q, %q, %v)", plmn, name, country, ok)
 	}
 }

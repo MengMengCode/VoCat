@@ -123,6 +123,9 @@ func (service *Service) Snapshot(ctx context.Context, selector Selector, pin str
 		return Snapshot{}, ErrReaderNotFound
 	}
 	result := Snapshot{Reader: reader}
+	if reader.DiscoveryIssue != "" {
+		return result, fmt.Errorf("%w: %s", ErrUnavailable, reader.DiscoveryIssue)
+	}
 	if !reader.CardPresent {
 		return result, ErrNoCard
 	}

@@ -22,7 +22,7 @@
   <img alt="GitHub Actions" src="https://img.shields.io/badge/GitHub_Actions-Release-2088FF?style=flat-square&logo=githubactions&logoColor=white">
 </p>
 
-[English](../README.md) | **简体中文**
+[English](../README.md) | [العربية](README.ar.md) | **简体中文** | [繁體中文](README.zh-TW.md) | [Français](README.fr.md) | [Русский](README.ru.md) | [Español](README.es.md) | [日本語](README.ja.md)
 
 Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组的开源 Web 控制面板与工程工具套件。它在一个自包含的服务中整合了模组发现、实时射频状态、AT 与 USSD 终端、短信、WiFi Calling(WiFi 通话)、eSIM 管理、网络选择、代理路由、通知、审计日志以及发布自动化。
 
@@ -46,7 +46,7 @@ Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组的开源 Web 控制�
 | 卡策略 | 基于 ICCID 的 WiFi Calling 与飞行模式行为,策略即时应用。 |
 | 代理路由 | 上游 SOCKS 路由、设备绑定、国家规则、TCP 可达性检查以及面向 WiFi Calling 数据路径的 UDP Associate 检查。 |
 | 通知 | 通过 Telegram、Bark、邮件、Pushplus 以及签名 Webhook 转发新入站短信,每条短信单独推送。 |
-| Telegram 机器人 | 设备状态、已安装配置文件列表与切换、WiFi Calling 控制、短信发送、定时拨号并自动挂断、通话状态、接听与挂断命令。敏感操作需要管理员确认。 |
+| Telegram 机器人 | 设备状态、已安装配置文件列表与切换、WiFi Calling 控制以及短信发送。敏感操作需要管理员确认。 |
 | 运维 | 鉴权、CSRF 防护、访问策略、审计事件、实时日志、日志留存、健康检查、响应式布局、深色模式以及中英文应用界面。 |
 | 分发 | 静态 Linux 二进制、systemd 安装脚本、带 SHA-256 校验的自更新、Docker 镜像、GHCR 发布以及 GitHub Actions 发布构建。 |
 
@@ -118,8 +118,22 @@ VoWiFi 代码是工程实现，不代表运营商认证，也不能证明任意 
 
 ### Linux 一键安装
 
+已是 root（包括默认没有 `sudo` 的 OpenWrt/Kwrt）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh | bash
+```
+
+普通 Linux 用户且系统装有 sudo：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh | sudo bash
+```
+
+只检查 VoWiFi/XFRM 环境，不安装 VoCat：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh | bash -s -- --check-env
 ```
 
 安装指定版本:
@@ -128,6 +142,8 @@ curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/i
 curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
 sudo bash install.sh 0.0.2
 ```
+
+VoWiFi IMS 必须使用 Linux XFRM/IPsec。OpenWrt/Kwrt 上安装脚本会从当前固件自己的软件源尝试安装严格匹配的 `ip-full`、`kmod-ipsec`、`kmod-ipsec4/6`、`kmod-crypto-authenc`、AES-CBC 和 SHA1 组件。若软件源没有与当前内核匹配的模块，必须更换包含这些组件的固件，禁止强装其他内核版本的 kmod。
 
 安装程序会:
 
@@ -175,9 +191,11 @@ command -v qmi-proxy >/dev/null 2>&1 || test -x /usr/libexec/qmi-proxy
 sha256sum -c SHA256SUMS --ignore-missing
 sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
+read -rsp "管理员密码: " VOCAT_BOOTSTRAP_PASSWORD; echo
+printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | sudo /opt/vocat/bin/vocat bootstrap-admin
+unset VOCAT_BOOTSTRAP_PASSWORD
 sudo env \
   VOCAT_DATABASE_PATH=/opt/vocat/data/vocat.db \
-  VOCAT_ADMIN_PASSWORD=change-this-password \
   /opt/vocat/bin/vocat serve
 ```
 
@@ -214,13 +232,20 @@ QMI 创建的 WWAN 接口、串口/QMI 热插拔、TUN/XFRM 和策略路由所�
 ```bash
 docker pull ghcr.io/mengmengcode/vocat:latest
 
+read -rsp "管理员密码: " VOCAT_BOOTSTRAP_PASSWORD; echo
+printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | docker run --rm -i \
+  --user 0:0 \
+  -v vocat-data:/opt/vocat/data \
+  --entrypoint /opt/vocat/bin/vocat \
+  ghcr.io/mengmengcode/vocat:latest bootstrap-admin
+unset VOCAT_BOOTSTRAP_PASSWORD
+
 docker run -d \
   --name vocat \
   --restart unless-stopped \
   --network host \
   --privileged \
   --user 0:0 \
-  -e VOCAT_ADMIN_PASSWORD=change-this-password \
   -v vocat-data:/opt/vocat/data \
   -v /dev:/dev \
   -v /sys:/sys:ro \
@@ -234,6 +259,13 @@ docker run -d \
 
 GHCR 镜像发布为 `linux/amd64` 与 `linux/arm64`。
 
+### USB SIM 读卡器
+
+USB SIM 读卡器通过 Linux PC/SC 服务访问。一键安装脚本会在支持的软件包管理器上
+自动安装并启动 `pcscd` 和 CCID 驱动；Debian/Ubuntu 手动安装命令为
+`apt install pcscd libccid`。如果 USB 已识别 CCID 读卡器但 PC/SC 尚未就绪，
+VoCat 会继续在添加设备窗口显示该硬件，并明确提示缺少服务或驱动，不再静默隐藏。
+
 ## 配置
 
 Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件,再应用 `VOCAT_*` 环境变量。环境变量优先级更高。
@@ -242,14 +274,15 @@ Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件,再应用 `VOCAT_*
 | --- | --- | --- |
 | `VOCAT_ADDR` | `0.0.0.0:7575` | HTTP 监听地址。 |
 | `VOCAT_DATABASE_PATH` | `./data/vocat.db` | SQLite 数据库路径。 |
-| `VOCAT_ADMIN_USERNAME` | `admin` | 初始管理员用户名。 |
-| `VOCAT_ADMIN_PASSWORD` | `admin` | 初始管理员密码。暴露服务前请务必修改。 |
 | `VOCAT_SESSION_TTL` | `24h` | 鉴权会话有效期。 |
 | `VOCAT_SECURE_COOKIES` | `false` | 在使用 HTTPS 时将会话 Cookie 标记为安全。 |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | 优雅关闭超时时间。 |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | API 请求体最大字节数。 |
 | `VOCAT_REPO` | `MengMengCode/VoCat` | 自更新器使用的受信任 GitHub 仓库，格式为 `owner/name`。 |
 | `GITHUB_TOKEN` | 空 | 可选的 GitHub token,用于私有仓库或更高的 API 限额。 |
+
+管理员账号和密码只保存在 SQLite 数据库中。空数据库需要执行一次
+`vocat bootstrap-admin` 完成初始化；环境变量和 JSON 配置都不能设置或覆盖管理员凭据。
 
 请勿将 Telegram token、SMTP 密码、Webhook 密钥、SIM 凭据或其他私密数据存放在仓库中。请通过应用设置或受保护的环境文件来配置它们。
 
@@ -263,13 +296,9 @@ Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件,再应用 `VOCAT_*
 /switch <设备> <iccid>
 /wfc <设备> <status|on|off|reconnect>
 /sms <设备> <号码> <内容>
-/call <设备> <号码> <秒数>
-/calls <设备>
-/answer <设备>
-/hangup <设备>
 ```
 
-配置文件切换、短信提交与拨号使用一次性确认按钮。定时拨号会执行模组拨号动作,并在 1–600 秒后自动挂断;不会捕获或处理通话音频。机器人不暴露 eSIM 下载、删除或重命名命令。
+配置文件切换与短信提交使用一次性确认按钮。机器人不暴露 eSIM 下载、删除或重命名命令。
 
 ## 更新
 

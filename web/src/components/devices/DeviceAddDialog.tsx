@@ -150,7 +150,7 @@ export function DeviceAddDialog(props: DeviceAddDialogProps) {
         <Field label={t("IMEI 绑定")}>
           <Input value={addConfig.modemImei} disabled placeholder={t("自动识别（从发现设备填充）")} />
         </Field>
-        <Field label={t("USB 路径")}>
+        <Field label={t("硬件路径")}>
           <Input value={addConfig.usbPath} disabled />
         </Field>
         <Field label={t("网卡接口")}>

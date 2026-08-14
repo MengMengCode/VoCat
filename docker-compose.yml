@@ -1,9 +1,12 @@
 # VoCat Docker Compose deployment (control-panel mode, no host hardware).
 #
-# First-time setup:
-#   cp .env.example .env        # then edit VOCAT_ADMIN_PASSWORD
-#   docker compose pull         # fetch the prebuilt GHCR image
-#   docker compose up -d        # start without modem/device access
+# First-time setup (password is read from stdin and stored only in SQLite):
+#   docker compose pull
+#   read -rsp "Admin password: " VOCAT_BOOTSTRAP_PASSWORD; echo
+#   printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | docker compose run --rm -T \
+#     --entrypoint /opt/vocat/bin/vocat vocat bootstrap-admin
+#   unset VOCAT_BOOTSTRAP_PASSWORD
+#   docker compose up -d
 #
 # Build locally from this repo instead of using the GHCR image:
 #   docker compose up -d --build
@@ -39,15 +42,11 @@ services:
       # Marks the process as containerized: the web UI then advertises
       # "pull new image" instead of attempting an in-place binary update.
       VOCAT_CONTAINER: docker
-      # VOCAT_ADDR / VOCAT_DATABASE_PATH are set in the Dockerfile; override
-      # only if you want non-default values. Sensitive values come from .env.
-      VOCAT_ADMIN_PASSWORD: ${VOCAT_ADMIN_PASSWORD:?set VOCAT_ADMIN_PASSWORD in .env}
+      # VOCAT_ADDR / VOCAT_DATABASE_PATH are set in the Dockerfile. Admin
+      # credentials are stored only in SQLite and are not process environment.
 
     volumes:
-      # SQLite database + persistent state. Named volume (not a bind mount)
-      # because the container runs as uid 1000 (vocat) while a bind-mounted
-      # host dir would be root-owned and unwritable. Docker gives the named
-      # volume the image's uid 1000 ownership automatically.
+      # SQLite database + persistent state.
       - vocat-data:/opt/vocat/data
 
 volumes:

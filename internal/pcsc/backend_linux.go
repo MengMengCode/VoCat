@@ -5,89 +5,94 @@ package pcsc
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
-
-	"github.com/ElMostafaIdrassi/goscard"
+	"time"
 )
 
-type nativeBackend struct {
-	initializeOnce sync.Once
-	initializeErr  error
-}
+type nativeBackend struct{ sysRoot string }
 
-func newNativeBackend() Backend { return &nativeBackend{} }
+func newNativeBackend() Backend { return &nativeBackend{sysRoot: "/sys"} }
 
-func (backend *nativeBackend) initialize() error {
-	backend.initializeOnce.Do(func() {
-		if err := goscard.Initialize(goscard.NewDefaultLogger(goscard.LogLevelNone)); err != nil {
-			backend.initializeErr = fmt.Errorf("%w: pcsc-lite client library could not be loaded", ErrUnavailable)
+func (backend *nativeBackend) dial(ctx context.Context) (*pcscdClient, error) {
+	paths := []string{strings.TrimSpace(os.Getenv("PCSCLITE_CSOCK_NAME")), "/run/pcscd/pcscd.comm", "/var/run/pcscd/pcscd.comm"}
+	var failures []error
+	seen := make(map[string]bool)
+	for _, path := range paths {
+		if path == "" || seen[path] {
+			continue
 		}
-	})
-	return backend.initializeErr
+		seen[path] = true
+		conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", path)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		client, err := establishPCSCD(ctx, conn)
+		if err == nil {
+			return client, nil
+		}
+		_ = conn.Close()
+		failures = append(failures, err)
+	}
+	return nil, fmt.Errorf("%w: pcscd socket is not reachable: %w", ErrUnavailable, errors.Join(failures...))
 }
 
 func (backend *nativeBackend) Readers(ctx context.Context) ([]Reader, error) {
-	if err := ctx.Err(); err != nil {
+	physical := discoverUSBSmartCardReaders(backend.sysRoot, "pcsc_driver_missing")
+	client, err := backend.dial(ctx)
+	if err != nil {
+		if len(physical) > 0 {
+			for index := range physical {
+				physical[index].DiscoveryIssue = "pcsc_service_unavailable"
+			}
+			return physical, nil
+		}
 		return nil, err
 	}
-	if err := backend.initialize(); err != nil {
+	defer client.closeContext(context.Background())
+	states, err := client.readers(ctx)
+	if err != nil {
 		return nil, err
 	}
-	cardContext, _, err := goscard.NewContext(goscard.SCardScopeSystem, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("%w: pcscd is not reachable", ErrUnavailable)
-	}
-	defer cardContext.Release()
-	names, _, err := cardContext.ListReaders(nil)
-	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "no readers") {
-			return []Reader{}, nil
+	readers := make([]Reader, 0, len(states))
+	for _, state := range states {
+		reader := Reader{
+			Name:        state.name,
+			CardPresent: state.state&pcscCardPresent != 0,
+			ATR:         strings.ToUpper(hex.EncodeToString(state.atr)),
 		}
-		return nil, fmt.Errorf("pcsc: list readers: %w", err)
-	}
-	presentNames, atrs, _, _ := cardContext.ListReadersWithCardPresent(nil)
-	present := make(map[string]string, len(presentNames))
-	for index, name := range presentNames {
-		atr := ""
-		if index < len(atrs) {
-			atr = atrs[index]
-		}
-		present[name] = atr
-	}
-	readers := make([]Reader, 0, len(names))
-	for _, name := range names {
-		reader := Reader{Name: name}
-		reader.ATR, reader.CardPresent = present[name]
-		if path, ok := backend.readerUSBPath(cardContext, name); ok {
+		if path, ok := backend.readerUSBPath(ctx, client, state.name); ok {
 			reader.USBPath = path
-			reader.VendorID = readSysfsText(path, "idVendor")
-			reader.ProductID = readSysfsText(path, "idProduct")
-			reader.Manufacturer = readSysfsText(path, "manufacturer")
-			reader.Product = readSysfsText(path, "product")
+			reader.VendorID = backend.readSysfsText(path, "idVendor")
+			reader.ProductID = backend.readSysfsText(path, "idProduct")
+			reader.Manufacturer = backend.readSysfsText(path, "manufacturer")
+			reader.Product = backend.readSysfsText(path, "product")
 		} else {
-			reader.USBPath = "pcsc:" + name
+			reader.USBPath = "pcsc:" + state.name
 		}
 		if reader.Product == "" {
-			reader.Product = strings.TrimSpace(strings.TrimSuffix(name, " 00 00"))
+			reader.Product = strings.TrimSpace(strings.TrimSuffix(state.name, " 00 00"))
 		}
 		readers = append(readers, reader)
 	}
-	return readers, nil
+	return mergePCSCAndUSBReaders(readers, physical), nil
 }
 
-func (backend *nativeBackend) readerUSBPath(cardContext goscard.Context, name string) (string, bool) {
-	card, _, err := cardContext.Connect(name, goscard.SCardShareDirect, goscard.SCardProtocolT0|goscard.SCardProtocolT1)
+func (backend *nativeBackend) readerUSBPath(ctx context.Context, client *pcscdClient, name string) (string, bool) {
+	card, _, err := client.connect(ctx, name, pcscShareDirect, 0)
 	if err != nil {
 		return "", false
 	}
-	defer card.Disconnect(goscard.SCardLeaveCard)
-	attribute, _, err := card.GetAttrib(goscard.SCardAttrChannelID)
+	disposition := uint32(pcscLeaveCard)
+	defer client.simpleCardCommand(context.Background(), pcscCmdDisconnect, card, &disposition)
+	attribute, err := client.getAttrib(ctx, card, pcscAttrChannelID)
 	if err != nil || len(attribute) < 4 {
 		return "", false
 	}
@@ -95,8 +100,9 @@ func (backend *nativeBackend) readerUSBPath(cardContext goscard.Context, name st
 	if channel>>16 != 0x0020 {
 		return "", false
 	}
-	bus, device := int((channel>>8)&0xFF), int(channel&0xFF)
-	entries, err := os.ReadDir("/sys/bus/usb/devices")
+	bus, device := int((channel>>8)&0xff), int(channel&0xff)
+	usbRoot := filepath.Join(backend.sysRoot, "bus", "usb", "devices")
+	entries, err := os.ReadDir(usbRoot)
 	if err != nil {
 		return "", false
 	}
@@ -104,7 +110,7 @@ func (backend *nativeBackend) readerUSBPath(cardContext goscard.Context, name st
 		if !entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
 			continue
 		}
-		path := filepath.Join("/sys/bus/usb/devices", entry.Name())
+		path := filepath.Join(usbRoot, entry.Name())
 		entryBus, busErr := readSysfsInt(path, "busnum")
 		entryDevice, deviceErr := readSysfsInt(path, "devnum")
 		if busErr == nil && deviceErr == nil && entryBus == bus && entryDevice == device {
@@ -115,9 +121,6 @@ func (backend *nativeBackend) readerUSBPath(cardContext goscard.Context, name st
 }
 
 func (backend *nativeBackend) Open(ctx context.Context, selector Selector) (Card, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	readers, err := backend.Readers(ctx)
 	if err != nil {
 		return nil, err
@@ -126,65 +129,54 @@ func (backend *nativeBackend) Open(ctx context.Context, selector Selector) (Card
 	if !ok {
 		return nil, ErrReaderNotFound
 	}
+	if reader.DiscoveryIssue != "" {
+		return nil, fmt.Errorf("%w: %s", ErrUnavailable, reader.DiscoveryIssue)
+	}
 	if !reader.CardPresent {
 		return nil, ErrNoCard
 	}
-	cardContext, _, err := goscard.NewContext(goscard.SCardScopeSystem, nil, nil)
+	client, err := backend.dial(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("%w: create context", ErrUnavailable)
+		return nil, err
 	}
-	card, _, err := cardContext.Connect(reader.Name, goscard.SCardShareShared, goscard.SCardProtocolT0|goscard.SCardProtocolT1)
+	handle, protocol, err := client.connect(ctx, reader.Name, pcscShareShared, pcscProtocolAny)
 	if err != nil {
-		cardContext.Release()
-		return nil, fmt.Errorf("pcsc: connect reader: %w", err)
+		_ = client.closeContext(context.Background())
+		return nil, err
 	}
-	if _, err := card.BeginTransaction(); err != nil {
-		card.Disconnect(goscard.SCardLeaveCard)
-		cardContext.Release()
+	if err := client.simpleCardCommand(ctx, pcscCmdBeginTransaction, handle, nil); err != nil {
+		disposition := uint32(pcscLeaveCard)
+		_ = client.simpleCardCommand(context.Background(), pcscCmdDisconnect, handle, &disposition)
+		_ = client.closeContext(context.Background())
 		return nil, fmt.Errorf("pcsc: begin card transaction: %w", err)
 	}
-	return &nativeCard{context: &cardContext, card: &card}, nil
+	return &nativeCard{client: client, handle: handle, protocol: protocol}, nil
 }
 
 type nativeCard struct {
-	context *goscard.Context
-	card    *goscard.Card
-	closed  bool
+	client   *pcscdClient
+	handle   int32
+	protocol uint32
+	closed   bool
 }
 
 func (card *nativeCard) Transmit(ctx context.Context, command []byte) ([]byte, uint16, error) {
-	if card == nil || card.card == nil || card.closed {
+	if card == nil || card.client == nil || card.closed {
 		return nil, 0, errors.New("pcsc: card session is closed")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
 	}
 	return card.transmit(ctx, append([]byte(nil), command...), 0)
 }
 
-// TransmitRaw performs exactly one APDU exchange. Stateful eUICC callers need
-// to observe 61xx themselves because GET RESPONSE must target their logical
-// channel rather than the basic channel.
 func (card *nativeCard) TransmitRaw(ctx context.Context, command []byte) ([]byte, uint16, error) {
-	if card == nil || card.card == nil || card.closed {
+	if card == nil || card.client == nil || card.closed {
 		return nil, 0, errors.New("pcsc: card session is closed")
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
-	}
-	pci := goscard.SCardIoRequestT0
-	if card.card.ActiveProtocol() == goscard.SCardProtocolT1 {
-		pci = goscard.SCardIoRequestT1
-	}
-	response, _, err := card.card.Transmit(&pci, append([]byte(nil), command...), nil)
+	response, err := card.client.transmit(ctx, card.handle, card.protocol, append([]byte(nil), command...))
 	if err != nil {
 		return nil, 0, err
 	}
 	if len(response) < 2 {
 		return nil, 0, errors.New("pcsc: APDU response omitted its status word")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
 	}
 	last := len(response) - 2
 	return append([]byte(nil), response[:last]...), uint16(response[last])<<8 | uint16(response[last+1]), nil
@@ -194,69 +186,54 @@ func (card *nativeCard) transmit(ctx context.Context, command []byte, depth int)
 	if depth > 8 {
 		return nil, 0, errors.New("pcsc: too many APDU continuations")
 	}
-	pci := goscard.SCardIoRequestT0
-	if card.card.ActiveProtocol() == goscard.SCardProtocolT1 {
-		pci = goscard.SCardIoRequestT1
-	}
-	response, _, err := card.card.Transmit(&pci, command, nil)
+	data, status, err := card.TransmitRaw(ctx, command)
 	if err != nil {
 		return nil, 0, err
 	}
-	if len(response) < 2 {
-		return nil, 0, errors.New("pcsc: APDU response omitted its status word")
-	}
-	data := append([]byte(nil), response[:len(response)-2]...)
-	sw1, sw2 := response[len(response)-2], response[len(response)-1]
-	if sw1 == 0x6C && len(command) >= 5 {
+	sw1, sw2 := byte(status>>8), byte(status)
+	if sw1 == 0x6c && len(command) >= 5 {
 		retry := append([]byte(nil), command...)
 		retry[len(retry)-1] = sw2
 		return card.transmit(ctx, retry, depth+1)
 	}
-	if sw1 == 0x61 || sw1 == 0x9F {
-		more, sw, err := card.transmit(ctx, []byte{0x00, 0xC0, 0x00, 0x00, sw2}, depth+1)
+	if sw1 == 0x61 || sw1 == 0x9f {
+		more, sw, err := card.transmit(ctx, []byte{0x00, 0xc0, 0x00, 0x00, sw2}, depth+1)
 		if err != nil {
 			return nil, 0, err
 		}
 		return append(data, more...), sw, nil
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
-	}
-	return data, uint16(sw1)<<8 | uint16(sw2), nil
+	return data, status, ctx.Err()
 }
 
-func (card *nativeCard) Close() error {
-	return card.close(goscard.SCardLeaveCard)
-}
+func (card *nativeCard) Close() error { return card.close(pcscLeaveCard) }
 
-func (card *nativeCard) CloseWithReset() error {
-	return card.close(goscard.SCardResetCard)
-}
+func (card *nativeCard) CloseWithReset() error { return card.close(pcscResetCard) }
 
-func (card *nativeCard) close(disposition goscard.SCardDisposition) error {
+func (card *nativeCard) close(disposition uint32) error {
 	if card == nil || card.closed {
 		return nil
 	}
 	card.closed = true
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var result []error
-	if card.card != nil {
-		if _, err := card.card.EndTransaction(disposition); err != nil {
+	if card.client != nil {
+		if err := card.client.simpleCardCommand(ctx, pcscCmdEndTransaction, card.handle, &disposition); err != nil {
 			result = append(result, err)
 		}
-		if _, err := card.card.Disconnect(disposition); err != nil {
+		if err := card.client.simpleCardCommand(ctx, pcscCmdDisconnect, card.handle, &disposition); err != nil {
 			result = append(result, err)
 		}
-	}
-	if card.context != nil {
-		if _, err := card.context.Release(); err != nil {
+		if err := card.client.closeContext(ctx); err != nil {
 			result = append(result, err)
 		}
 	}
 	return errors.Join(result...)
 }
 
-func readSysfsText(usbPath, name string) string {
-	value, err := os.ReadFile(filepath.Join("/sys/bus/usb/devices", usbPath, name))
+func (backend *nativeBackend) readSysfsText(usbPath, name string) string {
+	value, err := os.ReadFile(filepath.Join(backend.sysRoot, "bus", "usb", "devices", usbPath, name))
 	if err != nil {
 		return ""
 	}

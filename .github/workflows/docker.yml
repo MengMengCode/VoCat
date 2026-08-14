@@ -15,7 +15,50 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.platform }} smoke image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: vocat-smoke:${{ matrix.arch }}
+          build-args: |
+            VERSION=0.0.0-smoke
+            BUILD_TIME=${{ github.event.repository.updated_at }}
+          cache-from: type=gha
+
+      - name: Verify ${{ matrix.platform }} runtime and smart-card stack
+        run: |
+          docker run --rm --platform '${{ matrix.platform }}' \
+            vocat-smoke:${{ matrix.arch }} version
+          docker run --rm --platform '${{ matrix.platform }}' \
+            --entrypoint /bin/sh vocat-smoke:${{ matrix.arch }} -c \
+            'command -v pcscd && test -d /usr/lib/pcsc/drivers'
+
   build-and-push:
+    needs: smoke
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

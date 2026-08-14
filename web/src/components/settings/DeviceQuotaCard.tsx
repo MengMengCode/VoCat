@@ -38,7 +38,7 @@ export function DeviceQuotaCard({
         <Input
           type="number"
           min={1}
-          max={value?.maxDeviceLimit ?? 128}
+          max={value?.maxDeviceLimit ?? 10}
           value={Number.isFinite(limit) ? limit : ""}
           disabled={loading || saving}
           onChange={(event) => onLimitChange(Number(event.target.value))}

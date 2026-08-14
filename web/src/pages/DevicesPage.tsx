@@ -363,6 +363,14 @@ export default function DevicesPage() {
   }, [loadDiscovered]);
 
   const selectDiscovered = useCallback((d: DiscoveredDevice) => {
+    if (d.discoveryIssue === "pcsc_service_unavailable") {
+      message.warning(t("系统已发现 USB 读卡器，但 PC/SC 服务未运行；请安装并启动 pcscd 后重新扫描。"));
+      return;
+    }
+    if (d.discoveryIssue === "pcsc_driver_missing") {
+      message.warning(t("系统已发现 USB 读卡器，但 PC/SC 驱动未加载；请安装 libccid 或厂商驱动后重新扫描。"));
+      return;
+    }
     if (d.degraded) {
       message.warning(t("无法读取该设备 IMEI（可能控制口挂死），请执行 AT!RESET 或切换组态后重试"));
       return;

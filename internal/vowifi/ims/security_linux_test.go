@@ -11,6 +11,19 @@ import (
 	"time"
 )
 
+func TestRunIPCommandExplainsMissingKernelXFRM(t *testing.T) {
+	directory := t.TempDir()
+	command := directory + "/ip"
+	script := "#!/bin/sh\necho 'Cannot open netlink socket: Protocol not supported' >&2\nexit 1\n"
+	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := runIPCommand(context.Background(), command, xfrmOperation{description: "test state"})
+	if err == nil || !strings.Contains(err.Error(), "kmod-ipsec") || !strings.Contains(err.Error(), "CONFIG_XFRM_USER") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestLinuxIPSecInstallerLifecycle(t *testing.T) {
 	if os.Getenv("VOCAT_NETNS_TEST") != "1" {
 		t.Skip("set VOCAT_NETNS_TEST=1 inside an isolated Linux network namespace")

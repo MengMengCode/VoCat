@@ -295,8 +295,8 @@ func (channel *euiccChannel) deliverPendingNotifications(ctx context.Context) er
 // ESIMNotifications returns the notifications retained across every eUICC
 // storage exposed by the physical card.
 func (manager *Manager) ESIMNotifications(ctx context.Context, id string) ([]EsimNotification, error) {
-	manager.esimMu.Lock()
-	defer manager.esimMu.Unlock()
+	manager.lockESIM()
+	defer manager.unlockESIM()
 	if err := manager.waitForESIMRecovery(ctx, id); err != nil {
 		return nil, err
 	}
@@ -331,8 +331,8 @@ func (manager *Manager) ESIMNotifications(ctx context.Context, id string) ([]Esi
 // ESIMRetryNotification sends one retained notification and removes it from the
 // eUICC only after the receiver returns the SGP.22 success acknowledgement.
 func (manager *Manager) ESIMRetryNotification(ctx context.Context, id, aidHex string, sequenceNumber uint64) error {
-	manager.esimMu.Lock()
-	defer manager.esimMu.Unlock()
+	manager.lockESIM()
+	defer manager.unlockESIM()
 	if err := manager.waitForESIMRecovery(ctx, id); err != nil {
 		return err
 	}

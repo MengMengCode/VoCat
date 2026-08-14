@@ -53,11 +53,14 @@ func TestRewriteEnvValuePreservesOtherSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(content)
-	if !strings.Contains(got, "VOCAT_ADMIN_PASSWORD=secret\n") || !strings.Contains(got, "VOCAT_ADDR=0.0.0.0:8080\n") || strings.Contains(got, ":7575") {
+	if strings.Contains(got, "VOCAT_ADMIN_PASSWORD") || !strings.Contains(got, "VOCAT_ADDR=0.0.0.0:8080\n") || strings.Contains(got, ":7575") {
 		t.Fatalf("rewritten env = %q", got)
 	}
 	if err := rewriteEnvValue(path, "VOCAT_ADDR", "0.0.0.0:9000\nVOCAT_ADMIN_PASSWORD=changed"); err == nil {
 		t.Fatal("environment line injection was accepted")
+	}
+	if err := rewriteEnvValue(path, "VOCAT_ADMIN_PASSWORD", "changed-password"); err == nil {
+		t.Fatal("administrator credential was accepted for the environment file")
 	}
 }
 

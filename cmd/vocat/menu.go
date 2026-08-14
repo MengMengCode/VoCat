@@ -22,9 +22,8 @@ import (
 	"vocat/internal/update"
 )
 
-// envFilePath is the systemd EnvironmentFile that carries VOCAT_ADMIN_PASSWORD.
-// EnsureAdmin reseeds the DB from it on every start, so change-password must
-// rewrite it or the next restart reverts the password.
+// envFilePath carries non-secret service settings such as the Web listen port.
+// Administrator credentials live exclusively in the database.
 const envFilePath = "/etc/vocat/env"
 
 // legacyEnvFilePath was used by the standalone deploy/vocat.service. Keep it
@@ -51,8 +50,8 @@ const uiPreferencesSettingKey = "ui.preferences"
 // rc) and VOCAT_DATABASE_PATH is unset, so config.Load() would resolve a
 // CWD-relative ./data/vocat.db — a different, empty database than
 // /opt/vocat/data/vocat.db the service uses. This loads the installed env file
-// for VOCAT_ADMIN_PASSWORD and pins VOCAT_DATABASE_PATH to the install default,
-// without overriding any value the operator already exported.
+// and pins VOCAT_DATABASE_PATH to the install default, without overriding any
+// value the operator already exported. Legacy credential entries are ignored.
 func loadMenuEnv() {
 	if _, ok := os.LookupEnv("VOCAT_DATABASE_PATH"); !ok {
 		_ = os.Setenv("VOCAT_DATABASE_PATH", defaultDatabasePath)
@@ -68,6 +67,9 @@ func loadMenuEnv() {
 				continue
 			}
 			key := strings.TrimSpace(line[:eq])
+			if key == "VOCAT_ADMIN_USERNAME" || key == "VOCAT_ADMIN_PASSWORD" || key == "VOCAT_ADMIN_PASSWORD_B64" {
+				continue
+			}
 			val := strings.TrimSpace(line[eq+1:])
 			if _, ok := os.LookupEnv(key); !ok {
 				_ = os.Setenv(key, val)
@@ -126,7 +128,7 @@ func runMenu(logger *slog.Logger) error {
 				fmt.Println(menu.errorPrefix(err))
 			}
 		case "2":
-			if err := menuChangePassword(reader, menu, logger); err != nil {
+			if err := menuChangePassword(reader, menu); err != nil {
 				fmt.Println(menu.errorPrefix(err))
 			}
 		case "3":
@@ -191,7 +193,7 @@ func loadMenuLanguage() (string, error) {
 	return "en", nil
 }
 
-func menuChangePassword(reader *bufio.Reader, m *menu, logger *slog.Logger) error {
+func menuChangePassword(reader *bufio.Reader, m *menu) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("%w: %v", errMenuConfig, err)
@@ -208,6 +210,10 @@ func menuChangePassword(reader *bufio.Reader, m *menu, logger *slog.Logger) erro
 	authService, err := auth.New(database, auth.Options{SessionTTL: cfg.SessionTTL})
 	if err != nil {
 		return fmt.Errorf("%w: %v", errMenuAuth, err)
+	}
+	admin, err := database.CurrentAdmin(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errMenuStore, err)
 	}
 
 	fmt.Print(m.currentPassword())
@@ -229,18 +235,11 @@ func menuChangePassword(reader *bufio.Reader, m *menu, logger *slog.Logger) erro
 	if newPw != confirmPw {
 		return errPasswordsDiffer
 	}
-	if err := authService.ChangePassword(ctx, cfg.AdminUsername, currentPw, newPw); err != nil {
+	if err := authService.ChangePassword(ctx, admin.Username, currentPw, newPw); err != nil {
 		if errors.Is(err, auth.ErrInvalidCredentials) {
 			return errCurrentWrong
 		}
 		return fmt.Errorf("%w: %v", errMenuAuth, err)
-	}
-	// Persist the new plaintext to the env file so the next EnsureAdmin (on
-	// restart) agrees with the hash we just wrote to the DB. Without this the
-	// restart reverts the password to whatever the env file still holds.
-	if err := rewriteEnvPassword(newPw); err != nil {
-		logger.Error("menu: password changed in DB but env file rewrite failed; restart will revert", "error", err)
-		return fmt.Errorf("%w: %v", errMenuEnvWrite, err)
 	}
 	fmt.Println(m.passwordChanged())
 	return nil
@@ -258,19 +257,14 @@ func readPasswordMasked() (string, error) {
 	return string(bytes), nil
 }
 
-// rewriteEnvPassword replaces (or appends) the VOCAT_ADMIN_PASSWORD line in the
-// systemd EnvironmentFile and keeps the file 0600. The replacement is atomic:
-// the temp file lives in the same directory so os.Rename stays on one
-// filesystem.
-func rewriteEnvPassword(newPassword string) error {
-	return rewriteEnvValue(menuEnvFilePath(), "VOCAT_ADMIN_PASSWORD", newPassword)
-}
-
 // rewriteEnvValue replaces or appends one systemd EnvironmentFile value. The
 // write is atomic and rejects line breaks so one setting cannot inject another.
 func rewriteEnvValue(path, name, value string) error {
 	if name == "" || strings.ContainsAny(name, "=\r\n\x00") || strings.ContainsAny(value, "\r\n\x00") {
 		return errors.New("invalid environment setting")
+	}
+	if strings.HasPrefix(name, "VOCAT_ADMIN_") {
+		return errors.New("administrator credentials cannot be stored in the environment file")
 	}
 	key := name + "="
 	var lines []string
@@ -282,12 +276,17 @@ func rewriteEnvValue(path, name, value string) error {
 
 	replaced := false
 	for i, line := range lines {
+		if strings.HasPrefix(line, "VOCAT_ADMIN_USERNAME=") || strings.HasPrefix(line, "VOCAT_ADMIN_PASSWORD=") || strings.HasPrefix(line, "VOCAT_ADMIN_PASSWORD_B64=") {
+			lines[i] = ""
+			continue
+		}
 		if strings.HasPrefix(line, key) {
 			lines[i] = key + value
 			replaced = true
 			break
 		}
 	}
+	lines = compactNonEmptyLines(lines)
 	if !replaced {
 		lines = append(lines, key+value)
 	}
@@ -296,6 +295,16 @@ func rewriteEnvValue(path, name, value string) error {
 		content += "\n"
 	}
 	return writeEnvFileAtomic(path, []byte(content))
+}
+
+func compactNonEmptyLines(lines []string) []string {
+	result := lines[:0]
+	for _, line := range lines {
+		if line != "" {
+			result = append(result, line)
+		}
+	}
+	return result
 }
 
 func writeEnvFileAtomic(path string, content []byte) error {
@@ -562,7 +571,6 @@ var (
 	errMenuConfig         = errors.New("menu: load configuration")
 	errMenuStore          = errors.New("menu: open database")
 	errMenuAuth           = errors.New("menu: auth service")
-	errMenuEnvWrite       = errors.New("menu: write env file")
 	errMenuPortWrite      = errors.New("menu: write Web port")
 	errInvalidWebPort     = errors.New("menu: invalid Web port")
 	errWebPortUnavailable = errors.New("menu: Web port unavailable")
@@ -702,11 +710,6 @@ func (m *menu) errorPrefix(err error) string {
 			return "Auth service error."
 		}
 		return "认证服务错误。"
-	case errors.Is(err, errMenuEnvWrite):
-		if m.lang == "en" {
-			return "Password changed in DB, but the env file rewrite failed — restart will revert it. Check " + menuEnvFilePath() + "."
-		}
-		return "数据库密码已修改，但环境变量文件写入失败——重启后将回滚。请检查 " + menuEnvFilePath() + "。"
 	case errors.Is(err, errInvalidWebPort):
 		if m.lang == "en" {
 			return "Invalid port. Enter a number from 1 to 65535."

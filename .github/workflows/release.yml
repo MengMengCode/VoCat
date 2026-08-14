@@ -93,6 +93,9 @@ jobs:
         with:
           name: web-dist
           path: web/dist
+      - name: Set up QEMU for ARM64 runtime smoke test
+        if: matrix.goarch == 'arm64'
+        uses: docker/setup-qemu-action@v3
       - name: Build ${{ matrix.target }}
         env:
           GOOS: linux
@@ -110,6 +113,14 @@ jobs:
             -o "$OUTPUT" \
             ./cmd/vocat
           chmod 0755 "$OUTPUT"
+          if readelf -l "$OUTPUT" | grep -q 'Requesting program interpreter'; then
+            echo "ERROR: $OUTPUT unexpectedly requires a dynamic loader" >&2
+            readelf -l "$OUTPUT" >&2
+            exit 1
+          fi
+          case "${{ matrix.goarch }}" in
+            amd64|arm64) "$OUTPUT" version ;;
+          esac
       - name: Upload ${{ matrix.target }}
         uses: actions/upload-artifact@v4
         with:

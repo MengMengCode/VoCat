@@ -1,8 +1,8 @@
 import { AddRegular, DeleteRegular } from "@fluentui/react-icons";
 import { useEffect, useMemo, useState } from "react";
-import { api, apiMessage } from "../../api";
+import { api } from "../../api";
 import type { DeviceListItem, DeviceProxyBinding, EsimOverview, ProfileProxyCandidate, UpstreamProxy } from "../../types";
-import { Button, EmptyState, Modal, Tag, message } from "../ui";
+import { Button, EmptyState, Modal, Tag } from "../ui";
 import { useI18n } from "../../lib/i18n";
 
 export interface DeviceBindingsDialogProps {
@@ -21,6 +21,10 @@ function profileLabel(profile: { name?: string; serviceProviderName?: string; ic
   return String(profile.name || profile.serviceProviderName || profile.iccid).trim();
 }
 
+function currentDeviceICCID(device: DeviceListItem) {
+  return String(device.modem?.iccid || device.vowifiRuntime?.iccid || "").trim();
+}
+
 export function DeviceBindingsDialog(props: DeviceBindingsDialogProps) {
   const { t } = useI18n();
   const { open, proxy, proxies, devices, bindings, busy, onAdd, onDelete, onClose } = props;
@@ -29,7 +33,10 @@ export function DeviceBindingsDialog(props: DeviceBindingsDialogProps) {
   const [candidates, setCandidates] = useState<ProfileProxyCandidate[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const proxyName = proxy?.name || proxy?.id || "";
-  const deviceKey = devices.map((device) => device.id).sort().join("|");
+  const deviceKey = devices
+    .map((device) => `${device.id}:${currentDeviceICCID(device)}`)
+    .sort()
+    .join("|");
   const current = useMemo(
     () => bindings.filter((item) => item.upstreamProxyId === proxy?.id),
     [bindings, proxy?.id],
@@ -50,13 +57,29 @@ export function DeviceBindingsDialog(props: DeviceBindingsDialogProps) {
     let active = true;
     setLoadingProfiles(true);
     Promise.allSettled(devices.map(async (device) => {
-      const data = await api<EsimOverview>(`/devices/${encodeURIComponent(device.id)}/esim`);
-      return (data.profiles || []).flatMap((group) => (group.profiles || []).map((profile) => ({
-        deviceId: device.id,
-        iccid: String(profile.iccid || "").trim(),
-        profileName: profileLabel(profile),
-        stateText: profile.stateText,
-      }))).filter((profile) => profile.iccid);
+      const currentICCID = currentDeviceICCID(device);
+      let installed: ProfileProxyCandidate[] = [];
+      try {
+        const data = await api<EsimOverview>(`/devices/${encodeURIComponent(device.id)}/esim`);
+        installed = (data.profiles || []).flatMap((group) => (group.profiles || []).map((profile) => ({
+          deviceId: device.id,
+          iccid: String(profile.iccid || "").trim(),
+          profileName: profileLabel(profile),
+          stateText: profile.stateText,
+        }))).filter((profile) => profile.iccid);
+      } catch {
+        // A traditional SIM and some readers do not expose an eSIM profile
+        // inventory. Their live ICCID is still a valid VoWiFi route key.
+      }
+      if (currentICCID && !installed.some((profile) => profile.iccid === currentICCID)) {
+        installed.push({
+          deviceId: device.id,
+          iccid: currentICCID,
+          profileName: t("当前 SIM 卡"),
+          stateText: t("当前使用中"),
+        });
+      }
+      return installed;
     })).then((results) => {
       if (!active) return;
       const unique = new Map<string, ProfileProxyCandidate>();
@@ -65,8 +88,6 @@ export function DeviceBindingsDialog(props: DeviceBindingsDialogProps) {
         for (const profile of result.value) if (!unique.has(profile.iccid)) unique.set(profile.iccid, profile);
       }
       setCandidates(Array.from(unique.values()).sort((a, b) => a.deviceId.localeCompare(b.deviceId) || a.profileName.localeCompare(b.profileName)));
-    }).catch((error) => {
-      if (active) message.error(apiMessage(error) || t("读取 eSIM Profile 失败"));
     }).finally(() => {
       if (active) setLoadingProfiles(false);
     });
@@ -94,13 +115,13 @@ export function DeviceBindingsDialog(props: DeviceBindingsDialogProps) {
   const toggleAll = () => setSelected(allSelected ? [] : selectable);
 
   return (
-    <Modal open={open} onClose={onClose} title={`${adding ? t("添加 Profile 绑定") : t("Profile 绑定")} — ${proxyName}`} width="max-w-5xl">
+    <Modal open={open} onClose={onClose} title={`${adding ? t("添加 SIM / Profile 绑定") : t("SIM / Profile 绑定")} — ${proxyName}`} width="max-w-5xl">
       <div className="space-y-4 pb-2">
         <div className="rounded-lg border border-sky-200/70 bg-sky-50 px-3 py-2 text-xs text-sky-800 dark:border-sky-800/50 dark:bg-sky-900/20 dark:text-sky-200">
-          {t("VoWiFi 会按当前 ICCID 选择代理。同一 ICCID 只能绑定一个代理，一个代理可以绑定多台设备上的多个 Profile。")}
+          {t("VoWiFi 会按当前 ICCID 选择代理。实体 SIM 和 eSIM Profile 都可以绑定；同一 ICCID 只能绑定一个代理。")}
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="text-xs text-gray-500">{adding ? t("从设备已安装的 eSIM Profile 中选择") : `${current.length} ${t("个 Profile")}`}</div>
+          <div className="text-xs text-gray-500">{adding ? t("从当前 SIM 卡和已安装的 eSIM Profile 中选择") : `${current.length} ${t("个 SIM / Profile")}`}</div>
           <div className="flex gap-2">
             {adding ? (
               <Button size="small" onClick={() => { setAdding(false); setSelected([]); }}>{t("返回绑定列表")}</Button>
@@ -130,7 +151,7 @@ export function DeviceBindingsDialog(props: DeviceBindingsDialogProps) {
                 <th className="w-12 px-4 py-3"><input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={selectable.length === 0 || busy} aria-label={t("全选")} /></th>
                 <th className="px-4 py-3">{t("设备 ID")}</th>
                 <th className="px-4 py-3">ICCID</th>
-                <th className="px-4 py-3">{t("Profile 名称")}</th>
+                <th className="px-4 py-3">{t("SIM / Profile")}</th>
                 {adding ? <th className="px-4 py-3">{t("状态")}</th> : null}
               </tr>
             </thead>
@@ -155,7 +176,7 @@ export function DeviceBindingsDialog(props: DeviceBindingsDialogProps) {
             </tbody>
           </table>
           {loadingProfiles ? <div className="px-6 py-12 text-center text-sm text-gray-400">{t("读取 Profile 中...")}</div> : null}
-          {!loadingProfiles && rows.length === 0 ? <EmptyState title={adding ? t("没有可显示的 eSIM Profile") : t("尚未绑定 Profile")} subtitle={adding ? t("请确认设备在线且支持 eSIM Profile 列表读取。") : t("点击添加，从设备 Profile 列表中选择。")}/>: null}
+          {!loadingProfiles && rows.length === 0 ? <EmptyState title={adding ? t("没有可显示的 SIM / Profile") : t("尚未绑定 SIM / Profile")} subtitle={adding ? t("请确认设备在线并已读取到 SIM 卡 ICCID。") : t("点击添加，从 SIM / Profile 列表中选择。")}/>: null}
         </div>
       </div>
     </Modal>

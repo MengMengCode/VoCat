@@ -39,14 +39,14 @@ func TestDeveloperSettingsUpdatesGlobalSMSLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{store: database, developerEnabled: true, logger: regionTestLogger(), maxRequestBodyBytes: 4096}
-	request := httptest.NewRequest(http.MethodPut, "/api/settings/developer", strings.NewReader(`{"sms_hourly_limit":25}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/settings/developer", strings.NewReader(`{"sms_hourly_limit":17}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	server.handleDeveloperSettings(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 	}
-	if got := developer.SMSHourlyLimit(ctx, database); got != 25 {
-		t.Fatalf("SMS hourly limit = %d, want 25", got)
+	if got := developer.SMSHourlyLimit(ctx, database); got != 17 {
+		t.Fatalf("SMS hourly limit = %d, want 17", got)
 	}
 }

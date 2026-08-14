@@ -17,6 +17,16 @@ type scriptedCard struct {
 	calls   [][]byte
 }
 
+type unavailableReaderBackend struct{}
+
+func (unavailableReaderBackend) Readers(context.Context) ([]Reader, error) {
+	return []Reader{{Name: "ACR38", USBPath: "2-1", DiscoveryIssue: "pcsc_service_unavailable"}}, nil
+}
+
+func (unavailableReaderBackend) Open(context.Context, Selector) (Card, error) {
+	return nil, errors.New("Open must not be called for a diagnostic-only reader")
+}
+
 func (card *scriptedCard) Transmit(_ context.Context, command []byte) ([]byte, uint16, error) {
 	card.calls = append(card.calls, append([]byte(nil), command...))
 	if len(card.replies) == 0 {
@@ -80,5 +90,13 @@ func TestDeviceIDUsesStableUSBPath(t *testing.T) {
 	b := DeviceID(Reader{Name: "renamed reader", USBPath: "1-3"})
 	if a != b || a == "" {
 		t.Fatalf("device IDs = %q, %q", a, b)
+	}
+}
+
+func TestSnapshotRejectsPhysicalReaderUntilPCSCDIsReady(t *testing.T) {
+	service := NewWithBackend(unavailableReaderBackend{})
+	snapshot, err := service.Snapshot(context.Background(), Selector{USBPath: "2-1"}, "")
+	if !errors.Is(err, ErrUnavailable) || snapshot.Reader.USBPath != "2-1" {
+		t.Fatalf("Snapshot() = %#v, %v", snapshot, err)
 	}
 }

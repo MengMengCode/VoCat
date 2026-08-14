@@ -22,7 +22,7 @@
   <img alt="GitHub Actions" src="https://img.shields.io/badge/GitHub_Actions-Release-2088FF?style=flat-square&logo=githubactions&logoColor=white">
 </p>
 
-**English** | [简体中文](docs/README.zh-CN.md)
+**English** | [العربية](docs/README.ar.md) | [简体中文](docs/README.zh-CN.md) | [繁體中文](docs/README.zh-TW.md) | [Français](docs/README.fr.md) | [Русский](docs/README.ru.md) | [Español](docs/README.es.md) | [日本語](docs/README.ja.md)
 
 Vocat is an open-source web control panel and engineering toolkit for Quectel EC20/EC25-class cellular modems. It combines modem discovery, live radio status, AT and USSD terminals, SMS, WiFi Calling, eSIM management, network selection, proxy routing, notifications, audit logs, and release automation in one self-contained service.
 
@@ -46,7 +46,7 @@ The backend is written in Go, the interface is built with React and TypeScript, 
 | Card policy | ICCID-based WiFi Calling and flight-mode behavior with immediate policy application. |
 | Proxy routing | Upstream SOCKS routing, device bindings, country rules, TCP reachability checks, and UDP Associate checks for WiFi Calling data paths. |
 | Notifications | New inbound SMS forwarding through Telegram, Bark, email, Pushplus, and signed webhooks. Each SMS is delivered as an individual notification. |
-| Telegram bot | Device status, installed-profile listing and switching, WiFi Calling controls, SMS sending, timed dialing with automatic hang-up, call status, answer, and hang-up commands. Sensitive actions require administrator confirmation. |
+| Telegram bot | Device status, installed-profile listing and switching, WiFi Calling controls, and SMS sending. Sensitive actions require administrator confirmation. |
 | Operations | Authentication, CSRF protection, access policies, audit events, live logs, log retention, health checks, responsive layout, dark mode, and English/Chinese application UI. |
 | Distribution | Static Linux binaries, systemd installation script, self-update with SHA-256 verification, Docker image, GHCR publishing, and GitHub Actions release builds. |
 
@@ -131,8 +131,22 @@ Current implementation limits that matter during acceptance:
 
 ### One-click Linux installation
 
+As root (including OpenWrt/Kwrt, where `sudo` is normally absent):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh | bash
+```
+
+From a normal user on a distribution with sudo:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh | sudo bash
+```
+
+Check the host's VoWiFi/XFRM prerequisites without installing VoCat:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh | bash -s -- --check-env
 ```
 
 Install a specific version:
@@ -141,6 +155,12 @@ Install a specific version:
 curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
 sudo bash install.sh 0.0.2
 ```
+
+VoWiFi IMS requires Linux XFRM/IPsec. On OpenWrt/Kwrt the installer attempts
+to install matching `ip-full`, `kmod-ipsec`, `kmod-ipsec4/6`,
+`kmod-crypto-authenc`, AES-CBC and SHA1 packages from the firmware's own feed.
+If matching kernel modules are unavailable, use a firmware that includes them;
+never force-install kmods built for a different kernel.
 
 The installer:
 
@@ -192,9 +212,11 @@ Verify and install it:
 sha256sum -c SHA256SUMS --ignore-missing
 sudo install -d -m 0755 /opt/vocat/bin /opt/vocat/data
 sudo install -m 0755 vocat-linux-amd64 /opt/vocat/bin/vocat
+read -rsp "Admin password: " VOCAT_BOOTSTRAP_PASSWORD; echo
+printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | sudo /opt/vocat/bin/vocat bootstrap-admin
+unset VOCAT_BOOTSTRAP_PASSWORD
 sudo env \
   VOCAT_DATABASE_PATH=/opt/vocat/data/vocat.db \
-  VOCAT_ADMIN_PASSWORD=change-this-password \
   /opt/vocat/bin/vocat serve
 ```
 
@@ -212,9 +234,12 @@ deployment:
 
 ```bash
 cp .env.example .env
-# Set VOCAT_ADMIN_PASSWORD in .env.
 docker compose up -d
 ```
+
+Initialize the first administrator from the running container with the
+one-time `bootstrap-admin` command; administrator passwords are not supplied
+through `.env`.
 
 For a trusted Linux modem host, apply the explicit hardware override:
 
@@ -241,13 +266,20 @@ image-only hardware deployment, the equivalent explicit command is:
 ```bash
 docker pull ghcr.io/mengmengcode/vocat:latest
 
+read -rsp "Admin password: " VOCAT_BOOTSTRAP_PASSWORD; echo
+printf '%s\n' "$VOCAT_BOOTSTRAP_PASSWORD" | docker run --rm -i \
+  --user 0:0 \
+  -v vocat-data:/opt/vocat/data \
+  --entrypoint /opt/vocat/bin/vocat \
+  ghcr.io/mengmengcode/vocat:latest bootstrap-admin
+unset VOCAT_BOOTSTRAP_PASSWORD
+
 docker run -d \
   --name vocat \
   --restart unless-stopped \
   --network host \
   --privileged \
   --user 0:0 \
-  -e VOCAT_ADMIN_PASSWORD=change-this-password \
   -v vocat-data:/opt/vocat/data \
   -v /dev:/dev \
   -v /sys:/sys:ro \
@@ -257,15 +289,30 @@ docker run -d \
 Open `http://<server-address>:7575` after the container starts. The `/dev` bind
 mount makes new `ttyUSB*`, `ttyACM*`, and `cdc-wdm*` nodes visible without
 recreating the container.
+Host networking is required so QMI network interfaces remain visible to Vocat,
+while privileged device access is required for serial ports, QMI control nodes,
+TUN interfaces, network configuration, and devices added after the container
+starts. The `/dev` bind mount makes new `ttyUSB*`, `ttyACM*`, `cdc-wdm*`, and MHI
+`wwan*` nodes visible without recreating the container.
 
 This mode intentionally gives Vocat broad access to the host's devices and
 network stack. Use it only on a trusted Linux host. The automatic discovery
-currently identifies supported Quectel USB modems (USB vendor ID `2c7c`), not
-arbitrary modem brands. Mapping only individual nodes with `--device`, such as
-`/dev/ttyUSB2` and `/dev/cdc-wdm0`, limits the container to those fixed nodes
-and does not provide complete multi-device or hot-plug discovery.
+identifies supported Quectel USB modems (USB vendor ID `2c7c`) and PCIe/MHI
+modems exposed through the Linux WWAN subsystem; it does not identify arbitrary
+modem layouts. Mapping only individual nodes with `--device`, such as
+`/dev/ttyUSB2`, `/dev/cdc-wdm0`, or `/dev/wwan0qmi0`, limits the container to
+those fixed nodes and does not provide complete multi-device or hot-plug discovery.
 
 The GHCR image is published for `linux/amd64` and `linux/arm64`.
+
+### USB SIM readers
+
+USB SIM readers use the Linux PC/SC service. The one-click installer installs
+and starts `pcscd` plus the CCID driver automatically on supported package
+managers. On Debian/Ubuntu, the equivalent manual setup is
+`apt install pcscd libccid`. If USB sees a CCID reader but PC/SC is unavailable,
+VoCat keeps the reader visible in the add-device dialog and reports the missing
+service or driver instead of silently hiding it.
 
 ## Configuration
 
@@ -275,14 +322,16 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 | --- | --- | --- |
 | `VOCAT_ADDR` | `0.0.0.0:7575` | HTTP listen address. |
 | `VOCAT_DATABASE_PATH` | `./data/vocat.db` | SQLite database path. |
-| `VOCAT_ADMIN_USERNAME` | `admin` | Initial administrator username. |
-| `VOCAT_ADMIN_PASSWORD` | `admin` | Initial administrator password. Change it before exposing the service. |
 | `VOCAT_SESSION_TTL` | `24h` | Authentication session lifetime. |
 | `VOCAT_SECURE_COOKIES` | `false` | Marks session cookies as secure when HTTPS is used. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown timeout. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum API request body size. |
 | `VOCAT_REPO` | `MengMengCode/VoCat` | Trusted GitHub repository used by the self-updater, in `owner/name` form. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token for private repositories or higher API limits. |
+
+Administrator credentials are stored only in SQLite. Initialize an empty
+database once with `vocat bootstrap-admin`; environment variables and JSON
+configuration cannot set or overwrite the administrator username or password.
 
 Do not store Telegram tokens, SMTP passwords, webhook secrets, SIM credentials, or other private data in the repository. Configure them through the application settings or protected environment files.
 
@@ -296,13 +345,9 @@ When Telegram notifications are enabled and both Chat ID and Admin ID are config
 /switch <device> <iccid>
 /wfc <device> <status|on|off|reconnect>
 /sms <device> <number> <message>
-/call <device> <number> <seconds>
-/calls <device>
-/answer <device>
-/hangup <device>
 ```
 
-Profile switching, SMS submission, and dialing use one-time confirmation buttons. Timed dialing performs the modem call action and automatically hangs up after 1–600 seconds; it does not capture or process call audio. The bot does not expose eSIM download, delete, or rename commands.
+Profile switching and SMS submission use one-time confirmation buttons. The bot does not expose eSIM download, delete, or rename commands.
 
 ## Updating
 

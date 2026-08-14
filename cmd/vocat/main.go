@@ -90,6 +90,11 @@ func main() {
 			logger.Error("develop failed", "error", err)
 			os.Exit(2)
 		}
+	case "bootstrap-admin":
+		if err := runBootstrapAdmin(rest); err != nil {
+			logger.Error("bootstrap admin failed", "error", err)
+			os.Exit(1)
+		}
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 	default:
@@ -113,11 +118,11 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
 	}
-	if cfg.UsesDefaultCredentials() {
-		logger.Warn(
-			"default admin credentials are active; set VOCAT_ADMIN_PASSWORD before exposing the service",
-		)
+	instanceLock, err := lockServerInstance(cfg.DatabasePath)
+	if err != nil {
+		return err
 	}
+	defer instanceLock.Close()
 
 	startupContext, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelStartup()
@@ -178,12 +183,11 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	if err != nil {
 		return err
 	}
-	if err := authService.EnsureAdmin(
-		startupContext,
-		cfg.AdminUsername,
-		cfg.AdminPassword,
-	); err != nil {
-		return err
+	if _, adminErr := database.CurrentAdmin(startupContext); adminErr != nil {
+		if errors.Is(adminErr, store.ErrNotFound) {
+			return errors.New("administrator is not initialized; run vocat bootstrap-admin before starting the service")
+		}
+		return fmt.Errorf("read administrator: %w", adminErr)
 	}
 
 	cardReaders := pcsc.New()
@@ -200,6 +204,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	if err := provisionDiscoveredDevices(startupContext, database, deviceManager); err != nil {
 		logger.Warn("automatic first-run device provisioning failed", "error", err)
 	}
+	configureDeviceBackends(startupContext, logger, database, deviceManager)
 	restoreDefaultCellularRadios(startupContext, logger, database, deviceManager)
 	defer func() {
 		stopContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -348,6 +353,32 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		}
 	}
 	return nil
+}
+
+func configureDeviceBackends(ctx context.Context, logger *slog.Logger, database *store.Store, manager *device.Manager) {
+	configs, err := database.ListDevices(ctx)
+	if err != nil {
+		logger.Warn("configure device backends: list devices", "error", err)
+		return
+	}
+	mapper := integration.ATMapper{Store: database, Devices: manager}
+	for _, config := range configs {
+		entry, mapErr := mapper.Get(config.ID)
+		if mapErr != nil {
+			continue
+		}
+		if config.DeviceType == store.DeviceTypeUSBSIMReader {
+			if pinErr := manager.SetSIMPin(entry.ID, config.SIMPIN); pinErr != nil {
+				logger.Warn("configure USB SIM reader", "device_id", config.ID, "error", pinErr)
+			}
+			continue
+		}
+		if backend := strings.TrimSpace(config.DeviceBackend); backend != "" {
+			if backendErr := manager.SetBackend(entry.ID, backend); backendErr != nil {
+				logger.Warn("configure device backend", "device_id", config.ID, "backend", backend, "error", backendErr)
+			}
+		}
+	}
 }
 
 type startupRadioManager interface {
@@ -694,6 +725,13 @@ func configureVoWiFiRuntime(
 			return nil, fmt.Errorf("register device %q VoWiFi runtime: %w", deviceConfig.ID, err)
 		}
 		if deviceConfig.VoWiFiEnabled {
+			if deviceConfig.DeviceType != store.DeviceTypeUSBSIMReader {
+				if entry, mapErr := mapper.Get(deviceConfig.ID); mapErr == nil {
+					if flightErr := protectVoWiFiStartupRadio(ctx, deviceManager, entry.ID); flightErr != nil {
+						logger.Warn("VoWiFi startup radio protection deferred to automatic retry", "device_id", deviceConfig.ID, "error", flightErr)
+					}
+				}
+			}
 			if _, err := manager.RequestEnabled(deviceConfig.ID, true); err != nil {
 				_ = manager.Close(context.Background())
 				return nil, fmt.Errorf("start device %q VoWiFi policy: %w", deviceConfig.ID, err)
@@ -701,6 +739,50 @@ func configureVoWiFiRuntime(
 		}
 	}
 	return manager, nil
+}
+
+const (
+	vowifiStartupRadioAttempts = 3
+	vowifiStartupRadioDelay    = time.Second
+)
+
+type flightModeSetter interface {
+	SetFlight(context.Context, string, bool) (device.FlightResult, error)
+}
+
+func protectVoWiFiStartupRadio(ctx context.Context, manager flightModeSetter, physicalID string) error {
+	return protectVoWiFiStartupRadioWithRetry(ctx, manager, physicalID, vowifiStartupRadioAttempts, vowifiStartupRadioDelay)
+}
+
+func protectVoWiFiStartupRadioWithRetry(ctx context.Context, manager flightModeSetter, physicalID string, attempts int, delay time.Duration) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		flightContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, lastErr = manager.SetFlight(flightContext, physicalID, true)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if attempt+1 == attempts {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return errors.Join(lastErr, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return lastErr
 }
 
 func voWiFiRFOffModeForDeviceType(deviceType string) int {

@@ -94,7 +94,7 @@ export function OverviewVowifiCard({ device }: { device: DeviceDetail }) {
           <div className="space-y-1.5 border-t border-gray-100 px-3 pb-2 pt-2 text-sm text-gray-700 dark:border-white/5 dark:text-gray-200">
             {eapRejected ? (
               <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200">
-                {t("已连接到运营商 ePDG，但运营商拒绝了此 SIM 的 EAP-AKA 鉴权。通常表示该 Profile 未开通 IMS/WiFi Calling；重复重连不会解决，需要换用支持 VoWiFi 的运营商 Profile。")}
+                {t("已连接到运营商 ePDG，但 EAP-AKA 流程被拒绝。可能是初始身份、运营商 IKE/EAP 兼容性或订阅策略问题；请根据错误详情确认失败阶段。")}
               </div>
             ) : null}
             <FieldRow label={t("数据平面")} value={rt?.dataplaneMode || "--"} monospace />

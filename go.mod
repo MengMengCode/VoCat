@@ -3,7 +3,6 @@ module vocat
 go 1.25.0
 
 require (
-	github.com/ElMostafaIdrassi/goscard v1.0.0
 	github.com/coder/websocket v1.8.15
 	github.com/iniwex5/netlink v1.3.3
 	github.com/iniwex5/quectel-qmi-go v0.0.0
@@ -19,7 +18,6 @@ replace github.com/iniwex5/quectel-qmi-go => ./third_party/quectel-qmi-go
 require (
 	github.com/creack/goselect v0.1.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/ebitengine/purego v0.8.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect

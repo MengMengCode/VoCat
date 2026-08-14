@@ -28,6 +28,7 @@ const (
 	payloadAuth      = 39
 	payloadNonce     = 40
 	payloadNotify    = 41
+	payloadDelete    = 42
 	payloadTSi       = 44
 	payloadTSr       = 45
 	payloadEncrypted = 46
@@ -54,11 +55,14 @@ const (
 	dhMODP2048               = 14
 	transformAttributeKeyLen = 14
 
-	notifyNATSource      = 16388
-	notifyNATDestination = 16389
-	notifyEAPOnlyAuth    = 16417
-	notifyInvalidKE      = 17
-	notifyNoProposal     = 14
+	notifyInitialContact  = 16384
+	notifyMOBIKESupported = 16396
+	notifyNATSource       = 16388
+	notifyNATDestination  = 16389
+	notifyEAPOnlyAuth     = 16417
+	notifyDeviceIdentity  = 41101
+	notifyInvalidKE       = 17
+	notifyNoProposal      = 14
 )
 
 var (

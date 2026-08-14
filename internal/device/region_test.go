@@ -23,6 +23,9 @@ func TestCardMCCMNC(t *testing.T) {
 	if mcc, _ := CardMCCMNC("460001234567890"); mcc != "460" {
 		t.Fatalf("CardMCCMNC mcc = %q, want 460", mcc)
 	}
+	if mcc, mnc := CardMCCMNCWithLength("454006395879502", 2); mcc != "454" || mnc != "00" {
+		t.Fatalf("CardMCCMNCWithLength = (%q, %q), want (454, 00)", mcc, mnc)
+	}
 	for _, bad := range []string{"", "4600", "4600X1234"} {
 		if mcc, _ := CardMCCMNC(bad); mcc != "" {
 			t.Fatalf("CardMCCMNC(%q) mcc = %q, want empty", bad, mcc)

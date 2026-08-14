@@ -101,7 +101,7 @@ export function NetworkAccessCard({
               </Button>
             </div>
             <p className="text-[10px] text-gray-400">
-              {t("在内置内网网段之外始终放行的 CIDR 或单个 IP（例如 203.0.113.0/24）。")}
+              {t("在内置内网网段之外始终放行的 CIDR 或单个 IP；也允许通知推送访问这些目标地址（例如 198.18.0.0/15）。")}
             </p>
             {cidrs.length === 0 ? (
               <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50/30 py-2 text-center text-xs text-gray-400 dark:border-white/10 dark:bg-white/5">

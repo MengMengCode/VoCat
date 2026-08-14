@@ -69,6 +69,9 @@ export interface ModemSummary {
   cardMcc?: string;
   cardMnc?: string;
   cardCountry?: string;
+  homeCarrierName?: string;
+  homeCarrierPlmn?: string;
+  homeCarrierCountryCode?: string;
   serviceBlocked?: boolean;
   blockedReason?: string;
   networkMode: string;
@@ -191,6 +194,7 @@ export interface DiscoveredDevice {
   configured: boolean;
   configuredId?: string;
   degraded?: boolean;
+  discoveryIssue?: "pcsc_service_unavailable" | "pcsc_driver_missing" | string;
   usbnetMode?: number | null;
 }
 

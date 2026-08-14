@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 #
-# vocat install / update script for binary + systemd deployments.
+# vocat install / update script for systemd and OpenWrt/procd deployments.
 #
 # Usage:
-#   sudo bash install.sh [version]        # install a specific version
-#   sudo bash install.sh                  # install latest release
-#   sudo bash install.sh --force          # reinstall even at the same version
-#   curl -fsSL <raw url> | sudo bash      # one-liner (latest)
+#   bash install.sh [version]             # run directly when already root
+#   sudo bash install.sh [version]        # run through sudo as a normal user
+#   bash install.sh --check-env           # check VoWiFi host prerequisites
 #
 # Behavior:
 #   - Prompts for script language (中文 / English) as soon as it runs.
 #   - If the installed version equals the target version, does nothing (unless --force).
-#   - On first install, generates a random 32-char admin password, writes it to
-#     /etc/vocat/env (0600, loaded by the systemd unit), and prints it ONCE.
-#   - On update, preserves the existing env file and credentials.
-#   - (Re)writes the systemd unit and restarts the service.
+#   - On first install, generates a random 32-char admin password, initializes
+#     it directly in SQLite through stdin, and prints it ONCE.
+#   - Administrator credentials are never stored in /etc/vocat/env.
+#   - Verifies Linux XFRM/IPsec support required by IMS; on OpenWrt it tries
+#     the matching opkg packages first.
+#   - (Re)writes a systemd or OpenWrt/procd service and restarts it.
 #
 # Published script: must contain no secrets, IPs, or passwords.
 
@@ -31,6 +32,7 @@ LINK_PATH="/usr/local/bin/vocat"
 ENV_DIR="/etc/vocat"
 ENV_FILE="${ENV_DIR}/env"
 UNIT_PATH="/etc/systemd/system/vocat.service"
+OPENWRT_INIT_PATH="/etc/init.d/vocat"
 
 # --- Language ----------------------------------------------------------------
 LANG_CHOICE=""
@@ -147,14 +149,44 @@ ensure_runtime_dependencies() {
 
 prompt_language
 
+# BusyBox/OpenWrt images often omit coreutils' install(1). Provide the small
+# subset used by this script so the same installer works on router firmware.
+if ! command -v install >/dev/null 2>&1; then
+    install() {
+        if [ "${1:-}" = "-d" ]; then
+            shift
+            local mode="0755"
+            if [ "${1:-}" = "-m" ]; then
+                mode="$2"
+                shift 2
+            fi
+            mkdir -p "$@"
+            chmod "$mode" "$@"
+            return
+        fi
+        local mode="0755"
+        if [ "${1:-}" = "-m" ]; then
+            mode="$2"
+            shift 2
+        fi
+        [ "$#" -eq 2 ] || return 2
+        cp "$1" "$2"
+        chmod "$mode" "$2"
+    }
+fi
+
 # --- Parse args --------------------------------------------------------------
 FORCE=0
+CHECK_ENV=0
+SKIP_VOWIFI_CHECK="${VOCAT_SKIP_VOWIFI_CHECK:-0}"
 TARGET_VERSION=""
 for arg in "$@"; do
     case "$arg" in
         --force) FORCE=1 ;;
+        --check-env) CHECK_ENV=1 ;;
+        --skip-vowifi-check) SKIP_VOWIFI_CHECK=1 ;;
         -h|--help)
-            msg "用法: sudo bash install.sh [--force] [版本]" "Usage: sudo bash install.sh [--force] [version]"
+            msg "用法: bash install.sh [--force] [--check-env] [--skip-vowifi-check] [版本]" "Usage: bash install.sh [--force] [--check-env] [--skip-vowifi-check] [version]"
             exit 0
             ;;
         *) TARGET_VERSION="${arg#v}" ;;
@@ -179,6 +211,131 @@ resolve_target_version() {
     tag=$(printf '%s\n' "$resp" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
     [ -n "$tag" ] || die "无法解析最新版本的 tag_name。" "Could not parse tag_name from the release response."
     TARGET_VERSION="${tag#v}"
+}
+
+# --- Host prerequisites ------------------------------------------------------
+is_openwrt() {
+    [ -f /etc/openwrt_release ] || [ -x /sbin/procd ]
+}
+
+xfrm_works() {
+    command -v ip >/dev/null 2>&1 && ip xfrm state list >/dev/null 2>&1
+}
+
+opkg_has_package() {
+    opkg list "$1" 2>/dev/null | grep -q "^$1 -"
+}
+
+install_openwrt_vowifi_packages() {
+    msg "正在检查 OpenWrt/Kwrt 的 VoWiFi 内核组件..." "Checking OpenWrt/Kwrt VoWiFi kernel components..."
+    opkg update >/dev/null 2>&1 || msg \
+        "警告：opkg 软件源更新失败，将使用现有索引继续检查。" \
+        "Warning: opkg feed update failed; checking the existing index."
+
+    local packages=""
+    local package
+    for package in \
+        ip-full \
+        kmod-ipsec kmod-ipsec4 kmod-ipsec6 \
+        kmod-crypto-authenc kmod-crypto-cbc kmod-crypto-aes \
+        kmod-crypto-hmac kmod-crypto-sha1; do
+        if opkg_has_package "$package"; then
+            packages="$packages $package"
+        fi
+    done
+    if [ -n "$packages" ]; then
+        # Kernel packages must come from this firmware's own feed. opkg checks
+        # the kernel ABI and refuses mismatched modules; never bypass that check.
+        # shellcheck disable=SC2086
+        opkg install $packages >/dev/null 2>&1 || true
+    fi
+}
+
+install_linux_ip_tool() {
+    command -v ip >/dev/null 2>&1 && return 0
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y iproute2
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y iproute
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y iproute
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm iproute2
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache iproute2
+    fi
+}
+
+install_pcsc_support() {
+    msg "正在检查 USB SIM 读卡器的 PC/SC 运行环境..." "Checking the PC/SC environment for USB SIM readers..."
+    local installed=0
+    if is_openwrt && command -v opkg >/dev/null 2>&1; then
+        opkg update >/dev/null 2>&1 || true
+        local packages=""
+        opkg_has_package pcscd && packages="$packages pcscd"
+        opkg_has_package ccid && packages="$packages ccid"
+        if [ -n "$packages" ]; then
+            # shellcheck disable=SC2086
+            opkg install $packages >/dev/null 2>&1 && installed=1 || true
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        if apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y pcscd libccid; then
+            installed=1
+        fi
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y pcsc-lite pcsc-lite-ccid && installed=1 || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y pcsc-lite pcsc-lite-ccid && installed=1 || true
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm pcsclite ccid && installed=1 || true
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache pcsc-lite ccid && installed=1 || true
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable --now pcscd.socket >/dev/null 2>&1 || \
+            systemctl restart pcscd >/dev/null 2>&1 || true
+    elif [ -x /etc/init.d/pcscd ]; then
+        /etc/init.d/pcscd enable >/dev/null 2>&1 || true
+        /etc/init.d/pcscd restart >/dev/null 2>&1 || /etc/init.d/pcscd start >/dev/null 2>&1 || true
+    fi
+    if command -v pcscd >/dev/null 2>&1 || [ "$installed" -eq 1 ]; then
+        msg "USB SIM 读卡器 PC/SC 环境已就绪。" "USB SIM reader PC/SC environment is ready."
+    else
+        msg \
+            "警告：未能自动安装 pcscd/CCID 驱动；系统仍会显示读卡器并给出修复提示。" \
+            "Warning: pcscd/CCID could not be installed automatically; VoCat will still show the reader with a remediation hint."
+    fi
+}
+
+check_vowifi_environment() {
+    if [ "$SKIP_VOWIFI_CHECK" = "1" ]; then
+        msg \
+            "已跳过 VoWiFi 内核环境检查；IMS 通话和短信可能不可用。" \
+            "Skipped the VoWiFi kernel check; IMS calls and SMS may not work."
+        return
+    fi
+
+    if is_openwrt && command -v opkg >/dev/null 2>&1; then
+        # Install the crypto algorithms even when NETLINK_XFRM already works;
+        # some minimal images provide xfrm_user but omit AES-CBC/authenc.
+        install_openwrt_vowifi_packages
+    elif ! xfrm_works; then
+        install_linux_ip_tool
+    fi
+    if xfrm_works; then
+        msg "VoWiFi XFRM/IPsec 环境安装并验证成功。" "VoWiFi XFRM/IPsec environment installed and verified."
+        return
+    fi
+
+    if is_openwrt; then
+        die \
+            "当前 OpenWrt/Kwrt 内核 $(uname -r) 不支持 NETLINK_XFRM，且软件源没有匹配的 kmod-ipsec。请使用包含 kmod-ipsec、kmod-ipsec4、kmod-ipsec6、kmod-crypto-authenc、kmod-crypto-cbc、kmod-crypto-aes 和 kmod-crypto-sha1 的同版本固件；严禁安装其他内核版本的 kmod。仅使用非 VoWiFi 功能时可加 --skip-vowifi-check。" \
+            "The OpenWrt/Kwrt kernel $(uname -r) lacks NETLINK_XFRM and its feed has no matching kmod-ipsec. Use a firmware built with matching kmod-ipsec, kmod-ipsec4/6, crypto-authenc, CBC, AES and SHA1 modules. Never force kmods from another kernel. Use --skip-vowifi-check only for non-VoWiFi operation."
+    fi
+    die \
+        "当前 Linux 内核不支持 XFRM/IPsec，VoWiFi IMS 无法工作。请启用 CONFIG_XFRM、CONFIG_XFRM_USER、CONFIG_INET_ESP、CONFIG_INET6_ESP、AES-CBC 和 HMAC-SHA1。" \
+        "This Linux kernel lacks XFRM/IPsec required by VoWiFi IMS. Enable CONFIG_XFRM, CONFIG_XFRM_USER, CONFIG_INET_ESP, CONFIG_INET6_ESP, AES-CBC and HMAC-SHA1."
 }
 
 # --- Skip if already installed at the same version ---------------------------
@@ -230,6 +387,10 @@ download_and_verify() {
     [ -n "$expected" ] || die "SHA256SUMS 中找不到 $asset 的校验行。" "$asset not found in SHA256SUMS."
     actual=$(sha256sum "${VOCAT_TMP}/vocat" | awk '{print $1}')
     [ "$actual" = "$expected" ] || die "SHA-256 校验失败。" "SHA-256 verification failed."
+    chmod 0755 "${VOCAT_TMP}/vocat"
+    "${VOCAT_TMP}/vocat" version >/dev/null 2>&1 || die \
+        "Downloaded binary cannot run on this system; keeping the installed version." \
+        "The downloaded binary cannot run on this host; the installed version was not changed."
 }
 
 # --- Install binary ----------------------------------------------------------
@@ -250,21 +411,32 @@ ensure_data_dir() {
     chown -R root:root /opt/vocat
 }
 
-# --- Env file (first install only) -------------------------------------------
-# Generates a random 32-char secret, stores it in the 0600 env file, and flags
-# FIRST_INSTALL so we can print the secret once at the end.
+# --- Administrator bootstrap and non-secret environment ---------------------
 FIRST_INSTALL=0
-setup_env() {
-    if [ -f "$ENV_FILE" ]; then
-        return
-    fi
-    install -d -m 0755 "$ENV_DIR"
-    local secret
+INITIAL_ADMIN_PASSWORD=""
+
+bootstrap_admin() {
+    local secret result
     secret=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-    [ -n "$secret" ] || die "生成随机密钥失败。" "Failed to generate a random secret."
-    printf 'VOCAT_ADMIN_PASSWORD=%s\n' "$secret" > "$ENV_FILE"
+    [ -n "$secret" ] || die "Failed to generate a random secret." "Failed to generate a random secret."
+    result=$(printf '%s\n' "$secret" | "$BINARY_PATH" bootstrap-admin --database /opt/vocat/data/vocat.db --username admin) || \
+        die "Failed to initialize the administrator." "Failed to initialize the administrator."
+    if [ "$result" = "created" ]; then
+        FIRST_INSTALL=1
+        INITIAL_ADMIN_PASSWORD="$secret"
+    fi
+}
+
+setup_env() {
+    install -d -m 0755 "$ENV_DIR"
+    local temporary="${ENV_FILE}.new.$$"
+    if [ -f "$ENV_FILE" ]; then
+        grep -Ev '^VOCAT_ADMIN_(USERNAME|PASSWORD|PASSWORD_B64)=' "$ENV_FILE" > "$temporary" || true
+    else
+        : > "$temporary"
+    fi
+    mv -f "$temporary" "$ENV_FILE"
     chmod 0600 "$ENV_FILE"
-    FIRST_INSTALL=1
 }
 
 # --- systemd unit ------------------------------------------------------------
@@ -292,6 +464,8 @@ TimeoutStartSec=30s
 # HTTP, VoWiFi, and modem cleanup have bounded shutdown contexts totalling up
 # to 30 seconds. Leave a small margin before systemd resorts to SIGKILL.
 TimeoutStopSec=40s
+RuntimeDirectory=vocat
+RuntimeDirectoryMode=0755
 
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
@@ -320,11 +494,98 @@ EOF
     chmod 0644 "$UNIT_PATH"
 }
 
+write_openwrt_init() {
+    cat > "$OPENWRT_INIT_PATH" <<'EOF'
+#!/bin/sh /etc/rc.common
+START=95
+STOP=10
+USE_PROCD=1
+PROCD_TERM_TIMEOUT=40
+PROGRAM=/opt/vocat/bin/vocat
+ENV_FILE=/etc/vocat/env
+start_service() {
+    procd_open_instance
+    procd_set_param command "$PROGRAM" serve
+    procd_set_param env VOCAT_DATABASE_PATH=/opt/vocat/data/vocat.db
+    if [ -r "$ENV_FILE" ]; then
+        while IFS='=' read -r name value; do
+            case "$name" in VOCAT_*) procd_append_param env "$name=$value" ;; esac
+        done < "$ENV_FILE"
+    fi
+    procd_set_param respawn 3600 5 5
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+service_triggers() { procd_add_reload_trigger vocat; }
+EOF
+    chmod 0755 "$OPENWRT_INIT_PATH"
+}
+
+write_service() {
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+        write_unit
+        return
+    fi
+    if [ -x /sbin/procd ] || [ -x /sbin/ubusd ]; then
+        write_openwrt_init
+        return
+    fi
+    die "Unsupported service manager." "Neither systemd nor OpenWrt procd was detected."
+}
+
 enable_and_start() {
+    if [ -x "$OPENWRT_INIT_PATH" ] && { [ -x /sbin/procd ] || [ -x /sbin/ubusd ]; }; then
+        "$OPENWRT_INIT_PATH" enable
+		# Stop explicitly before restart. Some procd/rc.common variants return
+		# from restart while the previous process is still inside its bounded
+		# VoWiFi cleanup, so the replacement can race the host-wide instance
+		# lock and enter a respawn cycle.
+		"$OPENWRT_INIT_PATH" stop || true
+		local stop_attempt
+		for stop_attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+			if ! "$OPENWRT_INIT_PATH" running; then
+				break
+			fi
+			sleep 1
+		done
+        if "$OPENWRT_INIT_PATH" restart; then
+            # Modems may need several seconds to release and reopen their AT
+            # port after procd stops the previous process. Require consecutive
+            # healthy observations so a short-lived respawn is not mistaken for
+            # a successful upgrade.
+            local attempt stable
+            stable=0
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+                sleep 1
+                if "$OPENWRT_INIT_PATH" running; then
+                    stable=$((stable + 1))
+                    if [ "$stable" -ge 3 ]; then
+                        rm -f "${BINARY_PATH}.bak"
+                        return
+                    fi
+                else
+                    stable=0
+                fi
+            done
+        fi
+        if [ -e "${BINARY_PATH}.bak" ]; then
+            cp -a "${BINARY_PATH}.bak" "$BINARY_PATH"
+            "$OPENWRT_INIT_PATH" restart || true
+        fi
+        die "OpenWrt vocat service failed to start." "The OpenWrt vocat service failed to start."
+    fi
     systemctl daemon-reload
     systemctl enable vocat
     if systemctl restart vocat; then
-        return
+        local attempt
+        for attempt in 1 2 3 4 5; do
+            if systemctl is-active --quiet vocat; then
+                rm -f "${BINARY_PATH}.bak"
+                return
+            fi
+            sleep 1
+        done
     fi
     if [ -e "${BINARY_PATH}.bak" ]; then
         msg "新版本启动失败，正在恢复旧二进制。" "The new version failed to start; restoring the previous binary."
@@ -336,27 +597,33 @@ enable_and_start() {
 
 # --- Main --------------------------------------------------------------------
 ensure_runtime_dependencies
-resolve_target_version
 detect_arch
+install_pcsc_support
+check_vowifi_environment
+if [ "$CHECK_ENV" -eq 1 ]; then
+    msg "VoCat 运行环境检查完成。" "VoCat host environment check completed."
+    exit 0
+fi
+resolve_target_version
 skip_if_equal
 download_and_verify
 install_binary
 ensure_data_dir
+bootstrap_admin
 setup_env
-write_unit
+write_service
 enable_and_start
 
 if [ "$FIRST_INSTALL" -eq 1 ]; then
-    secret=$(grep -E '^VOCAT_ADMIN_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
     echo
     msg "================ 安装完成 ================" "================ Install complete ================"
     msg "首次安装已生成管理员初始密码 (仅显示一次):" "First-install admin password (shown once):"
     echo
-    echo "    $secret"
+    echo "    $INITIAL_ADMIN_PASSWORD"
     echo
     msg "用户名为 admin。请立即记录此密码。" "Username is admin. Record this password now."
     msg "登录后或运行以下命令修改密码:" "Change it via the web UI or run:"
-    echo "    sudo vocat menu"
+    echo "    vocat menu"
     msg "==========================================" "=============================================="
 else
     echo

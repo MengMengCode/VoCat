@@ -13,6 +13,7 @@ var configEnvironment = []string{
 	"VOCAT_DATABASE_PATH",
 	"VOCAT_ADMIN_USERNAME",
 	"VOCAT_ADMIN_PASSWORD",
+	"VOCAT_ADMIN_PASSWORD_B64",
 	"VOCAT_SESSION_TTL",
 	"VOCAT_SECURE_COOKIES",
 	"VOCAT_SHUTDOWN_TIMEOUT",
@@ -39,9 +40,6 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Address != "0.0.0.0:7575" {
 		t.Fatalf("Address = %q", cfg.Address)
 	}
-	if !cfg.UsesDefaultCredentials() {
-		t.Fatal("expected bootstrap credentials")
-	}
 }
 
 func TestLoadFileThenEnvironmentOverride(t *testing.T) {
@@ -50,8 +48,6 @@ func TestLoadFileThenEnvironmentOverride(t *testing.T) {
 	content := []byte(`{
 		"address": "127.0.0.1:8000",
 		"database_path": "/tmp/from-file.db",
-		"admin_username": "operator",
-		"admin_password": "from-file",
 		"session_ttl": "2h",
 		"secure_cookies": false,
 		"shutdown_timeout": "12s",
@@ -72,7 +68,7 @@ func TestLoadFileThenEnvironmentOverride(t *testing.T) {
 	if cfg.Address != "0.0.0.0:9000" || !cfg.SecureCookies {
 		t.Fatalf("environment override not applied: %+v", cfg)
 	}
-	if cfg.AdminUsername != "operator" || cfg.SessionTTL != 2*time.Hour {
+	if cfg.SessionTTL != 2*time.Hour {
 		t.Fatalf("file values not applied: %+v", cfg)
 	}
 }
@@ -87,6 +83,24 @@ func TestLoadRejectsUnknownJSONField(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() unexpectedly accepted unknown field")
+	}
+}
+
+func TestLoadIgnoresLegacyAdministratorConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	path := filepath.Join(t.TempDir(), "vocat.json")
+	if err := os.WriteFile(path, []byte(`{
+		"admin_username": "legacy-admin",
+		"admin_password": "legacy-password"
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VOCAT_CONFIG", path)
+	t.Setenv("VOCAT_ADMIN_USERNAME", "environment-admin")
+	t.Setenv("VOCAT_ADMIN_PASSWORD", "environment-password")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() rejected ignored legacy credentials: %v", err)
 	}
 }
 

@@ -259,20 +259,18 @@ export function simOperatorDisplay(device?: DeviceDetail | null): string {
   const spn = String(modem?.nativeSpn ?? "").trim();
   const name = oplPnnName(modem) || firstPnnName(modem?.pnn);
   const plmn = plmnOf(modem);
-  // EF_SPN is the SIM's customer-facing brand. Do not append the currently
-  // visited PLMN: a roaming Lebara UK SIM on a Chinese network would otherwise
-  // be mislabeled as "Lebara (460xx)". Append the home/authentication PLMN
-  // resolved from IMSI instead, so GigSky on 222-01 renders as
-  // "GigSky (22201)" even while roaming.
-  if (spn) {
-    const home = lookupCarrier(modem?.imsi);
-    return withPlmn(spn, home ? home.mcc + home.mnc : cardPlmnOf(modem));
-  }
-  if (name) return withPlmn(name, plmn);
-  // Home ("original") carrier resolved from the SIM's IMSI via the MCC/MNC table.
-  // Readable even when the modem isn't camped (VoWiFi RF-off / flight mode).
+  // "Original Carrier" means the IMSI home/authentication network. EF_SPN is
+  // only a profile-supplied display brand (travel eSIMs and MVNOs may put their
+  // storefront name there), so it must not override a known home PLMN.
+  const resolvedName = String(modem?.homeCarrierName ?? "").trim();
+  const resolvedPLMN = String(modem?.homeCarrierPlmn ?? "").trim();
+  if (resolvedName) return withPlmn(resolvedName, resolvedPLMN);
   const carrier = lookupCarrier(modem?.imsi);
   if (carrier) return withPlmn(carrier.name, carrier.mcc + carrier.mnc);
+  // If the bundled carrier database cannot resolve the home PLMN, retain the
+  // card's own labels as graceful, data-driven fallbacks.
+  if (spn) return withPlmn(spn, cardPlmnOf(modem));
+  if (name) return withPlmn(name, plmn);
   if (plmn) return plmn;
   const cardPlmn = cardPlmnOf(modem);
   if (cardPlmn) return cardPlmn;

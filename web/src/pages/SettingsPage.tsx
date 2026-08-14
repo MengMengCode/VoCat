@@ -177,7 +177,7 @@ export default function SettingsPage() {
   }, [lang]);
 
   const onSaveDeviceLimit = useCallback(async () => {
-    const maximum = developerSettings?.maxDeviceLimit ?? 128;
+    const maximum = developerSettings?.maxDeviceLimit ?? 10;
     if (!Number.isInteger(deviceLimit) || deviceLimit < 1 || deviceLimit > maximum) {
       message.error(lang === "zh" ? `设备配额必须是 1 到 ${maximum} 的整数` : `Device quota must be an integer between 1 and ${maximum}`);
       return;
@@ -196,7 +196,7 @@ export default function SettingsPage() {
   }, [developerSettings, deviceLimit, lang]);
 
   const onSaveSMSHourlyLimit = useCallback(async () => {
-    const maximum = developerSettings?.maxSmsHourlyLimit ?? 1000;
+    const maximum = developerSettings?.maxSmsHourlyLimit ?? 20;
     if (!Number.isInteger(smsHourlyLimit) || smsHourlyLimit < 1 || smsHourlyLimit > maximum) {
       message.error(lang === "zh" ? `短信发送限制必须是 1 到 ${maximum} 的整数` : `SMS limit must be an integer between 1 and ${maximum}`);
       return;

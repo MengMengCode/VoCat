@@ -102,6 +102,22 @@ func (s *Service) EnsureAdmin(ctx context.Context, username string, password str
 	return nil
 }
 
+// EnsureAdminIfMissing initializes the administrator only for a new database.
+// Once an administrator exists, the database is the sole credential source;
+// process configuration must never overwrite a password changed through the UI
+// or CLI on a later restart.
+func (s *Service) EnsureAdminIfMissing(ctx context.Context, username string, password string) (bool, error) {
+	if _, err := s.store.CurrentAdmin(ctx); err == nil {
+		return false, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("auth: read configured admin: %w", err)
+	}
+	if err := s.EnsureAdmin(ctx, username, password); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Service) Login(ctx context.Context, username string, password string) (Credentials, error) {
 	admin, err := s.store.AdminByUsername(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {

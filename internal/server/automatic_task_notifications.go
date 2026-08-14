@@ -31,6 +31,7 @@ type automaticTaskNotification struct {
 }
 
 func (s *Server) notifyAutomaticTask(ctx context.Context, task store.AutomaticTask, run store.AutomaticTaskRun) {
+	ctx = s.notificationDestinationContext(ctx)
 	deviceLabel := task.DeviceID
 	if configured, err := s.store.Device(ctx, task.DeviceID); err == nil {
 		deviceLabel = firstNonEmpty(configured.Name, configured.ID)

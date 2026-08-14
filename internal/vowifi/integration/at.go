@@ -24,6 +24,23 @@ type ATMapper struct {
 	Devices ATDeviceController
 }
 
+type uiccLocker interface {
+	LockUICC()
+	UnlockUICC()
+}
+
+func (mapper ATMapper) LockUICC() {
+	if locker, ok := mapper.Devices.(uiccLocker); ok {
+		locker.LockUICC()
+	}
+}
+
+func (mapper ATMapper) UnlockUICC() {
+	if locker, ok := mapper.Devices.(uiccLocker); ok {
+		locker.UnlockUICC()
+	}
+}
+
 func (mapper ATMapper) Get(configuredID string) (device.Device, error) {
 	physicalID, err := mapper.resolve(context.Background(), configuredID)
 	if err != nil {

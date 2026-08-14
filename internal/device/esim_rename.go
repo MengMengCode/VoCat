@@ -49,8 +49,8 @@ func (manager *Manager) ESIMRenameProfile(ctx context.Context, id, iccid, nickna
 	if err != nil {
 		return err
 	}
-	manager.esimMu.Lock()
-	defer manager.esimMu.Unlock()
+	manager.lockESIM()
+	defer manager.unlockESIM()
 	if err := manager.waitForESIMRecovery(ctx, id); err != nil {
 		return err
 	}

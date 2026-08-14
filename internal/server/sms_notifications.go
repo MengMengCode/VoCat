@@ -105,7 +105,7 @@ func (s *Server) runSMSNotificationChannel(ctx context.Context, channel string) 
 			} else {
 				for _, message := range messages {
 					notification := s.newSMSNotification(ctx, message)
-					if sendErr := sendSMSNotification(ctx, channel, config, notification); sendErr != nil {
+					if sendErr := sendSMSNotification(s.notificationDestinationContext(ctx), channel, config, notification); sendErr != nil {
 						if sendErr.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
 							s.logSMSNotificationError(channel, sendErr)
 							lastError, lastErrorAt = sendErr.Error(), time.Now()

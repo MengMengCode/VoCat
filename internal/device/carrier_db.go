@@ -14,7 +14,41 @@ import (
 var carrierDatabaseJSON []byte
 
 type carrierDatabase struct {
-	Carriers map[string][]string `json:"c"`
+	Carriers  map[string][]string `json:"c"`
+	Countries map[string]string   `json:"i"`
+	Rules     []carrierRule       `json:"r"`
+}
+
+type carrierRule struct {
+	Name          string   `json:"n"`
+	PLMNs         []string `json:"m"`
+	IMSIPatterns  []string `json:"x"`
+	SPNs          []string `json:"s"`
+	GID1Prefixes  []string `json:"g1"`
+	GID2Prefixes  []string `json:"g2"`
+	ICCIDPrefixes []string `json:"i"`
+}
+
+// CarrierIdentity contains the SIM-issued values used by Android's carrier
+// resolver. MNC length comes from EF_AD; GID values come from EF_GID1/2.
+type CarrierIdentity struct {
+	IMSI      string
+	ICCID     string
+	SPN       string
+	GID1      string
+	GID2      string
+	MNCLength int
+}
+
+// CountryForMCC returns the ISO alpha-2 country/territory code associated with
+// a three-digit mobile country code in the embedded Android carrier database.
+func CountryForMCC(mcc string) (string, bool) {
+	mcc = strings.TrimSpace(mcc)
+	if len(mcc) != 3 {
+		return "", false
+	}
+	country := strings.ToUpper(strings.TrimSpace(globalCarrierDatabase.Countries[mcc]))
+	return country, len(country) == 2
 }
 
 var globalCarrierDatabase = func() carrierDatabase {
@@ -63,4 +97,122 @@ func CarrierForIMSI(imsi string) (plmn, name, countryCode string, ok bool) {
 		}
 	}
 	return "", "", "", false
+}
+
+// CarrierForSIM applies the constrained Android carrier-ID rules before the
+// MCC/MNC fallback. This is important for MVNO and travel eSIM profiles where
+// several customer-facing carriers authenticate through the same home PLMN.
+func CarrierForSIM(identity CarrierIdentity) (plmn, name, countryCode string, ok bool) {
+	imsi := strings.TrimSpace(identity.IMSI)
+	if !decimalDigits(imsi, 5, 20) {
+		return "", "", "", false
+	}
+	plmns := carrierPLMNCandidates(imsi, identity.MNCLength)
+	bestScore := -1
+	for _, rule := range globalCarrierDatabase.Rules {
+		matchedPLMN := firstMatchingValue(rule.PLMNs, func(value string) bool {
+			return containsString(plmns, value)
+		})
+		if matchedPLMN == "" {
+			continue
+		}
+		score := 1 << 8
+		if len(rule.IMSIPatterns) > 0 {
+			if firstMatchingValue(rule.IMSIPatterns, func(pattern string) bool { return imsiPatternMatch(imsi, pattern) }) == "" {
+				continue
+			}
+			score += 1 << 7
+		}
+		if len(rule.ICCIDPrefixes) > 0 {
+			if firstMatchingValue(rule.ICCIDPrefixes, func(prefix string) bool { return strings.HasPrefix(identity.ICCID, prefix) }) == "" {
+				continue
+			}
+			score += 1 << 6
+		}
+		if len(rule.GID1Prefixes) > 0 {
+			if firstMatchingValue(rule.GID1Prefixes, func(prefix string) bool { return prefixFold(identity.GID1, prefix) }) == "" {
+				continue
+			}
+			score += 1 << 5
+		}
+		if len(rule.GID2Prefixes) > 0 {
+			if firstMatchingValue(rule.GID2Prefixes, func(prefix string) bool { return prefixFold(identity.GID2, prefix) }) == "" {
+				continue
+			}
+			score += 1 << 4
+		}
+		if len(rule.SPNs) > 0 {
+			if !containsFold(rule.SPNs, identity.SPN) {
+				continue
+			}
+			score += 1 << 1
+		}
+		if score > bestScore {
+			bestScore = score
+			plmn = matchedPLMN
+			name = strings.TrimSpace(rule.Name)
+		}
+	}
+	if bestScore >= 0 && name != "" {
+		countryCode, _ = CountryForMCC(plmn[:3])
+		return plmn, name, countryCode, true
+	}
+	return CarrierForIMSI(imsi)
+}
+
+func carrierPLMNCandidates(imsi string, mncLength int) []string {
+	if (mncLength == 2 || mncLength == 3) && len(imsi) >= 3+mncLength {
+		return []string{imsi[:3+mncLength]}
+	}
+	result := make([]string, 0, 2)
+	for _, length := range []int{6, 5} {
+		if len(imsi) >= length {
+			result = append(result, imsi[:length])
+		}
+	}
+	return result
+}
+
+func firstMatchingValue(values []string, match func(string) bool) string {
+	for _, value := range values {
+		if match(value) {
+			return value
+		}
+	}
+	return ""
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFold(values []string, wanted string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+func prefixFold(value, prefix string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), strings.ToLower(strings.TrimSpace(prefix)))
+}
+
+func imsiPatternMatch(imsi, pattern string) bool {
+	pattern = strings.TrimSpace(pattern)
+	if len(imsi) < len(pattern) {
+		return false
+	}
+	for index, value := range pattern {
+		if value != 'x' && value != 'X' && byte(value) != imsi[index] {
+			return false
+		}
+	}
+	return true
 }

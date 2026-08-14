@@ -15,6 +15,7 @@ type sessionRelay struct {
 	keys      ikeKeys
 	spii      [8]byte
 	spir      [8]byte
+	deleteID  uint32
 	natt      bool
 	keepalive time.Duration
 
@@ -33,9 +34,27 @@ func newSessionRelay(
 	keys ikeKeys,
 	initiatorSPI [8]byte,
 	responderSPI [8]byte,
-	natt bool,
-	keepalive time.Duration,
+	options ...any,
 ) *sessionRelay {
+	deleteMessageID := uint32(0)
+	natt := false
+	keepalive := 20 * time.Second
+	// Keep the internal constructor source-compatible with both the pre-merge
+	// call sites (NAT flag, keepalive) and the newer explicit-delete-ID form.
+	switch len(options) {
+	case 2:
+		natt, _ = options[0].(bool)
+		keepalive, _ = options[1].(time.Duration)
+	case 3:
+		switch value := options[0].(type) {
+		case uint32:
+			deleteMessageID = value
+		case int:
+			deleteMessageID = uint32(value)
+		}
+		natt, _ = options[1].(bool)
+		keepalive, _ = options[2].(time.Duration)
+	}
 	if keepalive <= 0 {
 		keepalive = 20 * time.Second
 	}
@@ -46,6 +65,7 @@ func newSessionRelay(
 		keys:      keys,
 		spii:      initiatorSPI,
 		spir:      responderSPI,
+		deleteID:  deleteMessageID,
 		natt:      natt,
 		keepalive: keepalive,
 		ctx:       ctx,
@@ -212,6 +232,53 @@ func (relay *sessionRelay) Close() error {
 	transportErr := relay.transport.Close()
 	<-relay.done
 	return errors.Join(relay.terminalErrorIfFailure(), transportErr)
+}
+
+func (relay *sessionRelay) CloseWithDelete(ctx context.Context) error {
+	deleteErr := relay.sendIKEDelete(ctx)
+	return errors.Join(deleteErr, relay.Close())
+}
+
+func (relay *sessionRelay) sendIKEDelete(ctx context.Context) error {
+	return sendIKESADelete(ctx, relay.transport, relay.suite, relay.keys, relay.spii, relay.spir, relay.deleteID)
+}
+
+func sendIKESADelete(
+	ctx context.Context,
+	transport datagramTransport,
+	suite negotiatedSuite,
+	keys ikeKeys,
+	initiatorSPI [8]byte,
+	responderSPI [8]byte,
+	messageID uint32,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		// Teardown is often called with the operation context already canceled.
+		// Give the protocol-level release a short independent chance to leave.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+	}
+	request, err := encryptPayloads(ikeHeader{
+		InitiatorSPI: initiatorSPI,
+		ResponderSPI: responderSPI,
+		Exchange:     exchangeInformational,
+		Flags:        flagInitiator,
+		MessageID:    messageID,
+	}, []payload{{
+		Type: payloadDelete,
+		Body: []byte{protocolIKE, 0, 0, 0},
+	}}, suite, keys.SKei, keys.SKai, nil)
+	if err != nil {
+		return fmt.Errorf("ike: build IKE SA delete: %w", err)
+	}
+	if err := transport.SendSessionPacket(ctx, request, true); err != nil {
+		return fmt.Errorf("ike: send IKE SA delete: %w", err)
+	}
+	return nil
 }
 
 func (relay *sessionRelay) terminalErrorIfFailure() error {

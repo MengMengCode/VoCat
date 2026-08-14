@@ -294,6 +294,46 @@ func TestEUICCChannelStuckWrapsTransientCME(t *testing.T) {
 	}
 }
 
+func TestOpenEuiccRecoversOrphanedSingleLogicalChannel(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{
+			command:  `AT+CSIM=10,"0070000001"`,
+			response: okResponse(`+CSIM: 6,"006A81"`),
+		},
+		{
+			command:  `AT+CSIM=10,"0070800100"`,
+			response: okResponse(`+CSIM: 4,"9000"`),
+		},
+		{
+			command:  `AT+CSIM=10,"0070000001"`,
+			response: okResponse(`+CSIM: 6,"019000"`),
+		},
+		{
+			command: fmt.Sprintf(
+				`AT+CSIM=42,"01A4040010%s"`,
+				isdRAID,
+			),
+			response: okResponse(`+CSIM: 4,"9000"`),
+		},
+		{
+			command:  `AT+CSIM=10,"0070800100"`,
+			response: okResponse(`+CSIM: 4,"9000"`),
+		},
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	manager.lockESIM()
+	channel, err := manager.openEuiccAID(context.Background(), id, isdRAID)
+	if err == nil {
+		channel.close(context.Background())
+	}
+	manager.unlockESIM()
+	if err != nil {
+		t.Fatalf("open eUICC after orphaned channel: %v", err)
+	}
+	client.assertDone(t)
+}
+
 func TestWaitForESIMRecovery(t *testing.T) {
 	done := make(chan struct{})
 	manager := &Manager{esimRecoveries: map[string]chan struct{}{"dev": done}}

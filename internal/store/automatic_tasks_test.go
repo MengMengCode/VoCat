@@ -120,6 +120,54 @@ func TestListAutomaticTaskRunsPaginated(t *testing.T) {
 	}
 }
 
+func TestAvailableAutomaticTasksExcludeRestrictedTaskAndRunHistory(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t, filepath.Join(t.TempDir(), "automatic-task-availability.db"))
+	mustSaveDevice(t, database, "ec20", "EC20")
+	now := time.Now().UTC().Truncate(time.Second)
+	save := func(name, taskType, environment string) AutomaticTask {
+		t.Helper()
+		task, err := database.SaveAutomaticTask(ctx, AutomaticTask{
+			Name: name, Enabled: true, DeviceID: "ec20", ProfileICCID: "one",
+			TaskType: taskType, Environment: environment, IntervalDays: 1,
+			StartDate: "2026-08-10", RunTime: "12:00", Timezone: "Asia/Shanghai",
+			Payload: []byte(`{"phone":"10086","message":"test"}`), NextRunAt: now.Add(-time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	visible := save("visible", "sms", "vowifi")
+	hidden := save("hidden", "public_ip", "cellular")
+	for _, task := range []AutomaticTask{visible, hidden} {
+		if _, err := database.QueueAutomaticTaskNow(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs, total, err := database.ListAvailableAutomaticTaskRunsPaginated(ctx, 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(runs) != 1 || runs[0].TaskID != visible.ID {
+		t.Fatalf("available history total=%d runs=%+v", total, runs)
+	}
+	claimed, err := database.ClaimDueAvailableAutomaticTasks(ctx, now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 1 || claimed[0].TaskID != visible.ID {
+		t.Fatalf("available claims = %+v", claimed)
+	}
+	storedHidden, err := database.AutomaticTask(ctx, hidden.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedHidden.NextRunAt.After(now) {
+		t.Fatalf("restricted task schedule advanced unexpectedly: %v", storedHidden.NextRunAt)
+	}
+}
+
 func TestRecoverAutomaticTaskRunsFailsRunningAndReturnsQueued(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t, filepath.Join(t.TempDir(), "automatic-task-recovery.db"))

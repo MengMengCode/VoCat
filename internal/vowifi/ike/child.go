@@ -16,6 +16,7 @@ const (
 
 	configInternalIPv4Address = 1
 	configInternalIPv4DNS     = 3
+	configApplicationVersion  = 7
 	configInternalIPv6Address = 8
 	configInternalIPv6DNS     = 10
 	configPCSCFIPv4Address    = 20
@@ -186,6 +187,9 @@ func configurationRequest() payload {
 		configInternalIPv6DNS,
 		configPCSCFIPv4Address,
 		configPCSCFIPv6Address,
+		// Android's IKE library always appends APPLICATION_VERSION to the
+		// initial configuration request, even when the value is empty.
+		configApplicationVersion,
 	}
 	body := []byte{configRequest, 0, 0, 0}
 	for _, attribute := range attributes {

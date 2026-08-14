@@ -27,9 +27,9 @@ const (
 	DeviceLimitSettingKey = "developer.device_limit"
 	SMSHourlyLimitKey     = "developer.sms_hourly_limit"
 	DefaultDeviceLimit    = 5
-	MaxDeviceLimit        = 128
+	MaxDeviceLimit        = 10
 	DefaultSMSHourlyLimit = 10
-	MaxSMSHourlyLimit     = 1000
+	MaxSMSHourlyLimit     = 20
 )
 
 func DeviceLimit(ctx context.Context, database *store.Store, enabled bool) int {
@@ -43,8 +43,11 @@ func DeviceLimit(ctx context.Context, database *store.Store, enabled bool) int {
 	var document struct {
 		Limit int `json:"limit"`
 	}
-	if json.Unmarshal(setting.Value, &document) != nil || document.Limit < 1 || document.Limit > MaxDeviceLimit {
+	if json.Unmarshal(setting.Value, &document) != nil || document.Limit < 1 {
 		return DefaultDeviceLimit
+	}
+	if document.Limit > MaxDeviceLimit {
+		return MaxDeviceLimit
 	}
 	return document.Limit
 }
@@ -70,8 +73,11 @@ func SMSHourlyLimit(ctx context.Context, database *store.Store) int {
 	var document struct {
 		Limit int `json:"limit"`
 	}
-	if json.Unmarshal(setting.Value, &document) != nil || document.Limit < 1 || document.Limit > MaxSMSHourlyLimit {
+	if json.Unmarshal(setting.Value, &document) != nil || document.Limit < 1 {
 		return DefaultSMSHourlyLimit
+	}
+	if document.Limit > MaxSMSHourlyLimit {
+		return MaxSMSHourlyLimit
 	}
 	return document.Limit
 }

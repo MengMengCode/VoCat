@@ -789,6 +789,27 @@ func TestNotificationDestinationAddressPolicy(t *testing.T) {
 	); err == nil {
 		t.Fatal("metadata IP was not blocked")
 	}
+	allowedContext := context.WithValue(
+		context.Background(),
+		notificationAllowedNetworksKey{},
+		[]netip.Prefix{netip.MustParsePrefix("198.18.0.0/15")},
+	)
+	if addresses, err := resolvePublicAddresses(allowedContext, "198.18.0.1"); err != nil || len(addresses) != 1 {
+		t.Fatalf("explicit Fake-IP notification allowlist = %v, %v", addresses, err)
+	}
+	if _, err := resolvePublicAddresses(allowedContext, "169.254.169.254"); err == nil {
+		t.Fatal("unlisted metadata IP was allowed")
+	}
+	wideAllowedContext := context.WithValue(
+		context.Background(),
+		notificationAllowedNetworksKey{},
+		[]netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")},
+	)
+	for _, address := range []string{"127.0.0.1", "169.254.169.254", "100.100.100.200"} {
+		if _, err := resolvePublicAddresses(wideAllowedContext, address); err == nil {
+			t.Fatalf("non-overridable destination %s was allowed", address)
+		}
+	}
 }
 
 func TestRestrictedNotificationClientCapsTimeoutAndRedirects(t *testing.T) {

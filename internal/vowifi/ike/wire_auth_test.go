@@ -3,6 +3,7 @@ package ike
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"testing"
 
 	"vocat/internal/vowifi"
@@ -60,7 +61,7 @@ func TestInitialEAPOnlyAuthCarriesAPNIDrAndNotify(t *testing.T) {
 		dualStackTrafficSelectors(payloadTSi),
 		dualStackTrafficSelectors(payloadTSr),
 	)
-	if len(payloads) != 7 || payloads[0].Type != payloadIDi || payloads[1].Type != payloadIDr {
+	if len(payloads) != 9 || payloads[0].Type != payloadIDi || payloads[1].Type != payloadIDr {
 		t.Fatalf("initial auth payload order = %#v", payloads)
 	}
 	if got := string(payloads[1].Body[4:]); got != "ims" || payloads[1].Body[0] != 2 {
@@ -68,10 +69,24 @@ func TestInitialEAPOnlyAuthCarriesAPNIDrAndNotify(t *testing.T) {
 	}
 	kind, data, err := parseNotify(payloads[2])
 	if err != nil {
-		t.Fatalf("parseNotify() error = %v", err)
+		t.Fatalf("parseNotify(EAP_ONLY_AUTHENTICATION) error = %v", err)
 	}
 	if kind != notifyEAPOnlyAuth || len(data) != 0 {
 		t.Fatalf("notify = %d/%x, want EAP_ONLY_AUTHENTICATION", kind, data)
+	}
+	kind, data, err = parseNotify(payloads[3])
+	if err != nil {
+		t.Fatalf("parseNotify() error = %v", err)
+	}
+	if kind != notifyMOBIKESupported || len(data) != 0 {
+		t.Fatalf("notify = %d/%x, want MOBIKE_SUPPORTED", kind, data)
+	}
+	kind, data, err = parseNotify(payloads[4])
+	if err != nil {
+		t.Fatalf("parseNotify() error = %v", err)
+	}
+	if kind != notifyInitialContact || len(data) != 0 {
+		t.Fatalf("notify = %d/%x, want INITIAL_CONTACT", kind, data)
 	}
 	for _, kind := range []uint8{payloadTSi, payloadTSr} {
 		item, err := onePayload(payloads, kind)
@@ -85,6 +100,83 @@ func TestInitialEAPOnlyAuthCarriesAPNIDrAndNotify(t *testing.T) {
 		if len(selectors) != 2 || selectors[0].StartIP.To4() == nil || selectors[1].StartIP.To4() != nil {
 			t.Fatalf("dual-stack selectors = %#v", selectors)
 		}
+	}
+}
+
+func TestInitialStandardEAPAuthOmitsEAPOnlyNotify(t *testing.T) {
+	idi := payload{Type: payloadIDi, Body: []byte{3, 0, 0, 0, 'u'}}
+	idr := payload{Type: payloadIDr, Body: []byte{2, 0, 0, 0, 'i', 'm', 's'}}
+	payloads := buildInitialEAPAuth(
+		idi,
+		idr,
+		[]byte{1, 2, 3},
+		dualStackTrafficSelectors(payloadTSi),
+		dualStackTrafficSelectors(payloadTSr),
+		false,
+	)
+	if len(payloads) != 8 || payloads[0].Type != payloadIDi || payloads[1].Type != payloadIDr {
+		t.Fatalf("initial standard EAP payload order = %#v", payloads)
+	}
+	initialContact := 0
+	mobikeSupported := 0
+	for _, item := range payloadsOfType(payloads, payloadNotify) {
+		kind, _, err := parseNotify(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind == notifyEAPOnlyAuth {
+			t.Fatal("standard EAP initial request contains EAP_ONLY_AUTHENTICATION")
+		}
+		if kind == notifyInitialContact {
+			initialContact++
+		}
+		if kind == notifyMOBIKESupported {
+			mobikeSupported++
+		}
+	}
+	if initialContact != 1 {
+		t.Fatalf("standard EAP initial request INITIAL_CONTACT count = %d, want 1", initialContact)
+	}
+	if mobikeSupported != 1 {
+		t.Fatalf("standard EAP initial request MOBIKE_SUPPORTED count = %d, want 1", mobikeSupported)
+	}
+	if payloads[2].Type != payloadNotify || payloads[3].Type != payloadNotify {
+		t.Fatalf("standard EAP Android notify order = %#v", payloads[:4])
+	}
+}
+
+func TestConfigurationRequestMatchesAndroidAttributes(t *testing.T) {
+	cp := configurationRequest()
+	if cp.Type != payloadCP || len(cp.Body) < 4 || cp.Body[0] != configRequest {
+		t.Fatalf("configuration request = %#v", cp)
+	}
+	var attributes []uint16
+	for offset := 4; offset < len(cp.Body); {
+		if offset+4 > len(cp.Body) {
+			t.Fatalf("truncated attribute at %d", offset)
+		}
+		kind := uint16(cp.Body[offset])<<8 | uint16(cp.Body[offset+1])
+		length := int(cp.Body[offset+2])<<8 | int(cp.Body[offset+3])
+		if offset+4+length > len(cp.Body) {
+			t.Fatalf("attribute %d exceeds payload", kind)
+		}
+		attributes = append(attributes, kind)
+		offset += 4 + length
+	}
+	want := []uint16{1, 8, 3, 10, 20, 21, configApplicationVersion}
+	if !slices.Equal(attributes, want) {
+		t.Fatalf("configuration attributes = %v, want %v", attributes, want)
+	}
+}
+
+func TestO2GermanyUsesStandardEAPAuthentication(t *testing.T) {
+	for _, mnc := range []string{"03", "003"} {
+		if advertiseEAPOnlyAuthentication("262", mnc) {
+			t.Fatalf("O2 Germany 262-%s unexpectedly uses EAP-only", mnc)
+		}
+	}
+	if !advertiseEAPOnlyAuthentication("262", "02") || !advertiseEAPOnlyAuthentication("234", "15") {
+		t.Fatal("non-O2 PLMN lost the existing EAP-only policy")
 	}
 }
 

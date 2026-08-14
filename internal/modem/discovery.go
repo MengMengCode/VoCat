@@ -152,6 +152,24 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			result = append(result, native)
 		}
 	}
+	wwanCandidates, err := d.discoverWWAN(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range wwanCandidates {
+		duplicate := false
+		if candidate.NetworkInterface != "" {
+			for _, existing := range result {
+				if existing.NetworkInterface == candidate.NetworkInterface {
+					duplicate = true
+					break
+				}
+			}
+		}
+		if !duplicate {
+			result = append(result, candidate)
+		}
+	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
 }
@@ -253,6 +271,167 @@ func splitNativeWWANPortName(name string) (parent, kind string) {
 			return "", ""
 		}
 		return parent, marker
+	}
+	return "", ""
+}
+
+type discoveredWWANDevice struct {
+	index    string
+	ports    []Port
+	qmiNames []string
+	sysPath  string
+}
+
+// discoverWWAN covers PCIe/MHI modems exposed through Linux's wwan subsystem,
+// for example /dev/wwan0at0 and /dev/wwan0qmi0. These devices do not appear on
+// the USB bus and therefore need a separate discovery path.
+func (d *SysFSDiscoverer) discoverWWAN(ctx context.Context) ([]Candidate, error) {
+	classRoot := filepath.Join(d.SysRoot, "class", "wwan")
+	classEntries, err := os.ReadDir(classRoot)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("discover PCIe/MHI WWAN devices: %w", err)
+		}
+		classEntries = nil
+	}
+
+	// Normal kernels expose these ports in /sys/class/wwan. Also inspect /dev
+	// because some downstream MHI packages create the character devices but do
+	// not populate the class directory in the host namespace/container.
+	portNames := make(map[string]struct{})
+	for _, entry := range classEntries {
+		portNames[entry.Name()] = struct{}{}
+	}
+	if devEntries, devErr := os.ReadDir(d.DevRoot); devErr == nil {
+		for _, entry := range devEntries {
+			if _, _, _, ok := parseWWANPortName(entry.Name()); ok {
+				portNames[entry.Name()] = struct{}{}
+			}
+		}
+	} else if !os.IsNotExist(devErr) {
+		return nil, fmt.Errorf("inspect WWAN device nodes: %w", devErr)
+	}
+	names := make([]string, 0, len(portNames))
+	for name := range portNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	groups := make(map[string]*discoveredWWANDevice)
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		index, kind, portIndex, ok := parseWWANPortName(name)
+		if !ok {
+			continue
+		}
+		group := groups[index]
+		if group == nil {
+			group = &discoveredWWANDevice{index: index}
+			groups[index] = group
+		}
+		classPath := filepath.Join(classRoot, name)
+		if resolved, resolveErr := filepath.EvalSymlinks(classPath); resolveErr == nil {
+			group.sysPath = filepath.Dir(resolved)
+		}
+		switch kind {
+		case "at":
+			group.ports = append(group.ports, Port{
+				Path: filepath.Join(d.DevRoot, name), Name: name,
+				InterfaceNumber: portIndex, Role: PortRoleAT,
+			})
+		case "qmi":
+			group.qmiNames = append(group.qmiNames, name)
+		}
+	}
+	result := make([]Candidate, 0, len(groups))
+	for _, group := range groups {
+		sort.Slice(group.ports, func(i, j int) bool {
+			return group.ports[i].InterfaceNumber < group.ports[j].InterfaceNumber
+		})
+		sort.Strings(group.qmiNames)
+		if len(group.ports) == 0 && len(group.qmiNames) == 0 {
+			continue
+		}
+		if group.sysPath == "" {
+			group.sysPath = filepath.Join(classRoot, "wwan"+group.index)
+		}
+		vendorID, productID := readPCIIdentity(group.sysPath, d.SysRoot)
+		manufacturer := ""
+		if vendorID == "17cb" {
+			manufacturer = "Qualcomm"
+		}
+		candidate := Candidate{
+			HardwareKind: "wwan", ID: "mhi-wwan" + group.index,
+			VendorID: vendorID, ProductID: productID, Manufacturer: manufacturer,
+			Product: "PCIe/MHI WWAN modem", USBPath: group.sysPath,
+			Ports: group.ports, NetworkInterface: selectWWANNetworkInterface(d.SysRoot, group.index),
+		}
+		if len(group.ports) > 0 {
+			candidate.ATPort = group.ports[0]
+		}
+		if len(group.qmiNames) > 0 {
+			candidate.QMIControl = filepath.Join(d.DevRoot, group.qmiNames[0])
+		}
+		result = append(result, candidate)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result, nil
+}
+
+func parseWWANPortName(name string) (index, kind string, portIndex int, ok bool) {
+	if !strings.HasPrefix(name, "wwan") {
+		return "", "", 0, false
+	}
+	rest := strings.TrimPrefix(name, "wwan")
+	cut := 0
+	for cut < len(rest) && rest[cut] >= '0' && rest[cut] <= '9' {
+		cut++
+	}
+	if cut == 0 {
+		return "", "", 0, false
+	}
+	index, rest = rest[:cut], rest[cut:]
+	for _, candidateKind := range []string{"at", "qmi"} {
+		if !strings.HasPrefix(rest, candidateKind) {
+			continue
+		}
+		numberText := strings.TrimPrefix(rest, candidateKind)
+		number, err := strconv.Atoi(numberText)
+		if err != nil || number < 0 {
+			return "", "", 0, false
+		}
+		return index, candidateKind, number, true
+	}
+	return "", "", 0, false
+}
+
+func selectWWANNetworkInterface(sysRoot, index string) string {
+	exact := "wwan" + index
+	if _, err := os.Stat(filepath.Join(sysRoot, "class", "net", exact)); err == nil {
+		return exact
+	}
+	entries, _ := os.ReadDir(filepath.Join(sysRoot, "class", "net"))
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), exact) {
+			return entry.Name()
+		}
+	}
+	return ""
+}
+
+func readPCIIdentity(path, sysRoot string) (vendorID, productID string) {
+	root := filepath.Clean(sysRoot)
+	for current := filepath.Clean(path); current != "." && current != string(filepath.Separator); current = filepath.Dir(current) {
+		vendor := strings.TrimPrefix(strings.ToLower(readTrimmed(filepath.Join(current, "vendor"))), "0x")
+		device := strings.TrimPrefix(strings.ToLower(readTrimmed(filepath.Join(current, "device"))), "0x")
+		if vendor != "" && device != "" {
+			return vendor, device
+		}
+		if current == root {
+			break
+		}
 	}
 	return "", ""
 }

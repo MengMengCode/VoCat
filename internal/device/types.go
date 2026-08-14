@@ -110,6 +110,10 @@ type Snapshot struct {
 	ICCID              string      `json:"iccid"`
 	IMSI               string      `json:"imsi"`
 	SPN                string      `json:"spn,omitempty"`
+	MNCLength          int         `json:"mncLength,omitempty"`
+	GID1               string      `json:"gid1,omitempty"`
+	GID2               string      `json:"gid2,omitempty"`
+	IdentityFilesRead  bool        `json:"-"`
 	OperatingMode      int         `json:"operatingMode"`
 	ModeKnown          bool        `json:"modeKnown"`
 	FlightMode         bool        `json:"flightMode"`

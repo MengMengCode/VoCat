@@ -119,6 +119,7 @@ func TestSessionRelayCloseInterruptsStuckTransportRead(t *testing.T) {
 		ikeKeys{},
 		[8]byte{1},
 		[8]byte{2},
+		9,
 		true,
 		time.Hour,
 	)
@@ -156,7 +157,7 @@ func TestSessionRelayDemuxesESPAndAnswersEncryptedDPD(t *testing.T) {
 	}
 	spii := [8]byte{1}
 	spir := [8]byte{2}
-	relay := newSessionRelay(transport, suite, keys, spii, spir, true, time.Hour)
+	relay := newSessionRelay(transport, suite, keys, spii, spir, 9, true, time.Hour)
 	defer relay.Close()
 
 	esp := []byte{0, 0, 0, 9, 0, 0, 0, 1, 0xaa}
@@ -201,6 +202,47 @@ func TestSessionRelayDemuxesESPAndAnswersEncryptedDPD(t *testing.T) {
 	}
 }
 
+func TestSessionRelaySendsEncryptedIKESADelete(t *testing.T) {
+	transport := newFakeSessionTransport()
+	suite := legacyTestSuite()
+	keys := ikeKeys{
+		SKai: bytes.Repeat([]byte{0x11}, 20),
+		SKar: bytes.Repeat([]byte{0x12}, 20),
+		SKei: bytes.Repeat([]byte{0x13}, 16),
+		SKer: bytes.Repeat([]byte{0x14}, 16),
+	}
+	spii := [8]byte{1}
+	spir := [8]byte{2}
+	relay := newSessionRelay(transport, suite, keys, spii, spir, 9, true, time.Hour)
+	defer relay.Close()
+
+	if err := relay.sendIKEDelete(context.Background()); err != nil {
+		t.Fatalf("sendIKEDelete() error = %v", err)
+	}
+	select {
+	case sent := <-transport.sent:
+		if !sent.ike {
+			t.Fatal("IKE SA delete was sent as ESP")
+		}
+		header, payloads, err := decryptPayloads(sent.data, suite, keys.SKei, keys.SKai)
+		if err != nil {
+			t.Fatalf("decrypt IKE SA delete: %v", err)
+		}
+		if header.Exchange != exchangeInformational || header.MessageID != 9 || header.Flags != flagInitiator {
+			t.Fatalf("IKE SA delete header = %#v", header)
+		}
+		item, err := onePayload(payloads, payloadDelete)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(item.Body, []byte{protocolIKE, 0, 0, 0}) {
+			t.Fatalf("IKE SA delete body = %x", item.Body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("relay did not send IKE SA delete")
+	}
+}
+
 func TestSessionRelaySendsNATKeepalive(t *testing.T) {
 	transport := newFakeSessionTransport()
 	relay := newSessionRelay(
@@ -209,6 +251,7 @@ func TestSessionRelaySendsNATKeepalive(t *testing.T) {
 		ikeKeys{},
 		[8]byte{1},
 		[8]byte{2},
+		9,
 		true,
 		10*time.Millisecond,
 	)
@@ -233,6 +276,7 @@ func TestSessionRelayDropsDelayedIKEPacketFromPreviousSA(t *testing.T) {
 		ikeKeys{},
 		spii,
 		spir,
+		9,
 		true,
 		time.Hour,
 	)

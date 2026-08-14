@@ -48,8 +48,8 @@ func (manager *Manager) ESIMDownloadProfile(ctx context.Context, id string, para
 		}
 	}
 
-	manager.esimMu.Lock()
-	defer manager.esimMu.Unlock()
+	manager.lockESIM()
+	defer manager.unlockESIM()
 
 	report("preflight", "正在检查 eUICC 剩余空间...", 10)
 	channel, err := manager.openEuiccAID(ctx, id, targetEuiccAID(params.AIDHex))
@@ -228,8 +228,8 @@ type EsimChipInfo struct {
 // ESIMChipInfo reads the eUICC's EID, EUICCInfo2, and configured addresses for
 // the chip header. It takes the eSIM lock like the other card ops.
 func (manager *Manager) ESIMChipInfo(ctx context.Context, id string) (*EsimChipInfo, error) {
-	manager.esimMu.Lock()
-	defer manager.esimMu.Unlock()
+	manager.lockESIM()
+	defer manager.unlockESIM()
 
 	var lastErr error
 	for _, aid := range manager.discoverEuiccAIDs(ctx, id) {
@@ -286,8 +286,8 @@ func readEsimChipInfo(ctx context.Context, channel *euiccChannel, aidHex string)
 // the inserted card. It is entirely read-only: only SELECT, GetProfilesInfo,
 // GetEuiccData, GetEuiccInfo2 and GetEuiccConfiguredAddresses are issued.
 func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInventoryEntry, error) {
-	manager.esimMu.Lock()
-	defer manager.esimMu.Unlock()
+	manager.lockESIM()
+	defer manager.unlockESIM()
 	if manager.esimRecoveryActive(id) {
 		return nil, errESIMRecovering
 	}

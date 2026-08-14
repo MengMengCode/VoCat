@@ -28,21 +28,37 @@ func (resolver ProxyResolver) Resolve(
 	}
 	deviceID := strings.TrimSpace(request.DeviceID)
 	iccid := strings.TrimSpace(request.ICCID)
-	if deviceID == "" || iccid == "" {
+	if deviceID == "" {
 		return vowifi.ProxyRoute{Mode: vowifi.ProxyModeDirect}, nil
 	}
-	binding, err := resolver.Store.DeviceProxyBinding(ctx, iccid)
-	if errors.Is(err, store.ErrNotFound) {
-		return vowifi.ProxyRoute{Mode: vowifi.ProxyModeDirect}, nil
+	var upstreamID string
+	if iccid != "" {
+		binding, err := resolver.Store.DeviceProxyBinding(ctx, iccid)
+		if err == nil {
+			upstreamID = binding.UpstreamProxyID
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return vowifi.ProxyRoute{}, fmt.Errorf("resolve proxy binding for ICCID %s: %w", iccid, err)
+		}
 	}
-	if err != nil {
-		return vowifi.ProxyRoute{}, fmt.Errorf("resolve proxy binding for ICCID %s: %w", iccid, err)
+	if upstreamID == "" {
+		country, found := device.CountryForMCC(strings.TrimSpace(request.HomeMCC))
+		if !found {
+			return vowifi.ProxyRoute{Mode: vowifi.ProxyModeDirect}, nil
+		}
+		rule, ruleErr := resolver.Store.CountryRule(ctx, country)
+		if errors.Is(ruleErr, store.ErrNotFound) || (ruleErr == nil && !rule.Enabled) {
+			return vowifi.ProxyRoute{Mode: vowifi.ProxyModeDirect}, nil
+		}
+		if ruleErr != nil {
+			return vowifi.ProxyRoute{}, fmt.Errorf("resolve proxy country rule for MCC %s: %w", request.HomeMCC, ruleErr)
+		}
+		upstreamID = rule.UpstreamProxyID
 	}
-	upstream, err := resolver.Store.UpstreamProxy(ctx, binding.UpstreamProxyID)
+	upstream, err := resolver.Store.UpstreamProxy(ctx, upstreamID)
 	if err != nil {
 		return vowifi.ProxyRoute{}, fmt.Errorf(
 			"load upstream proxy %q for device %s: %w",
-			binding.UpstreamProxyID,
+			upstreamID,
 			deviceID,
 			err,
 		)

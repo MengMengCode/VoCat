@@ -96,3 +96,24 @@ func TestEnsureAdminRevokesSessionOnPasswordChange(t *testing.T) {
 		t.Fatalf("login with new password: %v", err)
 	}
 }
+
+func TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword(t *testing.T) {
+	ctx := context.Background()
+	service := newTestService(t)
+	if err := service.ChangePassword(ctx, "admin", "correct-password", "changed-password"); err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.EnsureAdminIfMissing(ctx, "admin", "stale-config-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("existing administrator was reported as newly created")
+	}
+	if _, err := service.Login(ctx, "admin", "changed-password"); err != nil {
+		t.Fatalf("database password was overwritten: %v", err)
+	}
+	if _, err := service.Login(ctx, "admin", "stale-config-password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("stale configured password became active: %v", err)
+	}
+}
