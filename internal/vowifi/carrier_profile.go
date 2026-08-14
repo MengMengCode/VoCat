@@ -18,6 +18,7 @@ type CarrierProfile struct {
 	PLMN              string `json:"plmn,omitempty"`
 	PresetID          string `json:"preset_id,omitempty"`
 	Source            string `json:"source,omitempty"`
+	EPDG              string `json:"epdg,omitempty"`
 	IMSAPN            string `json:"ims_apn,omitempty"`
 	EAPMethod         string `json:"eap_method,omitempty"`
 	IMSTransport      string `json:"ims_transport,omitempty"`
@@ -74,6 +75,13 @@ func ResolveCarrierProfile(identity SIMIdentity) CarrierProfile {
 	case "234015":
 		profile.PresetID = "Vodafone_uk_23415"
 		profile.Source = CarrierSourceBuiltin
+	case "515002":
+		// Globe Philippines publishes a dedicated static ePDG hostname rather
+		// than the standard PLMN-derived name. Keep the hostname here so DNS
+		// resolution follows the operator profile and remains dynamic.
+		profile.PresetID = "Globe_PH_51502"
+		profile.Source = CarrierSourceBuiltin
+		profile.EPDG = "weconnect.globe.com.ph"
 	}
 	return profile
 }

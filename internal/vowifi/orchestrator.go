@@ -244,7 +244,7 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 		state.LastReason = "sim_and_aka_ready"
 	})
 
-	epdg, err := DeriveEPDG(identity)
+	epdg, err := deriveEPDG(identity, carrierProfile)
 	if err != nil {
 		return fail(PhaseAccessReady, err)
 	}
@@ -270,7 +270,7 @@ func (orchestrator *Orchestrator) Enable(ctx context.Context) (State, error) {
 		state.Phase = PhaseAccessReady
 		state.AccessReady = true
 		state.EPDG = epdg
-		state.EPDGSource = epdgSource(identity)
+		state.EPDGSource = epdgSource(identity, carrierProfile)
 		state.ProxyMode = proxy.Mode
 		state.ProxyID = proxy.ID
 		state.LastReason = "epdg_access_ready"
@@ -745,9 +745,19 @@ func (orchestrator *Orchestrator) Close(ctx context.Context) error {
 // DeriveEPDG uses an explicitly provided carrier endpoint or the 3GPP standard
 // home-PLMN form. It never derives a phone number or MNC length from IMSI.
 func DeriveEPDG(identity SIMIdentity) (string, error) {
+	return deriveEPDG(identity, CarrierProfile{})
+}
+
+func deriveEPDG(identity SIMIdentity, profile CarrierProfile) (string, error) {
 	if configured := strings.TrimSpace(identity.EPDG); configured != "" {
 		if strings.ContainsAny(configured, " \t\r\n/:") || len(configured) > 253 {
 			return "", errors.New("vowifi: configured ePDG must be a hostname")
+		}
+		return strings.ToLower(configured), nil
+	}
+	if configured := strings.TrimSpace(profile.EPDG); configured != "" {
+		if strings.ContainsAny(configured, " \t\r\n/:") || len(configured) > 253 {
+			return "", errors.New("vowifi: carrier ePDG must be a hostname")
 		}
 		return strings.ToLower(configured), nil
 	}
@@ -765,9 +775,12 @@ func DeriveEPDG(identity SIMIdentity) (string, error) {
 	), nil
 }
 
-func epdgSource(identity SIMIdentity) string {
+func epdgSource(identity SIMIdentity, profile CarrierProfile) string {
 	if strings.TrimSpace(identity.EPDG) != "" {
 		return "configured"
+	}
+	if strings.TrimSpace(profile.EPDG) != "" {
+		return "static"
 	}
 	return "derived"
 }

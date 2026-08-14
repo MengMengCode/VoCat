@@ -11,10 +11,12 @@ func TestResolveCarrierProfileMatchesVoHivePresets(t *testing.T) {
 		source    string
 		plmn      string
 		allowSHA1 bool
+		epdg      string
 	}{
 		{name: "O2 three digit", mcc: "262", mnc: "003", preset: "O2_de_26203", source: CarrierSourceBuiltin, plmn: "262003", allowSHA1: true},
 		{name: "O2 two digit", mcc: "262", mnc: "03", preset: "O2_de_26203", source: CarrierSourceBuiltin, plmn: "262003", allowSHA1: true},
 		{name: "Vodafone UK", mcc: "234", mnc: "15", preset: "Vodafone_uk_23415", source: CarrierSourceBuiltin, plmn: "234015"},
+		{name: "Globe Philippines", mcc: "515", mnc: "02", preset: "Globe_PH_51502", source: CarrierSourceBuiltin, plmn: "515002", epdg: "weconnect.globe.com.ph"},
 		{name: "unknown fallback", mcc: "001", mnc: "01", preset: "001001", source: CarrierSourceFallback, plmn: "001001"},
 	}
 	for _, testCase := range cases {
@@ -26,7 +28,30 @@ func TestResolveCarrierProfileMatchesVoHivePresets(t *testing.T) {
 			if profile.AllowSHA1 != testCase.allowSHA1 {
 				t.Fatalf("allow SHA-1 = %t, want %t", profile.AllowSHA1, testCase.allowSHA1)
 			}
+			if profile.EPDG != testCase.epdg {
+				t.Fatalf("ePDG = %q, want %q", profile.EPDG, testCase.epdg)
+			}
 		})
+	}
+}
+
+func TestGlobeProfileUsesStaticEPDG(t *testing.T) {
+	identity := SIMIdentity{
+		ICCID:   "89441000400316034372",
+		IMSI:    "515021234567890",
+		HomeMCC: "515",
+		HomeMNC: "02",
+	}
+	profile := ResolveCarrierProfile(identity)
+	epdg, err := deriveEPDG(identity, profile)
+	if err != nil {
+		t.Fatalf("deriveEPDG() error = %v", err)
+	}
+	if epdg != "weconnect.globe.com.ph" {
+		t.Fatalf("ePDG = %q", epdg)
+	}
+	if source := epdgSource(identity, profile); source != "static" {
+		t.Fatalf("ePDG source = %q, want static", source)
 	}
 }
 
