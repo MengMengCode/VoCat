@@ -43,17 +43,18 @@ func (reader constantReader) Read(destination []byte) (int, error) {
 }
 
 type firstAuthCaptureTransport struct {
-	t           *testing.T
-	allowSHA1   bool
-	useMODP1024 bool
-	calls       int
-	suite       negotiatedSuite
-	keys        ikeKeys
-	spii        [8]byte
-	spir        [8]byte
-	nonceI      []byte
-	nonceR      []byte
-	floated     bool
+	t            *testing.T
+	allowSHA1    bool
+	useMODP1024  bool
+	calls        int
+	suite        negotiatedSuite
+	keys         ikeKeys
+	spii         [8]byte
+	spir         [8]byte
+	nonceI       []byte
+	nonceR       []byte
+	identityType uint8
+	floated      bool
 }
 
 func (transport *firstAuthCaptureTransport) LocalAddr() *net.UDPAddr {
@@ -223,6 +224,11 @@ func (transport *firstAuthCaptureTransport) observeFirstAuth(packet []byte) erro
 			transport.t.Fatalf("first IKE_AUTH payload %d: %v", kind, err)
 		}
 	}
+	idi, err := onePayload(payloads, payloadIDi)
+	if err != nil {
+		transport.t.Fatal(err)
+	}
+	transport.identityType = idi.Body[0]
 	return errFirstAuthObserved
 }
 
@@ -321,6 +327,48 @@ func TestProviderVodafoneFirstAuthIsEAPOnlyAndRequestsIMSAPN(t *testing.T) {
 	}
 	if capture.calls != 2 || capture.floated || aka.calls != 0 {
 		t.Fatalf("capture calls=%d floated=%v AKA calls=%d", capture.calls, capture.floated, aka.calls)
+	}
+	if capture.identityType != 3 {
+		t.Fatalf("default IKE identity type = %d, want RFC822_ADDR (3)", capture.identityType)
+	}
+}
+
+func TestProviderCarrierOverridesIKEIdentityType(t *testing.T) {
+	capture := &firstAuthCaptureTransport{t: t}
+	provider, err := NewProvider(Config{
+		Random:    constantReader{value: 0x42},
+		Timeout:   time.Second,
+		Installer: unusedInstaller{},
+		APN:       "ims",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.transportFactory = func(
+		context.Context,
+		transportConfig,
+		vowifi.ProxyRoute,
+		string,
+	) (datagramTransport, error) {
+		return capture, nil
+	}
+	_, err = provider.Start(context.Background(), vowifi.TunnelRequest{
+		DeviceID: "wwan0",
+		Identity: vowifi.SIMIdentity{
+			ICCID:   "8944100000000000000",
+			IMSI:    "515021234567890",
+			HomeMCC: "515",
+			HomeMNC: "02",
+		},
+		Carrier: vowifi.CarrierProfile{IKEIdentityType: 2},
+		EPDG:    "weconnect.globe.com.ph",
+		AKA:     &testAKAProvider{},
+	})
+	if !errors.Is(err, errFirstAuthObserved) {
+		t.Fatalf("Start() error = %v, want capture sentinel", err)
+	}
+	if capture.identityType != 2 {
+		t.Fatalf("carrier IKE identity type = %d, want USER_FQDN (2)", capture.identityType)
 	}
 }
 

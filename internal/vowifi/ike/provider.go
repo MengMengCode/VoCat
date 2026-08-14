@@ -330,7 +330,11 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if err != nil {
 		return nil, err
 	}
-	idi := payload{Type: payloadIDi, Body: append([]byte{provider.config.IdentityType, 0, 0, 0}, aka.identity...)}
+	identityType := provider.config.IdentityType
+	if request.Carrier.IKEIdentityType != 0 {
+		identityType = request.Carrier.IKEIdentityType
+	}
+	idi := payload{Type: payloadIDi, Body: append([]byte{identityType, 0, 0, 0}, aka.identity...)}
 	apn := provider.config.APN
 	if apn == "ims" && request.Carrier.IMSAPN != "" {
 		apn = request.Carrier.IMSAPN

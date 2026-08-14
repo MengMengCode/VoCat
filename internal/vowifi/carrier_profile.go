@@ -19,6 +19,7 @@ type CarrierProfile struct {
 	PresetID          string `json:"preset_id,omitempty"`
 	Source            string `json:"source,omitempty"`
 	EPDG              string `json:"epdg,omitempty"`
+	IKEIdentityType   uint8  `json:"ike_identity_type,omitempty"`
 	IMSAPN            string `json:"ims_apn,omitempty"`
 	EAPMethod         string `json:"eap_method,omitempty"`
 	IMSTransport      string `json:"ims_transport,omitempty"`
@@ -82,6 +83,7 @@ func ResolveCarrierProfile(identity SIMIdentity) CarrierProfile {
 		profile.PresetID = "Globe_PH_51502"
 		profile.Source = CarrierSourceBuiltin
 		profile.EPDG = "weconnect.globe.com.ph"
+		profile.IKEIdentityType = 2 // USER_FQDN / ID_FQDN
 	}
 	return profile
 }
