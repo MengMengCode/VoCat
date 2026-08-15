@@ -23,6 +23,11 @@ import {
   message,
 } from "../components/ui";
 import { useI18n } from "../lib/i18n";
+import {
+  buildAutomaticTaskProfileOptions,
+  createAutomaticTaskProfileRequestGuard,
+  selectAutomaticTaskProfileOption,
+} from "../lib/automaticTaskProfiles";
 
 type TaskType = "sms" | "call" | "public_ip";
 type TaskEnvironment = "vowifi" | "cellular";
@@ -130,6 +135,10 @@ function formatDateTime(value?: string) {
   return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString();
 }
 
+function currentDeviceICCID(device?: DeviceListItem) {
+  return String(device?.modem?.iccid || device?.vowifiRuntime?.iccid || "").trim();
+}
+
 const fieldLabel = "mb-1.5 block text-sm font-semibold text-gray-700 dark:text-gray-200";
 
 export default function AutomaticTasksPage() {
@@ -152,6 +161,7 @@ export default function AutomaticTasksPage() {
   // is actually looking at instead of snapping back to page 1 on every tick.
   const runsPageRef = useRef(1);
   const runsPageSizeRef = useRef(20);
+  const profileRequestGuardRef = useRef(createAutomaticTaskProfileRequestGuard());
 
   const load = useCallback(async (initial = false) => {
     if (initial) setLoading(true);
@@ -209,6 +219,8 @@ export default function AutomaticTasksPage() {
     return () => window.clearInterval(timer);
   }, [load, reloadRuns]);
 
+  useEffect(() => () => profileRequestGuardRef.current.invalidate(), []);
+
   function changeRunsPage(page: number) {
     runsPageRef.current = page;
     setRunsPage(page);
@@ -223,37 +235,53 @@ export default function AutomaticTasksPage() {
     void fetchRuns(1, pageSize);
   }
 
-  const loadProfiles = useCallback(async (deviceId: string, keepICCID = "") => {
+  const loadProfiles = useCallback(async (deviceId: string, keepICCID = "", currentICCID = "") => {
+    if (!deviceId) {
+      profileRequestGuardRef.current.invalidate();
+      setProfiles([]);
+      setProfileLoading(false);
+      return;
+    }
+    const requestID = profileRequestGuardRef.current.begin();
     setProfiles([]);
-    if (!deviceId) return;
     setProfileLoading(true);
+    let groups: EsimProfileGroup[] = [];
+    let inventoryError: unknown;
     try {
       const data = await api<{ profiles?: EsimProfileGroup[] }>(`/devices/${encodeURIComponent(deviceId)}/esim`);
-      const options = (data.profiles || []).flatMap((group, groupIndex) =>
-        (group.profiles || []).map((profile) => ({
-          iccid: profile.iccid,
-          aidHex: group.aidHex || "",
-          label: `${profile.name || profile.serviceProviderName || `Profile ${groupIndex + 1}`} · ${profile.iccid}`,
-        })),
-      );
-      setProfiles(options);
-      setForm((current) => {
-        if (current.deviceId !== deviceId) return current;
-        const selected = options.find((item) => item.iccid === (keepICCID || current.profileIccid)) || options[0];
-        return selected ? { ...current, profileIccid: selected.iccid, profileAid: selected.aidHex } : current;
-      });
+      groups = data.profiles || [];
     } catch (error) {
-      message.error(apiMessage(error));
-    } finally {
-      setProfileLoading(false);
+      inventoryError = error;
     }
-  }, []);
+    if (!profileRequestGuardRef.current.isCurrent(requestID)) return;
+    const options = buildAutomaticTaskProfileOptions(groups, currentICCID, t("当前 SIM 卡"));
+    const requestedICCID = keepICCID.trim();
+    const requestedUnavailable = requestedICCID !== "" &&
+      !options.some((option) => option.iccid.trim() === requestedICCID);
+    if (inventoryError && (options.length === 0 || requestedUnavailable)) {
+      message.error(apiMessage(inventoryError));
+    }
+    setProfiles(options);
+    setForm((current) => {
+      if (current.deviceId !== deviceId) return current;
+      const selected = selectAutomaticTaskProfileOption(options, requestedICCID);
+      return selected ? { ...current, profileIccid: selected.iccid, profileAid: selected.aidHex } : current;
+    });
+    setProfileLoading(false);
+  }, [t]);
+
+  function closeEditor() {
+    profileRequestGuardRef.current.invalidate();
+    setProfileLoading(false);
+    setOpen(false);
+  }
 
   const deviceByID = useMemo(() => new Map(devices.map((device) => [device.id, device])), [devices]);
   const taskByID = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
   function edit(task?: AutomaticTask) {
     const deviceId = task?.deviceId || devices[0]?.id || "";
+    const selectedDevice = devices.find((device) => device.id === deviceId);
     let next = task ? {
       id: task.id,
       name: task.name,
@@ -272,7 +300,7 @@ export default function AutomaticTasksPage() {
       message: task.payload?.message || "",
       durationSeconds: task.payload?.durationSeconds || 30,
     } : emptyForm(deviceId);
-	if (devices.find((device) => device.id === deviceId)?.deviceType === "usb_sim_reader") {
+	if (selectedDevice?.deviceType === "usb_sim_reader") {
 	  next = { ...next, taskType: next.taskType === "public_ip" ? "sms" : next.taskType, environment: "vowifi" };
 	}
 	if (!advancedTasksAvailable && (next.taskType === "public_ip" || next.environment === "cellular")) {
@@ -280,17 +308,18 @@ export default function AutomaticTasksPage() {
 	}
     setForm(next);
     setOpen(true);
-    void loadProfiles(deviceId, next.profileIccid);
+    void loadProfiles(deviceId, next.profileIccid, currentDeviceICCID(selectedDevice));
   }
 
   function chooseDevice(deviceId: string) {
-	const reader = devices.find((device) => device.id === deviceId)?.deviceType === "usb_sim_reader";
+	const selectedDevice = devices.find((device) => device.id === deviceId);
+	const reader = selectedDevice?.deviceType === "usb_sim_reader";
     setForm((current) => ({
 	  ...current, deviceId, profileIccid: "", profileAid: "",
 	  taskType: reader && current.taskType === "public_ip" ? "sms" : current.taskType,
 	  environment: reader || !advancedTasksAvailable ? "vowifi" : current.environment,
 	}));
-    void loadProfiles(deviceId);
+    void loadProfiles(deviceId, "", currentDeviceICCID(selectedDevice));
   }
 
   function chooseProfile(iccid: string) {
@@ -310,7 +339,7 @@ export default function AutomaticTasksPage() {
   async function save() {
     if (!form.name.trim()) return message.warning(t("请输入任务名称"));
     if (!form.deviceId) return message.warning(t("请选择设备"));
-    if (!form.profileIccid) return message.warning(t("请选择 eSIM Profile"));
+    if (!form.profileIccid) return message.warning(t("请选择 SIM 卡或 eSIM Profile"));
 	if (deviceByID.get(form.deviceId)?.deviceType === "usb_sim_reader" && (form.environment !== "vowifi" || form.taskType === "public_ip")) {
 	  return message.warning(t("USB SIM读卡器仅支持VoWiFi短信和通话任务"));
 	}
@@ -344,7 +373,7 @@ export default function AutomaticTasksPage() {
         body,
       });
       message.success(t(form.id ? "自动任务已更新" : "自动任务已创建"));
-      setOpen(false);
+      closeEditor();
       await load();
     } catch (error) {
       message.error(apiMessage(error));
@@ -411,8 +440,8 @@ export default function AutomaticTasksPage() {
       <PageHeader
         title={t("自动任务")}
 		subtitle={advancedTasksAvailable
-		  ? t("按周期切换指定 eSIM Profile，并在设备串行队列中执行短信、通话或漫游公网 IP 任务")
-		  : t("按周期切换指定 eSIM Profile，并在设备串行队列中执行短信或通话任务")}
+		  ? t("按周期使用指定 SIM 卡或切换到指定 eSIM Profile，并在设备串行队列中执行短信、通话或漫游公网 IP 任务")
+		  : t("按周期使用指定 SIM 卡或切换到指定 eSIM Profile，并在设备串行队列中执行短信或通话任务")}
         actions={<Button variant="primary" icon={<AddRegular />} onClick={() => edit()} disabled={!devices.length}>{t("添加任务")}</Button>}
       />
 
@@ -422,7 +451,7 @@ export default function AutomaticTasksPage() {
             <thead className="border-b border-gray-100 bg-gray-50/70 text-xs uppercase tracking-wide text-gray-500 dark:border-white/10 dark:bg-white/[0.025]">
               <tr>
                 <th className="px-4 py-3">{t("任务")}</th>
-                <th className="px-4 py-3">{t("设备 / Profile")}</th>
+                <th className="px-4 py-3">{t("设备 / SIM / Profile")}</th>
                 <th className="px-4 py-3">{t("类型")}</th>
                 <th className="px-4 py-3">{t("执行环境")}</th>
                 <th className="px-4 py-3">{t("周期")}</th>
@@ -466,7 +495,7 @@ export default function AutomaticTasksPage() {
           <div className="flex flex-col items-center justify-center px-6 py-16 text-center text-gray-400">
             <SendClockRegular className="mb-3 text-4xl" />
             <div className="text-sm">{t("暂无自动任务")}</div>
-            <div className="mt-1 text-xs">{t("添加任务后，系统会按设备排队并在执行前校验目标 Profile")}</div>
+            <div className="mt-1 text-xs">{t("添加任务后，系统会按设备排队并在执行前校验目标 SIM / Profile")}</div>
           </div>
         ) : null}
         {loading ? <div className="px-6 py-16 text-center text-sm text-gray-400">{t("加载中...")}</div> : null}
@@ -498,11 +527,11 @@ export default function AutomaticTasksPage() {
         ) : null}
       </div>
 
-      <Modal open={open} onClose={() => setOpen(false)} title={form.id ? t("编辑自动任务") : t("添加自动任务")} width="max-w-3xl">
+      <Modal open={open} onClose={closeEditor} title={form.id ? t("编辑自动任务") : t("添加自动任务")} width="max-w-3xl">
         <div className="grid gap-4 md:grid-cols-2">
           <div className="md:col-span-2"><label className={fieldLabel}>{t("任务名称")}</label><Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={t("例如：每日短信保活")} /></div>
           <div><label className={fieldLabel}>{t("设备")}</label><Select value={form.deviceId} onChange={chooseDevice} options={devices.map((device) => ({ value: device.id, label: `${device.name || device.id} (${device.id})` }))} /></div>
-          <div><label className={fieldLabel}>{t("eSIM Profile")}</label><Select value={form.profileIccid} onChange={chooseProfile} disabled={profileLoading || !form.deviceId} placeholder={profileLoading ? t("读取 Profile 中...") : t("请选择 Profile")} options={profiles.map((profile) => ({ value: profile.iccid, label: profile.label }))} /></div>
+          <div><label className={fieldLabel}>{t("SIM / Profile")}</label><Select value={form.profileIccid} onChange={chooseProfile} disabled={profileLoading || !form.deviceId} placeholder={profileLoading ? t("读取 Profile 中...") : t("请选择 SIM / Profile")} options={profiles.map((profile) => ({ value: profile.iccid, label: profile.label }))} /></div>
           <div><label className={fieldLabel}>{t("任务类型")}</label><Select value={form.taskType} onChange={(value) => chooseTaskType(value as TaskType)} options={taskTypeOptions} /></div>
           <div><label className={fieldLabel}>{t("执行环境")}</label><Select value={form.environment} onChange={(value) => setForm({ ...form, environment: value as TaskEnvironment })} disabled={form.taskType === "public_ip" || selectedTaskDeviceIsReader} options={environmentOptions} /></div>
 		  {selectedTaskDeviceIsReader ? <div className="md:col-span-2 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300">{t("USB SIM读卡器仅支持VoWiFi短信和通话任务")}</div> : null}
@@ -519,7 +548,7 @@ export default function AutomaticTasksPage() {
           <div className="flex items-center justify-between rounded-lg border border-gray-200 p-3 dark:border-white/10"><div><div className="text-sm font-semibold">{t("启用任务")}</div><div className="text-xs text-gray-400">{t("停用后不会进入执行队列")}</div></div><Switch checked={form.enabled} onChange={(enabled) => setForm({ ...form, enabled })} /></div>
           <div className="flex items-center justify-between rounded-lg border border-gray-200 p-3 dark:border-white/10"><div><div className="text-sm font-semibold">{t("完成后推送通知")}</div><div className="text-xs text-gray-400">{t("发送到全部已配置并启用的通知渠道")}</div></div><Switch checked={form.notify} onChange={(notify) => setForm({ ...form, notify })} /></div>
         </div>
-        <div className="mt-5 flex justify-end gap-2"><Button onClick={() => setOpen(false)}>{t("取消")}</Button><Button variant="primary" loading={saving} onClick={() => void save()}>{t("保存")}</Button></div>
+        <div className="mt-5 flex justify-end gap-2"><Button onClick={closeEditor}>{t("取消")}</Button><Button variant="primary" loading={saving} onClick={() => void save()}>{t("保存")}</Button></div>
       </Modal>
     </div>
   );

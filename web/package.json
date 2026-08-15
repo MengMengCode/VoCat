@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && vite build",
+    "test": "node --test test/*.test.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
