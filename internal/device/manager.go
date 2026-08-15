@@ -38,9 +38,14 @@ type Manager struct {
 	smsTimeout     time.Duration
 	scanTimeout    time.Duration
 	cardReaders    *pcsc.Service
-	started        bool
-	devices        map[string]*managedDevice
-	ussdSessions   map[string]ussdSession
+
+	qmiRadioOpener                qmiRadioSessionOpener
+	nativeQMIRegistrationMu       sync.Mutex
+	nativeQMIRegistrationInFlight map[string]struct{}
+
+	started      bool
+	devices      map[string]*managedDevice
+	ussdSessions map[string]ussdSession
 }
 
 // LockUICC and UnlockUICC allow another in-process UICC client (currently the
@@ -115,6 +120,10 @@ func NewManager(options Options) (*Manager, error) {
 		smsTimeout:     options.SMSTimeout,
 		scanTimeout:    options.ScanTimeout,
 		cardReaders:    options.CardReaders,
+
+		qmiRadioOpener:                openQMIRadioSession,
+		nativeQMIRegistrationInFlight: make(map[string]struct{}),
+
 		devices:        make(map[string]*managedDevice),
 		ussdSessions:   make(map[string]ussdSession),
 		esimRecoveries: make(map[string]chan struct{}),

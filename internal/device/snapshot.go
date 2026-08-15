@@ -56,10 +56,23 @@ func (manager *Manager) readSnapshot(
 	if ccidErr != nil {
 		ccid, ccidErr = manager.command(ctx, client, "AT+QCCID")
 	}
+	if ccidErr != nil && strings.EqualFold(strings.TrimSpace(backend), "qmi") && isNativeQMICandidate(candidate) {
+		qmiContext, cancelQMI := manager.withTimeout(ctx, manager.commandTimeout*5)
+		qmiICCID, qmiErr := manager.readNativeQMIICCID(qmiContext, candidate)
+		cancelQMI()
+		if qmiErr == nil {
+			snapshot.ICCID = qmiICCID
+			ccidErr = nil
+		} else {
+			snapshot.Warnings = append(snapshot.Warnings, "read ICCID via QMI UIM: "+qmiErr.Error())
+		}
+	}
 	if ccidErr != nil {
 		snapshot.Warnings = append(snapshot.Warnings, "read ICCID: "+ccidErr.Error())
 	} else {
-		snapshot.ICCID = parseICCIDIdentifier(ccid, []string{"+CCID:", "+QCCID:"}, 18, 22)
+		if snapshot.ICCID == "" {
+			snapshot.ICCID = parseICCIDIdentifier(ccid, []string{"+CCID:", "+QCCID:"}, 18, 22)
+		}
 	}
 	previousICCID = strings.TrimSpace(previousICCID)
 	if previousICCID != "" && snapshot.ICCID != "" && !strings.EqualFold(previousICCID, snapshot.ICCID) {

@@ -117,6 +117,27 @@ func TestPhysicalMatchesConfigRejectsDuplicateAndroidSerialAlias(t *testing.T) {
 	}
 }
 
+func TestPhysicalMatchesConfigFallsBackWhenWWANSysfsPathWasResolved(t *testing.T) {
+	config := store.Device{
+		ID:            "wwan0",
+		USBPath:       "/sys/class/wwan/wwan0",
+		ATPort:        "/dev/wwan0at0",
+		ControlDevice: "/dev/wwan0qmi0",
+	}
+	entry := device.Device{
+		ID: "mhi-wwan0",
+		Candidate: modem.Candidate{
+			USBPath:      "/sys/devices/platform/soc/4080000.remoteproc/wwan/wwan0",
+			ATPort:       modem.Port{Path: "/dev/wwan0at0"},
+			QMIControl:   "/dev/wwan0qmi0",
+			HardwareKind: "wwan",
+		},
+	}
+	if !physicalMatchesConfig(entry, config) {
+		t.Fatal("resolved WWAN sysfs path should fall back to matching control nodes")
+	}
+}
+
 func TestFindDiscoveredDevicePrefersPhysicalIdentityOverSerialAlias(t *testing.T) {
 	alias := "/dev/serial/by-id/usb-Android_Android-if02-port0"
 	devices := []device.Device{
