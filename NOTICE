@@ -1,0 +1,10 @@
+VoCat uses the following Go module for native Qualcomm QMI support:
+
+  github.com/iniwex5/quectel-qmi-go v0.6.0
+  Distribution: https://proxy.golang.org/github.com/iniwex5/quectel-qmi-go/@v/v0.6.0.zip
+  Documentation and license metadata: https://pkg.go.dev/github.com/iniwex5/quectel-qmi-go@v0.6.0
+  License: MIT
+  Copyright: Copyright (c) 2026 iniwex5
+
+The full MIT license text is included in:
+LICENSES/quectel-qmi-go-MIT.txt
