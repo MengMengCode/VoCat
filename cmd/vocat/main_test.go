@@ -217,3 +217,24 @@ func TestEnforceCardRegionIgnoresUnknownOrNotReadySIM(t *testing.T) {
 		t.Fatalf("expected no card policies, got %d", len(policies))
 	}
 }
+
+func TestProvisionedDeviceTypeRecognizesNativeWWAN(t *testing.T) {
+	native := modem.Candidate{
+		HardwareKind: "wwan",
+		USBPath:      "/sys/devices/pci0000:00/0000:00:00.0/wwan/wwan0",
+		QMIControl:   "/dev/wwan0qmi0",
+		ATPort:       modem.Port{Path: "/dev/wwan0at0"},
+	}
+	if got := provisionedDeviceType(native); got != store.DeviceTypeWiFi410 {
+		t.Fatalf("native WWAN type = %q, want %q", got, store.DeviceTypeWiFi410)
+	}
+
+	usb := modem.Candidate{
+		USBPath:    "/sys/bus/usb/devices/1-6",
+		QMIControl: "/dev/cdc-wdm0",
+		ATPort:     modem.Port{Path: "/dev/ttyUSB2"},
+	}
+	if got := provisionedDeviceType(usb); got != store.DeviceTypePCIeEC20EC25 {
+		t.Fatalf("USB modem type = %q, want %q", got, store.DeviceTypePCIeEC20EC25)
+	}
+}

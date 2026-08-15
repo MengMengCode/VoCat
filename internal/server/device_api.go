@@ -1472,7 +1472,13 @@ func physicalMatchesConfig(entry device.Device, config store.Device) bool {
 		return config.ModemIMEI == entry.Snapshot.IMEI
 	}
 	if config.USBPath != "" && candidate.USBPath != "" {
-		return config.USBPath == candidate.USBPath
+		if config.USBPath == candidate.USBPath {
+			return true
+		}
+		// Sysfs paths may be stored through /sys/class symlinks while a
+		// subsequent discovery returns the resolved device path. Keep checking
+		// the selected AT/QMI nodes instead of rejecting a modem whose physical
+		// path spelling changed but whose control plane is unchanged.
 	}
 	// Control and serial device nodes are allocation-order dependent. They are
 	// only legacy fallbacks when no physical USB path or readable IMEI exists.

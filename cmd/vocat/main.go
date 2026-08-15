@@ -27,6 +27,7 @@ import (
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
+	"vocat/internal/modem"
 	"vocat/internal/pcsc"
 	"vocat/internal/server"
 	"vocat/internal/store"
@@ -836,9 +837,9 @@ func provisionDiscoveredDevices(
 	}
 	for _, discovered := range manager.List() {
 		candidate := discovered.Candidate
+		deviceType := provisionedDeviceType(candidate)
 		backend := "at"
 		control := candidate.ATPort.OpenPath()
-		deviceType := store.DeviceTypePCIeEC20EC25
 		esimTransport := backend
 		if candidate.QMIControl != "" {
 			backend = "qmi"
@@ -878,6 +879,15 @@ func provisionDiscoveredDevices(
 		}
 	}
 	return nil
+}
+
+func provisionedDeviceType(candidate modem.Candidate) string {
+	controlName := filepath.Base(filepath.Clean(candidate.QMIControl))
+	if candidate.HardwareKind == "wwan" &&
+		strings.HasPrefix(controlName, "wwan") && strings.Contains(controlName, "qmi") {
+		return store.DeviceTypeWiFi410
+	}
+	return store.DeviceTypePCIeEC20EC25
 }
 
 // persistLogsToStore subscribes to the live log hub and durably appends every

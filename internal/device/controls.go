@@ -277,6 +277,10 @@ func (manager *Manager) SetFlight(
 	if manager.candidateFor(state).HardwareKind == "pcsc" {
 		return FlightResult{PreviousMode: 4, CurrentMode: 4, FlightMode: true, RadioOff: true}, nil
 	}
+	if result, handled, err := manager.setNativeQMIFlight(ctx, id, state, enabled); handled {
+		manager.setResult(id, state, nil, err)
+		return result, err
+	}
 	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
 	if err != nil {
 		manager.setResult(id, state, nil, err)
