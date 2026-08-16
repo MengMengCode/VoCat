@@ -395,8 +395,8 @@ func (s *Server) saveAndProbeUpstream(
 	)
 	probeResponse := probeMap(probe, probeErr)
 	message := i18n.T("代理已保存；UDP ASSOCIATE 尚未通过。")
-	if probeErr == nil && probe.UDPAssociateOK {
-		message = i18n.T("代理已保存，SOCKS5 认证与 UDP ASSOCIATE 均通过。")
+	if probeErr == nil && probe.UDPExchangeOK {
+		message = i18n.T("代理已保存，SOCKS5 认证与真实 UDP 往返均通过。")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
@@ -425,8 +425,8 @@ func (s *Server) handleUpstreamProbe(w http.ResponseWriter, r *http.Request, id 
 		8*time.Second,
 	)
 	message := i18n.T("代理不能承载 VoWiFi 所需的 UDP。")
-	if probeErr == nil && result.UDPAssociateOK {
-		message = i18n.T("SOCKS5 认证与 UDP ASSOCIATE 探测通过。")
+	if probeErr == nil && result.UDPExchangeOK {
+		message = i18n.T("SOCKS5 认证与真实 UDP 往返探测通过。")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
@@ -479,8 +479,8 @@ func (s *Server) handleUpstreamProbeConfig(w http.ResponseWriter, r *http.Reques
 		8*time.Second,
 	)
 	message := i18n.T("代理不能承载 VoWiFi 所需的 UDP。")
-	if probeErr == nil && result.UDPAssociateOK {
-		message = i18n.T("SOCKS5 认证与 UDP ASSOCIATE 探测通过。")
+	if probeErr == nil && result.UDPExchangeOK {
+		message = i18n.T("SOCKS5 认证与真实 UDP 往返探测通过。")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{

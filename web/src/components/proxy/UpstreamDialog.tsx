@@ -40,21 +40,33 @@ function ProbeResultPanel({ probe }: { probe: UpstreamProbeResult }) {
   const { t } = useI18n();
   const reachable = !!probe.reachable;
   const handshakeOk = !!probe.handshakeOk;
-  const udpOk = !!probe.udpAssociateOk;
+  const associateOk = !!probe.udpAssociateOk;
+  const udpOk = !!probe.udpExchangeOk;
   const handshakeState: ProbeState = !reachable ? "pending" : handshakeOk ? "ok" : "fail";
-  const udpState: ProbeState = !handshakeOk ? "pending" : udpOk ? "ok" : "fail";
+  const associateState: ProbeState = !handshakeOk ? "pending" : associateOk ? "ok" : "fail";
+  const udpState: ProbeState = !associateOk ? "pending" : udpOk ? "ok" : "fail";
   return (
     <div className="ui-panel-muted space-y-2 rounded-lg p-3">
       <ProbeRow state={reachable ? "ok" : "fail"} label={t("TCP 连接")} detail={reachable ? t("可连通") : t("无法连接")} />
       <ProbeRow state={handshakeState} label={t("SOCKS5 握手")} detail={handshakeOk ? authMethodLabel(probe.authMethod) : undefined} />
       <ProbeRow
-        state={udpState}
+        state={associateState}
         label={t("UDP Associate（VoWiFi 依赖）")}
-        detail={udpState === "pending" ? undefined : udpOk ? t("支持") : t("不支持")}
+        detail={associateState === "pending" ? undefined : associateOk ? t("已建立") : t("不支持")}
+      />
+      <ProbeRow
+        state={udpState}
+        label={t("真实 UDP DNS 往返")}
+        detail={udpState === "pending" ? undefined : udpOk ? `${probe.roundTripMs || 0} ms` : t("无返回")}
       />
       {probe.relayAddr ? (
         <div className="text-[11px] text-gray-400">
           {t("UDP 中继地址：")}<span className="font-mono">{probe.relayAddr}</span>
+        </div>
+      ) : null}
+      {probe.dnsName && probe.dnsServer ? (
+        <div className="text-[11px] text-gray-400">
+          {t("UDP 测试：")}<span className="font-mono">{probe.dnsName} @ {probe.dnsServer}</span>
         </div>
       ) : null}
       {probe.hint ? <div className="text-[11px] text-gray-500 dark:text-gray-400">{probe.hint}</div> : null}
@@ -127,7 +139,7 @@ export function UpstreamDialog({ open, editing, form, testing, probe, onPatch, o
         </div>
         {probe ? (
           <div className="space-y-3">
-            <SectionHeader tone={probe.udpAssociateOk ? "green" : "amber"} title={t("连通性检测结果")} />
+            <SectionHeader tone={probe.udpExchangeOk ? "green" : "amber"} title={t("连通性检测结果")} />
             <ProbeResultPanel probe={probe} />
           </div>
         ) : null}
