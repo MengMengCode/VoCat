@@ -534,25 +534,7 @@ func buildXFRMInstallPlan(config IPSecSAConfig) ([]xfrmOperation, error) {
 		for _, protocol := range flow.protocols {
 			operations = append(operations, xfrmOperation{
 				description: flow.description + " " + protocol + " policy",
-				arguments: []string{
-					flow.family,
-					"xfrm", "policy", "add",
-					"src", flow.sourcePrefix,
-					"dst", flow.destinationPrefix,
-					"proto", protocol,
-					"sport", strconv.Itoa(flow.sourcePort),
-					"dport", strconv.Itoa(flow.destinationPort),
-					"dir", flow.direction,
-					"priority", "100",
-					"tmpl",
-					"src", flow.templateSource.String(),
-					"dst", flow.templateDestination.String(),
-					"proto", "esp",
-					"spi", fmt.Sprintf("0x%08x", flow.spi),
-					"reqid", strconv.FormatUint(uint64(flow.reqid), 10),
-					"mode", "transport",
-					"level", "required",
-				},
+				arguments: xfrmPolicyArgs(flow, protocol, false),
 			})
 		}
 	}
@@ -568,16 +550,7 @@ func buildXFRMCleanupPlan(config IPSecSAConfig) []xfrmOperation {
 			protocol := flow.protocols[protocolIndex]
 			operations = append(operations, xfrmOperation{
 				description: "delete " + flow.description + " " + protocol + " policy",
-				arguments: []string{
-					flow.family,
-					"xfrm", "policy", "delete",
-					"src", flow.sourcePrefix,
-					"dst", flow.destinationPrefix,
-					"proto", protocol,
-					"sport", strconv.Itoa(flow.sourcePort),
-					"dport", strconv.Itoa(flow.destinationPort),
-					"dir", flow.direction,
-				},
+				arguments: xfrmPolicyArgs(flow, protocol, true),
 			})
 		}
 	}
@@ -604,6 +577,45 @@ func buildXFRMCleanupPlan(config IPSecSAConfig) []xfrmOperation {
 		})
 	}
 	return operations
+}
+
+
+func xfrmPolicyArgs(flow xfrmFlow, protocol string, delete bool) []string {
+	args := []string{
+		flow.family,
+		"xfrm", "policy",
+	}
+	if delete {
+		args = append(args, "delete")
+	} else {
+		args = append(args, "add")
+	}
+	args = append(args,
+		"src", flow.sourcePrefix,
+		"dst", flow.destinationPrefix,
+		"proto", protocol,
+	)
+	if flow.sourcePort > 0 {
+		args = append(args, "sport", strconv.Itoa(flow.sourcePort))
+	}
+	if flow.destinationPort > 0 {
+		args = append(args, "dport", strconv.Itoa(flow.destinationPort))
+	}
+	args = append(args, "dir", flow.direction)
+	if delete {
+		return args
+	}
+	return append(args,
+		"priority", "100",
+		"tmpl",
+		"src", flow.templateSource.String(),
+		"dst", flow.templateDestination.String(),
+		"proto", "esp",
+		"spi", fmt.Sprintf("0x%08x", flow.spi),
+		"reqid", strconv.FormatUint(uint64(flow.reqid), 10),
+		"mode", "transport",
+		"level", "required",
+	)
 }
 
 type xfrmFlow struct {
@@ -650,7 +662,7 @@ func xfrmFlows(config IPSecSAConfig) []xfrmFlow {
 		{
 			description: "P-CSCF-client to UE-server", family: family,
 			sourcePrefix: remotePrefix, destinationPrefix: localPrefix,
-			sourcePort: config.PCSCFClientPort, destinationPort: config.UEServerPort,
+			sourcePort: 0, destinationPort: config.UEServerPort,
 			direction: "in", templateSource: config.RemoteIP, templateDestination: config.LocalIP,
 			spi: config.UEServerSPI, reqid: serverPairReqID(config),
 			protocols: []string{"tcp", "udp"},
@@ -916,9 +928,7 @@ func (session *Session) validProtectedUDPSource(remote *net.UDPAddr) bool {
 		return false
 	}
 	expectedIP := addressIP(session.conn.RemoteAddr())
-	return expectedIP != nil &&
-		expectedIP.Equal(remote.IP) &&
-		remote.Port == session.securityAgreement.selected.portClient
+	return expectedIP != nil && expectedIP.Equal(remote.IP)
 }
 
 func (session *Session) effectiveSecurityMode() string {

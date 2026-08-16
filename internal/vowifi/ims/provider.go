@@ -946,7 +946,7 @@ func (session *Session) buildRegister(
 	}
 	o2Germany := usesO2GermanyIMSProfile(session.request.Identity)
 	supported := "path, gruu"
-	allow := "REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS"
+	allow := "REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, SUBSCRIBE, NOTIFY"
 	if o2Germany {
 		// Match the complete IMS capability set used by the previously working
 		// VoHive client. O2 validates more of the initial UE security profile
@@ -984,6 +984,12 @@ func (session *Session) buildRegister(
 			`P-Visited-Network-ID: "one.att.net"`,
 			"P-Access-Network-Info: IEEE-802.11;i-wlan-node-id=000000000000;network-provided",
 			"Cellular-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=3102800000000;cell-info-age=0",
+			"Accept-Contact: *;+g.3gpp.smsip",
+			`Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
+		)
+	} else {
+		lines = append(lines,
+			"P-Access-Network-Info: IEEE-802.11;i-wlan-node-id=000000000000;network-provided",
 			"Accept-Contact: *;+g.3gpp.smsip",
 			`Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
 		)

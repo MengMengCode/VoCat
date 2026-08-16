@@ -91,11 +91,14 @@ func (session *Session) startRuntimeReceivers() error {
 
 	session.receiveDone.Add(1)
 	go session.readMainConnection()
-	if session.securityActive && session.transport == "tcp" && session.protectedTCP != nil {
+	// Vodafone UK (and others) deliver MT SMS as SIP MESSAGE to the
+	// ipsec-3gpp UE server port over UDP even when REGISTER used TCP.
+	// Always read both sockets when they were reserved.
+	if session.securityActive && session.protectedTCP != nil {
 		session.receiveDone.Add(1)
 		go session.acceptProtectedTCP()
 	}
-	if session.securityActive && session.transport == "udp" && session.protectedUDP != nil {
+	if session.securityActive && session.protectedUDP != nil {
 		session.receiveDone.Add(1)
 		go session.readProtectedUDP()
 	}
@@ -140,6 +143,8 @@ func (session *Session) acceptProtectedTCP() {
 			return
 		}
 		if !session.validProtectedTCPSource(connection.RemoteAddr()) {
+			session.logInboundSMS(slog.LevelWarn, "IMS inbound TCP rejected", nil,
+				"stage", "source_filter", "remote", connection.RemoteAddr().String())
 			_ = connection.Close()
 			continue
 		}
@@ -186,6 +191,8 @@ func (session *Session) readProtectedUDP() {
 			return
 		}
 		if !session.validProtectedUDPSource(remote) {
+			session.logInboundSMS(slog.LevelWarn, "IMS inbound UDP rejected", nil,
+				"stage", "source_filter", "remote", remote.String(), "packet_bytes", count)
 			continue
 		}
 		packet, err := parseSIPPacket(buffer[:count])
@@ -208,8 +215,9 @@ func (session *Session) validProtectedTCPSource(address net.Addr) bool {
 		return false
 	}
 	expected := addressIP(session.conn.RemoteAddr())
-	return expected != nil && expected.Equal(remote.IP) &&
-		remote.Port == session.securityAgreement.selected.portClient
+	// Require P-CSCF IP. Do not require port-c (50601): some cores originate
+	// MESSAGE from an ephemeral port on the same P-CSCF.
+	return expected != nil && expected.Equal(remote.IP)
 }
 
 func (session *Session) dispatchPacket(packet sipPacket, respond func([]byte) error) {
