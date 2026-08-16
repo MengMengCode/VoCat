@@ -20,21 +20,30 @@ var (
 
 const terminalCallRetention = 30 * time.Second
 
+const (
+	mmtelServiceURN = "urn:urn-7:3gpp-service.ims.icsi.mmtel"
+	mmtelFeatureTag = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
+)
+
 type imsCall struct {
-	public     vowifi.Call
-	callID     string
-	target     string
-	from       string
-	to         string
-	branch     string
-	cseq       uint32
-	invite     *sipRequest
-	respond    func([]byte) error
-	responses  chan *sipResponse
-	remoteTag  string
-	routes     []string
-	terminated bool
-	media      *rtpMedia
+	public         vowifi.Call
+	callID         string
+	target         string
+	from           string
+	to             string
+	branch         string
+	cseq           uint32
+	inviteTarget   string
+	invite         *sipRequest
+	respond        func([]byte) error
+	responses      chan *sipResponse
+	remoteTag      string
+	routes         []string
+	terminated     bool
+	media          *rtpMedia
+	pracked        map[string]bool
+	sessionExpires int
+	sessionCancel  context.CancelFunc
 }
 
 func (session *Session) Calls() []vowifi.Call {
@@ -67,12 +76,13 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 		return vowifi.Call{}, err
 	}
 	callID := callToken + "@" + addressHost(session.conn.LocalAddr())
-	target := "tel:" + number
+	target := callTargetURI(number, session.identity.domain)
 	session.mu.Lock()
 	cseq := session.cseq
 	session.cseq++
 	routes := append([]string(nil), session.evidence.ServiceRoute...)
 	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
+	preferredIdentity := session.callPreferredIdentityLocked()
 	session.mu.Unlock()
 	media, err := newRTPMedia(session.localMediaIP())
 	if err != nil {
@@ -100,10 +110,17 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 		"To: "+to,
 		"Call-ID: "+callID,
 		fmt.Sprintf("CSeq: %d INVITE", cseq),
-		"Contact: <sip:"+session.identity.user+"@"+session.contactAddress()+";transport="+session.transport+">",
-		"P-Preferred-Identity: <"+session.identity.public+">",
-		"Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE",
-		"Supported: timer",
+		session.dialogContactHeader(),
+		"P-Preferred-Identity: <"+preferredIdentity+">",
+		"P-Preferred-Service: "+mmtelServiceURN,
+		`Accept-Contact: *;+g.3gpp.icsi-ref="`+mmtelFeatureTag+`"`,
+		"P-Access-Network-Info: "+session.pAccessNetworkInfo(),
+		"User-Agent: "+session.callUserAgent(),
+		"Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, PRACK, UPDATE, INFO",
+		"Supported: 100rel, timer, replaces",
+		"Session-Expires: 1800;refresher=uac",
+		"Min-SE: 90",
+		"Accept: application/sdp",
 		"Content-Type: application/sdp",
 		"Content-Length: "+strconv.Itoa(len(body)), "", "",
 	)
@@ -120,8 +137,8 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	session.transactionsMu.Unlock()
 	call := &imsCall{
 		public: vowifi.Call{ID: callID, Number: number, Direction: "outgoing", State: "dialing", StartedAt: time.Now().UTC()},
-		callID: callID, target: target, from: from, to: to, branch: branch, cseq: cseq, responses: responses,
-		routes: routes, media: media,
+		callID: callID, target: target, inviteTarget: target, from: from, to: to, branch: branch, cseq: cseq, responses: responses,
+		routes: routes, media: media, pracked: make(map[string]bool),
 	}
 	session.callMu.Lock()
 	session.calls[callID] = call
@@ -166,24 +183,26 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 			if response == nil {
 				continue
 			}
+			diagnostic := callResponseDiagnostic(response)
+			session.logCallResponse(response, diagnostic)
 			if response.StatusCode < 200 {
-				session.setCallDiagnostic(call.callID, response.StatusCode, response.Reason)
-				if response.StatusCode >= 180 {
+				session.setCallDiagnostic(call.callID, response.StatusCode, diagnostic)
+				session.updateCallDialogFromResponse(call, response)
+				if len(response.Body) > 0 {
+					if mediaErr := call.media.configureRemote(response.Body); mediaErr == nil {
+						session.setCallMediaReady(call.callID)
+						session.setCallState(call.callID, "early_media")
+					}
+				} else if response.StatusCode >= 180 {
 					session.setCallState(call.callID, "ringing")
+				}
+				if reliableProvisional(response) {
+					go session.sendPRACK(call, response)
 				}
 				continue
 			}
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				session.callMu.Lock()
-				call.to = response.value("To")
-				call.remoteTag = headerParameter(call.to, "tag")
-				if contact := headerURI(response.value("Contact")); contact != "" {
-					call.target = contact
-				}
-				if recordRoutes := response.values("Record-Route"); len(recordRoutes) > 0 {
-					call.routes = reverseStrings(recordRoutes)
-				}
-				session.callMu.Unlock()
+				session.updateCallDialogFromResponse(call, response)
 				mediaErr := call.media.configureRemote(response.Body)
 				_ = session.sendACK(call)
 				if mediaErr != nil {
@@ -197,13 +216,14 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 				}
 				session.setCallMediaReady(call.callID)
 				session.setCallState(call.callID, "active")
+				session.startSessionTimer(call, response.value("Session-Expires"))
 			} else if session.callWasTerminated(call.callID) {
 				// CANCEL normally causes the pending INVITE transaction to finish
 				// with 487 Request Terminated.  It is the expected response to our
 				// local hang-up, not a new network rejection.
-				session.finishCall(call.callID, "ended", response.StatusCode, response.Reason)
+				session.finishCall(call.callID, "ended", response.StatusCode, diagnostic)
 			} else {
-				session.finishCall(call.callID, "failed", response.StatusCode, response.Reason)
+				session.finishCall(call.callID, "failed", response.StatusCode, diagnostic)
 			}
 			return
 		}
@@ -223,7 +243,13 @@ func (session *Session) AnswerCall(_ context.Context, id string) (vowifi.Call, e
 	}
 	request, respond := call.invite, call.respond
 	session.callMu.Unlock()
-	response, err := buildSIPResponseWithBody(request, 200, session.fromTag, call.media.answerSDP(session.localMediaIP()))
+	response, err := buildSIPResponseWithBody(
+		request,
+		200,
+		session.fromTag,
+		call.media.answerSDP(session.localMediaIP()),
+		session.dialogContactHeader(),
+	)
 	if err != nil {
 		return vowifi.Call{}, err
 	}
@@ -231,6 +257,7 @@ func (session *Session) AnswerCall(_ context.Context, id string) (vowifi.Call, e
 		return vowifi.Call{}, err
 	}
 	session.setCallState(id, "active")
+	session.startSessionTimer(call, request.value("Session-Expires"))
 	if call.media.ready() {
 		session.setCallMediaReady(id)
 	}
@@ -264,7 +291,7 @@ func (session *Session) HangupCall(ctx context.Context, id string) error {
 		return nil
 	}
 	method := "BYE"
-	if direction == "outgoing" && (state == "dialing" || state == "ringing") {
+	if direction == "outgoing" && (state == "dialing" || state == "ringing" || state == "early_media") {
 		method = "CANCEL"
 	}
 	err := session.sendDialogRequest(ctx, call, method)
@@ -287,6 +314,12 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 		callID := strings.TrimSpace(request.value("Call-ID"))
 		if callID == "" {
 			return true
+		}
+		session.callMu.Lock()
+		existing := session.calls[callID]
+		session.callMu.Unlock()
+		if existing != nil && existing.public.State == "active" {
+			return session.handleDialogOffer(request, respond, existing)
 		}
 		number := identityNumber(request.value("From"))
 		target := headerURI(request.value("Contact"))
@@ -311,8 +344,9 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 		}
 		call := &imsCall{
 			public: vowifi.Call{ID: callID, Number: number, Direction: "incoming", State: "ringing", StartedAt: time.Now().UTC()},
-			callID: callID, target: target, from: request.value("To") + ";tag=" + session.fromTag,
+			callID: callID, target: target, inviteTarget: request.URI, from: request.value("To") + ";tag=" + session.fromTag,
 			to: request.value("From"), invite: request, respond: respond, routes: request.values("Record-Route"), media: media,
+			pracked: make(map[string]bool),
 		}
 		session.callMu.Lock()
 		session.calls[callID] = call
@@ -322,6 +356,21 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 			_ = respond(response)
 		}
 		return true
+	case "PRACK":
+		response, err := buildSIPResponseWithBody(request, 200, session.fromTag, nil)
+		if err == nil {
+			_ = respond(response)
+		}
+		return true
+	case "UPDATE":
+		callID := strings.TrimSpace(request.value("Call-ID"))
+		session.callMu.Lock()
+		call := session.calls[callID]
+		session.callMu.Unlock()
+		if call == nil {
+			return false
+		}
+		return session.handleDialogOffer(request, respond, call)
 	case "ACK":
 		callID := strings.TrimSpace(request.value("Call-ID"))
 		session.callMu.Lock()
@@ -366,9 +415,153 @@ func (session *Session) sendACK(call *imsCall) error {
 	return err
 }
 
+func reliableProvisional(response *sipResponse) bool {
+	if response == nil || strings.TrimSpace(response.value("RSeq")) == "" {
+		return false
+	}
+	for _, token := range strings.Split(strings.ToLower(response.value("Require")), ",") {
+		if strings.TrimSpace(token) == "100rel" {
+			return true
+		}
+	}
+	return false
+}
+
+func (session *Session) updateCallDialogFromResponse(call *imsCall, response *sipResponse) {
+	if call == nil || response == nil {
+		return
+	}
+	session.callMu.Lock()
+	defer session.callMu.Unlock()
+	call.to = response.value("To")
+	call.remoteTag = headerParameter(call.to, "tag")
+	if contact := headerURI(response.value("Contact")); contact != "" {
+		call.target = contact
+	}
+	if recordRoutes := response.values("Record-Route"); len(recordRoutes) > 0 {
+		call.routes = reverseStrings(recordRoutes)
+	}
+}
+
+func (session *Session) sendPRACK(call *imsCall, response *sipResponse) {
+	rseq := strings.TrimSpace(response.value("RSeq"))
+	inviteCSeq := strings.TrimSpace(response.value("CSeq"))
+	if rseq == "" || inviteCSeq == "" {
+		return
+	}
+	key := rseq + "|" + inviteCSeq
+	session.callMu.Lock()
+	if call.pracked == nil {
+		call.pracked = make(map[string]bool)
+	}
+	if call.pracked[key] || call.public.EndedAt != nil {
+		session.callMu.Unlock()
+		return
+	}
+	call.pracked[key] = true
+	target, to, from := call.target, call.to, call.from
+	routes := append([]string(nil), call.routes...)
+	session.callMu.Unlock()
+
+	session.mu.Lock()
+	cseq := session.cseq
+	session.cseq++
+	session.mu.Unlock()
+	branch, _ := randomHex(12)
+	lines := []string{
+		"PRACK " + target + " SIP/2.0",
+		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(session.transport), session.conn.LocalAddr().String(), branch),
+		"Max-Forwards: 70",
+	}
+	session.mu.Lock()
+	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
+	session.mu.Unlock()
+	lines = append(lines, securityHeaders...)
+	for _, route := range routes {
+		lines = append(lines, "Route: "+route)
+	}
+	lines = append(lines,
+		"From: "+from, "To: "+to, "Call-ID: "+call.callID,
+		fmt.Sprintf("CSeq: %d PRACK", cseq), "RAck: "+rseq+" "+inviteCSeq,
+		"P-Access-Network-Info: "+session.pAccessNetworkInfo(),
+		"User-Agent: "+session.callUserAgent(),
+		"Content-Length: 0", "", "",
+	)
+	ctx, cancel := context.WithTimeout(session.refreshContext, 10*time.Second)
+	defer cancel()
+	result, err := session.exchangeRuntime(ctx, []byte(strings.Join(lines, "\r\n")), sipTransactionKey{callID: call.callID, cseq: cseq, method: "PRACK"})
+	if err != nil || result.StatusCode < 200 || result.StatusCode >= 300 {
+		reason := "reliable provisional response could not be acknowledged"
+		if err != nil {
+			reason = err.Error()
+		}
+		session.finishCall(call.callID, "failed", 0, reason)
+	}
+}
+
+func (session *Session) handleDialogOffer(request *sipRequest, respond func([]byte) error, call *imsCall) bool {
+	var body []byte
+	if len(request.Body) > 0 {
+		if err := call.media.configureRemote(request.Body); err != nil {
+			if response, buildErr := buildSIPResponseWithBody(request, 488, session.fromTag, nil); buildErr == nil {
+				_ = respond(response)
+			}
+			return true
+		}
+		body = call.media.answerSDP(session.localMediaIP())
+		session.setCallMediaReady(call.callID)
+	}
+	extraHeaders := []string(nil)
+	if request.Method == "INVITE" {
+		extraHeaders = append(extraHeaders, session.dialogContactHeader())
+	}
+	response, err := buildSIPResponseWithBody(request, 200, session.fromTag, body, extraHeaders...)
+	if err == nil {
+		_ = respond(response)
+		session.startSessionTimer(call, request.value("Session-Expires"))
+	}
+	return true
+}
+
+func (session *Session) startSessionTimer(call *imsCall, header string) {
+	value := strings.TrimSpace(strings.Split(header, ";")[0])
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds < 90 || seconds > 86400 || call == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(session.refreshContext)
+	session.callMu.Lock()
+	if call.sessionCancel != nil {
+		call.sessionCancel()
+	}
+	call.sessionExpires = seconds
+	call.sessionCancel = cancel
+	session.callMu.Unlock()
+	go func() {
+		interval := time.Duration(seconds) * time.Second / 2
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				refreshContext, cancelRefresh := context.WithTimeout(ctx, 15*time.Second)
+				refreshErr := session.sendDialogRequest(refreshContext, call, "UPDATE")
+				cancelRefresh()
+				if refreshErr != nil {
+					session.finishCall(call.callID, "failed", 0, "SIP session refresh failed")
+					return
+				}
+				timer.Reset(interval)
+			}
+		}
+	}()
+}
+
 func (session *Session) sendDialogRequest(ctx context.Context, call *imsCall, method string) error {
 	cseq := call.cseq
-	if method == "BYE" {
+	if method == "BYE" || method == "UPDATE" {
 		session.mu.Lock()
 		cseq = session.cseq
 		session.cseq++
@@ -396,15 +589,23 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 	if method == "CANCEL" {
 		branch = call.branch
 	}
+	target := call.target
+	if method == "CANCEL" && call.inviteTarget != "" {
+		target = call.inviteTarget
+	}
 	to := call.to
 	if to == "" {
 		to = "<" + call.target + ">"
 	}
 	lines := []string{
-		method + " " + call.target + " SIP/2.0",
+		method + " " + target + " SIP/2.0",
 		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(session.transport), session.conn.LocalAddr().String(), branch),
 		"Max-Forwards: 70",
 	}
+	session.mu.Lock()
+	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
+	session.mu.Unlock()
+	lines = append(lines, securityHeaders...)
 	for _, route := range call.routes {
 		lines = append(lines, "Route: "+route)
 	}
@@ -413,8 +614,19 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 		"To: "+to,
 		"Call-ID: "+call.callID,
 		fmt.Sprintf("CSeq: %d %s", cseq, method),
-		"Content-Length: 0", "", "",
+		"Supported: 100rel, timer",
+		"User-Agent: "+session.callUserAgent(),
 	)
+	if method != "CANCEL" {
+		lines = append(lines, "P-Access-Network-Info: "+session.pAccessNetworkInfo())
+	}
+	if method == "UPDATE" {
+		lines = append(lines, session.dialogContactHeader())
+	}
+	lines = append(lines, "Content-Length: 0", "", "")
+	if method == "UPDATE" && call.sessionExpires > 0 {
+		lines = append(lines[:len(lines)-3], fmt.Sprintf("Session-Expires: %d;refresher=uac", call.sessionExpires), "Content-Length: 0", "", "")
+	}
 	return []byte(strings.Join(lines, "\r\n"))
 }
 
@@ -426,7 +638,7 @@ func (session *Session) localMediaIP() net.IP {
 	return addressIP(localAddress)
 }
 
-func buildSIPResponseWithBody(request *sipRequest, status int, tag string, body []byte) ([]byte, error) {
+func buildSIPResponseWithBody(request *sipRequest, status int, tag string, body []byte, extraHeaders ...string) ([]byte, error) {
 	reasons := map[int]string{180: "Ringing", 200: "OK", 486: "Busy Here", 487: "Request Terminated", 488: "Not Acceptable Here"}
 	reason := reasons[status]
 	if reason == "" {
@@ -446,6 +658,14 @@ func buildSIPResponseWithBody(request *sipRequest, status int, tag string, body 
 		lines = append(lines, "Via: "+value)
 	}
 	lines = append(lines, "From: "+from, "To: "+to, "Call-ID: "+callID, "CSeq: "+cseq)
+	for _, header := range extraHeaders {
+		if strings.TrimSpace(header) != "" {
+			lines = append(lines, header)
+		}
+	}
+	if value := strings.TrimSpace(request.value("Session-Expires")); value != "" && status >= 200 && status < 300 && (request.Method == "INVITE" || request.Method == "UPDATE") {
+		lines = append(lines, "Supported: timer", "Session-Expires: "+value)
+	}
 	if len(body) > 0 {
 		lines = append(lines, "Content-Type: application/sdp")
 	}
@@ -453,10 +673,95 @@ func buildSIPResponseWithBody(request *sipRequest, status int, tag string, body 
 	return append([]byte(strings.Join(lines, "\r\n")), body...), nil
 }
 
+func (session *Session) dialogContactHeader() string {
+	if session == nil || session.conn == nil || strings.TrimSpace(session.identity.user) == "" {
+		return ""
+	}
+	contact := "Contact: <sip:" + session.identity.user + "@" + session.contactAddress() + ";transport=" + session.transport + ">"
+	if strings.TrimSpace(session.instanceID) != "" {
+		contact += `;+sip.instance="<` + session.instanceID + `>"`
+	}
+	return contact + `;audio;+g.3gpp.icsi-ref="` + mmtelFeatureTag + `"`
+}
+
+func callTargetURI(number, domain string) string {
+	if strings.HasPrefix(number, "+") {
+		return "tel:" + number
+	}
+	return "tel:" + number + ";phone-context=" + strings.TrimSpace(domain)
+}
+
+// callPreferredIdentityLocked selects only a number that IMS explicitly
+// associated with this registration. It deliberately falls back to the IMPU
+// and never derives a telephone number from IMSI digits.
+func (session *Session) callPreferredIdentityLocked() string {
+	if number, _, ok := vowifi.ExtractAssociatedMSISDN(session.evidence); ok {
+		return "tel:" + number
+	}
+	return session.identity.public
+}
+
+func (session *Session) pAccessNetworkInfo() string {
+	profile := vowifi.ResolveCarrierProfile(session.request.Identity)
+	node := strings.TrimSpace(profile.PANINode)
+	if node == "" {
+		node = "000000000000"
+	}
+	value := "IEEE-802.11;i-wlan-node-id=" + node
+	if country := strings.ToUpper(strings.TrimSpace(profile.PANICountry)); country != "" {
+		value += ";country=" + country
+	}
+	return value + ";network-provided"
+}
+
+func (session *Session) callUserAgent() string {
+	if session != nil && session.provider != nil {
+		if value := strings.TrimSpace(session.provider.config.UserAgent); value != "" {
+			return value
+		}
+	}
+	return "vocat/1"
+}
+
+func callResponseDiagnostic(response *sipResponse) string {
+	if response == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if reason := safeSIPDiagnostic(response.Reason); reason != "" {
+		parts = append(parts, reason)
+	}
+	for _, name := range []string{"Reason", "Warning"} {
+		for _, value := range response.values(name) {
+			if value = safeSIPDiagnostic(value); value != "" {
+				parts = append(parts, name+": "+value)
+			}
+		}
+	}
+	return safeSIPDiagnostic(strings.Join(parts, "; "))
+}
+
+func (session *Session) logCallResponse(response *sipResponse, diagnostic string) {
+	if session == nil || session.provider == nil || session.provider.config.Logger == nil || response == nil {
+		return
+	}
+	session.provider.config.Logger.Info("IMS call response",
+		"carrier_profile", vowifi.ResolveCarrierProfile(session.request.Identity).ID,
+		"sip_status", response.StatusCode,
+		"diagnostic", diagnostic,
+		"content_type", safeSIPDiagnostic(response.value("Content-Type")),
+		"body_bytes", len(response.Body),
+	)
+}
+
 func (session *Session) setCallState(id, state string) {
 	session.callMu.Lock()
 	if call := session.calls[id]; call != nil {
 		call.public.State = state
+		if state == "active" && call.public.AnsweredAt == nil {
+			now := time.Now().UTC()
+			call.public.AnsweredAt = &now
+		}
 		if state != "ended" && state != "failed" {
 			call.public.EndedAt = nil
 		}
@@ -495,6 +800,30 @@ func (session *Session) CallMedia(_ context.Context, id string) (vowifi.CallMedi
 	return call.media, nil
 }
 
+func (session *Session) SendDTMF(ctx context.Context, id, digits string) error {
+	if len(digits) == 0 || len(digits) > 32 {
+		return errors.New("ims: DTMF must contain between 1 and 32 digits")
+	}
+	session.callMu.Lock()
+	call := session.calls[id]
+	if call == nil {
+		session.callMu.Unlock()
+		return ErrCallNotFound
+	}
+	if call.public.State != "active" || call.media == nil || !call.media.ready() {
+		session.callMu.Unlock()
+		return ErrCallState
+	}
+	media := call.media
+	session.callMu.Unlock()
+	for index := 0; index < len(digits); index++ {
+		if err := media.SendDTMF(ctx, digits[index]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (session *Session) finishCall(id, state string, code int, reason string) {
 	now := time.Now().UTC()
 	var media *rtpMedia
@@ -509,6 +838,10 @@ func (session *Session) finishCall(id, state string, code int, reason string) {
 			call.public.Reason = reason
 		}
 		call.public.EndedAt = &now
+		if call.sessionCancel != nil {
+			call.sessionCancel()
+			call.sessionCancel = nil
+		}
 	}
 	session.callMu.Unlock()
 	if media != nil {
@@ -584,3 +917,4 @@ func reverseStrings(values []string) []string {
 
 var _ vowifi.CallController = (*Session)(nil)
 var _ vowifi.CallMediaController = (*Session)(nil)
+var _ vowifi.CallDTMFController = (*Session)(nil)

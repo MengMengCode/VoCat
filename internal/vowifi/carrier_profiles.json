@@ -18,7 +18,12 @@
         "imsi_prefixes": ["23433"],
         "iccid_prefixes": ["894430"]
       },
-      "route": { "mcc": "234", "mnc": "30" }
+      "route": { "mcc": "234", "mnc": "30" },
+      "ims": {
+        "pani_country": "GB",
+        "pani_node": "000000000000",
+        "voice_codecs": ["PCMA", "PCMU"]
+      }
     },
     {
       "id": "att-us",
