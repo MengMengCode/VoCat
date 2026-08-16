@@ -12,11 +12,9 @@ import (
 )
 
 const (
-	quectelVendorID = "2c7c"
-	djiVendorID     = "2ca3"
-	dji4GProductID  = "4006"
+	djiVendorID    = "2ca3"
+	dji4GProductID = "4006"
 )
-
 type SysFSDiscoverer struct {
 	SysRoot string
 	DevRoot string
@@ -44,9 +42,18 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 		if os.IsNotExist(err) {
 			entries = nil
 		} else {
-			return nil, fmt.Errorf("discover Quectel USB devices: %w", err)
+			return nil, fmt.Errorf("discover USB QMI modems: %w", err)
 		}
 	}
+
+	// Candidate modems are identified by kernel driver binding instead of a
+	// vendor-ID whitelist. qmi_wwan only binds Qualcomm QMI control interfaces,
+	// so any USB device with a bound interface exposes a live QMI channel. This
+	// keeps discovery vendor-neutral (SIMCom, Sierra, Telit and other
+	// Qualcomm-based modems are found automatically) while MBIM-only devices
+	// stay out, because cdc_mbim binds their control interface instead and the
+	// project has no MBIM backend.
+	qmiBound := d.qmiWWANBoundDevices()
 
 	aliases := readSerialAliases(filepath.Join(d.DevRoot, "serial", "by-id"))
 	devices := make(map[string]*discoveredUSBDevice)
@@ -75,7 +82,7 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 		}
 		vendorID := strings.ToLower(readTrimmed(filepath.Join(resolvedDevice, "idVendor")))
 		productID := strings.ToLower(readTrimmed(filepath.Join(resolvedDevice, "idProduct")))
-		if !isSupportedUSBModem(vendorID, productID) {
+		if _, bound := qmiBound[deviceName]; !bound && !IsDJI4GUSB(vendorID, productID) {
 			continue
 		}
 
@@ -84,7 +91,7 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			serialNumber := readTrimmed(filepath.Join(resolvedDevice, "serial"))
 			state = &discoveredUSBDevice{
 				candidate: Candidate{
-					ID:           candidateID(productID, serialNumber, deviceName),
+					ID:           candidateID(vendorID, productID, serialNumber, deviceName),
 					VendorID:     vendorID,
 					ProductID:    productID,
 					Manufacturer: readTrimmed(filepath.Join(resolvedDevice, "manufacturer")),
@@ -134,6 +141,14 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 		})
 		assignQuectelPortRoles(state.candidate.Ports)
 		state.candidate.ATPort = selectATPort(state.candidate.Ports)
+		if !state.candidate.HasATPort() {
+			// A bound QMI interface proves the modem is alive, but the snapshot,
+			// SMS, USSD and eSIM (AT+CSIM) paths all require an AT port. A missing
+			// ttyUSB/ttyACM node almost always means the option/qcserial driver
+			// does not claim the serial interfaces (often a missing PID in its
+			// device-ID table), not that the module lacks an AT interface.
+			state.candidate.DiscoveryIssue = "at_port_missing"
+		}
 		result = append(result, state.candidate)
 	}
 	wwanCandidates, err := d.discoverWWAN(ctx)
@@ -143,11 +158,6 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 	result = append(result, wwanCandidates...)
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
-}
-
-func isSupportedUSBModem(vendorID, productID string) bool {
-	return strings.EqualFold(strings.TrimSpace(vendorID), quectelVendorID) ||
-		IsDJI4GUSB(vendorID, productID)
 }
 
 // IsDJI4GUSB reports whether a USB identity belongs to the first-generation
@@ -252,7 +262,7 @@ func (d *SysFSDiscoverer) discoverWWAN(ctx context.Context) ([]Candidate, error)
 			Ports: group.ports, NetworkInterface: selectWWANNetworkInterface(d.SysRoot, group.index),
 		}
 		if len(group.ports) > 0 {
-			candidate.ATPort = group.ports[0]
+			candidate.ATPort = selectWWANATPort(group.ports)
 		}
 		if len(group.qmiNames) > 0 {
 			candidate.QMIControl = filepath.Join(d.DevRoot, group.qmiNames[0])
@@ -261,6 +271,20 @@ func (d *SysFSDiscoverer) discoverWWAN(ctx context.Context) ([]Candidate, error)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
+}
+
+// selectWWANATPort prefers the secondary AT port (…at1) over the primary
+// (…at0) when both exist, falling back to the first AT port otherwise. Some
+// Qualcomm MHI modems (notably the UFI dongle behind the OpenStick 410) answer
+// on at1 immediately while at0 delays every response by 10-20 seconds, so the
+// secondary port is the usable AT channel.
+func selectWWANATPort(ports []Port) Port {
+	for _, port := range ports {
+		if port.InterfaceNumber == 1 {
+			return port
+		}
+	}
+	return ports[0]
 }
 
 func parseWWANPortName(name string) (index, kind string, portIndex int, ok bool) {
@@ -402,7 +426,34 @@ func readSerialAliases(root string) map[string]string {
 	return result
 }
 
-func candidateID(productID, serialNumber, usbName string) string {
+// qmiWWANBoundDevices returns the set of USB device paths (for example "1-6"
+// or the hub-attached "1-4.3.2") that currently have at least one interface
+// bound to the kernel's qmi_wwan driver. Interface entries in the driver
+// directory are named "<device-path>:<interface>.<altsetting>", so the part
+// before the first colon is the owning USB device. The qmi_wwan driver only
+// binds Qualcomm QMI control interfaces, so membership doubles as a vendor-
+// neutral "this is a live QMI modem" signal.
+func (d *SysFSDiscoverer) qmiWWANBoundDevices() map[string]struct{} {
+	driverRoot := filepath.Join(d.SysRoot, "bus", "usb", "drivers", "qmi_wwan")
+	entries, err := os.ReadDir(driverRoot)
+	if err != nil {
+		return nil
+	}
+	devices := make(map[string]struct{})
+	for _, entry := range entries {
+		// The driver directory also holds control files (bind, unbind, uevent,
+		// module, new_id, ...); only names containing a colon are interfaces.
+		deviceName, _, ok := strings.Cut(entry.Name(), ":")
+		if !ok || deviceName == "" {
+			continue
+		}
+		devices[deviceName] = struct{}{}
+	}
+	return devices
+}
+
+func candidateID(vendorID, productID, serialNumber, usbName string) string {
+	prefix := "usb-" + sanitizeID(vendorID)
 	serialNumber = strings.TrimSpace(serialNumber)
 	if serialNumber != "" && !strings.EqualFold(serialNumber, "android") {
 		// A surprising number of EC20/EC25 carrier boards expose the same
@@ -411,9 +462,9 @@ func candidateID(productID, serialNumber, usbName string) string {
 		// to the same hub into one entry.  Include the physical USB topology in the
 		// discovery key; configured devices remain stable through ATMapper's
 		// USB-path/IMEI matching even when Linux renumbers ttyUSB nodes.
-		return "quectel-" + sanitizeID(serialNumber+"-"+usbName)
+		return prefix + "-" + sanitizeID(serialNumber+"-"+usbName)
 	}
-	return "quectel-" + sanitizeID(productID+"-"+usbName)
+	return prefix + "-" + sanitizeID(productID+"-"+usbName)
 }
 
 func sanitizeID(value string) string {

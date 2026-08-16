@@ -453,6 +453,62 @@ func TestSessionExecutePromptRejectsUnsafeInput(t *testing.T) {
 	}
 }
 
+// drainOrderTransport forwards to an inner Transport while recording
+// transport-level events, so a test can assert the exact order of Drain and
+// Write calls.
+type drainOrderTransport struct {
+	inner  Transport
+	events chan string
+}
+
+func (transport *drainOrderTransport) Write(payload []byte) (int, error) {
+	transport.events <- "write:" + string(payload)
+	return transport.inner.Write(payload)
+}
+
+func (transport *drainOrderTransport) Read(buffer []byte) (int, error) {
+	return transport.inner.Read(buffer)
+}
+
+func (transport *drainOrderTransport) Drain() error {
+	transport.events <- "drain"
+	return transport.inner.Drain()
+}
+
+func (transport *drainOrderTransport) ResetInputBuffer() error {
+	return transport.inner.ResetInputBuffer()
+}
+
+func (transport *drainOrderTransport) SetReadTimeout(timeout time.Duration) error {
+	return transport.inner.SetReadTimeout(timeout)
+}
+
+func (transport *drainOrderTransport) Close() error {
+	return transport.inner.Close()
+}
+
+// WWAN transports discard stale bytes left over from a timed-out command
+// inside Drain, so the session must call it before writing the next command;
+// otherwise a late reply (e.g. a slow CGSN response) would be mis-parsed as
+// the new command's output.
+func TestSessionDrainsBeforeWritingCommand(t *testing.T) {
+	inner := &transcriptTransport{steps: []transportStep{{
+		write:  "AT+CSQ\r",
+		chunks: []string{"\r\n+CSQ: 24,99\r\nOK\r\n"},
+	}}}
+	events := make(chan string, 8)
+	session := newTestSession(t, &drainOrderTransport{inner: inner, events: events})
+	if _, err := session.Execute(context.Background(), "AT+CSQ"); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if first := <-events; first != "drain" {
+		t.Fatalf("first transport event = %q, want drain before the command write", first)
+	}
+	if second := <-events; second != "write:AT+CSQ\r" {
+		t.Fatalf("second transport event = %q, want the command write", second)
+	}
+}
+
 func newTestSession(t *testing.T, transport Transport) *Session {
 	t.Helper()
 	session, err := NewSession(transport, SessionOptions{

@@ -1059,6 +1059,26 @@ func (s *Server) handleAT(w http.ResponseWriter, r *http.Request, id string) boo
 	defer cancel()
 	response, err := s.devices.ExecuteAT(ctx, id, command)
 	if err != nil {
+		var commandErr *modem.CommandError
+		if errors.As(err, &commandErr) {
+			// The modem answered with ERROR / +CME ERROR. An AT terminal must
+			// surface that text (including the CME detail) as a normal response;
+			// folding it into a 502 hides the real reason from the user.
+			text := strings.Join(commandErr.Lines, "\n")
+			if text != "" {
+				text += "\n"
+			}
+			text += commandErr.Final
+			writeJSON(w, http.StatusOK, map[string]any{
+				"data": map[string]any{
+					"response":    text,
+					"final":       commandErr.Final,
+					"duration_ms": 0,
+					"urcs":        []string{},
+				},
+			})
+			return true
+		}
 		s.writeDeviceError(w, err)
 		return true
 	}
