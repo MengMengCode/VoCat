@@ -144,6 +144,9 @@ func New(options Options) (*Server, error) {
 	server.loadUILanguage(context.Background())
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", server.handleLiveness)
+	mux.HandleFunc("/readyz", server.handleReadiness)
+	mux.HandleFunc("/metrics", server.handleMetrics)
 	mux.HandleFunc("/api/health", server.handleHealth)
 	mux.HandleFunc("/api/auth/login", server.handleLogin)
 	mux.HandleFunc("/api/auth/session", server.handleSession)
