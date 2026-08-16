@@ -77,6 +77,11 @@ func main() {
 			logger.Error("update failed", "error", err)
 			os.Exit(1)
 		}
+	case "doctor":
+		if err := runDoctor(rest); err != nil {
+			logger.Error("doctor failed", "error", err)
+			os.Exit(1)
+		}
 	case "menu":
 		if err := runMenu(logger); err != nil {
 			logger.Error("menu failed", "error", err)
