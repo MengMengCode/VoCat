@@ -534,7 +534,7 @@ func buildXFRMInstallPlan(config IPSecSAConfig) ([]xfrmOperation, error) {
 		for _, protocol := range flow.protocols {
 			operations = append(operations, xfrmOperation{
 				description: flow.description + " " + protocol + " policy",
-				arguments: xfrmPolicyArgs(flow, protocol, false),
+				arguments:   xfrmPolicyArgs(flow, protocol, false),
 			})
 		}
 	}
@@ -550,7 +550,7 @@ func buildXFRMCleanupPlan(config IPSecSAConfig) []xfrmOperation {
 			protocol := flow.protocols[protocolIndex]
 			operations = append(operations, xfrmOperation{
 				description: "delete " + flow.description + " " + protocol + " policy",
-				arguments: xfrmPolicyArgs(flow, protocol, true),
+				arguments:   xfrmPolicyArgs(flow, protocol, true),
 			})
 		}
 	}
@@ -578,7 +578,6 @@ func buildXFRMCleanupPlan(config IPSecSAConfig) []xfrmOperation {
 	}
 	return operations
 }
-
 
 func xfrmPolicyArgs(flow xfrmFlow, protocol string, delete bool) []string {
 	args := []string{
