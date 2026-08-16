@@ -178,6 +178,7 @@ func TestOutgoingLocalNumberUsesIMSPhoneContextAndMMTelHeaders(t *testing.T) {
 	for _, expected := range []string{
 		"INVITE tel:888;phone-context=ims.mnc033.mcc234.3gppnetwork.org SIP/2.0\r\n",
 		"To: <tel:888;phone-context=ims.mnc033.mcc234.3gppnetwork.org>\r\n",
+		"From: <sip:+447700900123@ims.mnc033.mcc234.3gppnetwork.org;user=phone>;tag=local-tag\r\n",
 		"P-Preferred-Identity: <tel:+447700900123>\r\n",
 		"P-Preferred-Service: " + mmtelServiceURN + "\r\n",
 		`Accept-Contact: *;+g.3gpp.icsi-ref="` + mmtelFeatureTag + `"` + "\r\n",
@@ -188,6 +189,19 @@ func TestOutgoingLocalNumberUsesIMSPhoneContextAndMMTelHeaders(t *testing.T) {
 		if !strings.Contains(wire, expected) {
 			t.Fatalf("INVITE omitted %q:\n%s", expected, wire)
 		}
+	}
+}
+
+func TestCallOriginatingIdentitiesFallBackToRegisteredIMPU(t *testing.T) {
+	session := &Session{
+		identity: identitySet{
+			domain: "ims.mnc033.mcc234.3gppnetwork.org",
+			public: "sip:234330000000001@ims.mnc033.mcc234.3gppnetwork.org",
+		},
+	}
+	from, preferred, source := session.callOriginatingIdentitiesLocked()
+	if from != session.identity.public || preferred != session.identity.public || source != "registered_impu" {
+		t.Fatalf("fallback identities = (%q, %q, %q)", from, preferred, source)
 	}
 }
 

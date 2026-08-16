@@ -82,7 +82,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	session.cseq++
 	routes := append([]string(nil), session.evidence.ServiceRoute...)
 	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
-	preferredIdentity := session.callPreferredIdentityLocked()
+	fromIdentity, preferredIdentity, identitySource := session.callOriginatingIdentitiesLocked()
 	session.mu.Unlock()
 	media, err := newRTPMedia(session.localMediaIP())
 	if err != nil {
@@ -90,7 +90,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	}
 	body := media.offerSDP(session.localMediaIP())
 	transportUpper := strings.ToUpper(session.transport)
-	from := "<" + session.identity.public + ">;tag=" + session.fromTag
+	from := "<" + fromIdentity + ">;tag=" + session.fromTag
 	to := "<" + target + ">"
 	lines := []string{
 		"INVITE " + target + " SIP/2.0",
@@ -143,6 +143,13 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	session.callMu.Lock()
 	session.calls[callID] = call
 	session.callMu.Unlock()
+	if session.provider != nil && session.provider.config.Logger != nil {
+		session.provider.config.Logger.Info("IMS call started",
+			"direction", "outgoing",
+			"identity_source", identitySource,
+			"target_scheme", strings.ToLower(strings.TrimSuffix(strings.SplitN(target, ":", 2)[0], ":")),
+		)
+	}
 	session.writeMu.Lock()
 	_, err = session.conn.Write(request)
 	session.writeMu.Unlock()
@@ -691,14 +698,17 @@ func callTargetURI(number, domain string) string {
 	return "tel:" + number + ";phone-context=" + strings.TrimSpace(domain)
 }
 
-// callPreferredIdentityLocked selects only a number that IMS explicitly
-// associated with this registration. It deliberately falls back to the IMPU
-// and never derives a telephone number from IMSI digits.
-func (session *Session) callPreferredIdentityLocked() string {
-	if number, _, ok := vowifi.ExtractAssociatedMSISDN(session.evidence); ok {
-		return "tel:" + number
+// callOriginatingIdentitiesLocked selects only a number that IMS explicitly
+// associated with this registration. 3GPP originating sessions use that
+// public identity in both From and P-Preferred-Identity; some TAS deployments
+// accept an IMSI IMPU at the P-CSCF and then terminate the session immediately.
+// The fallback deliberately remains the registered IMPU and never derives a
+// telephone number from IMSI digits.
+func (session *Session) callOriginatingIdentitiesLocked() (from, preferred, source string) {
+	if number, numberSource, ok := vowifi.ExtractAssociatedMSISDN(session.evidence); ok {
+		return "sip:" + number + "@" + session.identity.domain + ";user=phone", "tel:" + number, numberSource
 	}
-	return session.identity.public
+	return session.identity.public, session.identity.public, "registered_impu"
 }
 
 func (session *Session) pAccessNetworkInfo() string {
