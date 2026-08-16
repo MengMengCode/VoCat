@@ -2,24 +2,24 @@ package modem
 
 import "testing"
 
-func TestSupportedUSBModemIdentity(t *testing.T) {
+func TestIsDJI4GUSBIdentity(t *testing.T) {
 	tests := []struct {
 		name      string
 		vendorID  string
 		productID string
 		want      bool
 	}{
-		{name: "Quectel", vendorID: "2c7c", productID: "0125", want: true},
 		{name: "DJI 4G module", vendorID: "2ca3", productID: "4006", want: true},
 		{name: "DJI 4G module uppercase", vendorID: "2CA3", productID: "4006", want: true},
 		{name: "unrelated DJI device", vendorID: "2ca3", productID: "001f", want: false},
+		{name: "Quectel identity", vendorID: "2c7c", productID: "0125", want: false},
 		{name: "unrelated USB device", vendorID: "0403", productID: "6001", want: false},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := isSupportedUSBModem(test.vendorID, test.productID); got != test.want {
-				t.Fatalf("isSupportedUSBModem(%q, %q) = %v, want %v", test.vendorID, test.productID, got, test.want)
+			if got := IsDJI4GUSB(test.vendorID, test.productID); got != test.want {
+				t.Fatalf("IsDJI4GUSB(%q, %q) = %v, want %v", test.vendorID, test.productID, got, test.want)
 			}
 		})
 	}

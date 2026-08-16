@@ -108,8 +108,27 @@ func (transport *nativeWWANATTransport) Drain() error {
 		return io.ErrClosedPipe
 	}
 	// WWAN character-device writes are handed to the modem synchronously and
-	// have no termios output queue to drain.
-	return nil
+	// have no termios output queue to drain. A previous command that timed out
+	// can leave late bytes in the input buffer (e.g. a slow CGSN reply that
+	// arrives after the command deadline); discard them here so the next
+	// command starts from a clean stream instead of mis-parsing stale output.
+	buffer := make([]byte, 4096)
+	for {
+		fds := []unix.PollFd{{Fd: int32(transport.fd), Events: unix.POLLIN}}
+		ready, err := unix.Poll(fds, 0)
+		if err != nil {
+			return err
+		}
+		if ready == 0 || fds[0].Revents&unix.POLLIN == 0 {
+			return nil
+		}
+		if _, err := unix.Read(transport.fd, buffer); err != nil {
+			if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) {
+				continue
+			}
+			return err
+		}
+	}
 }
 
 func (transport *nativeWWANATTransport) ResetInputBuffer() error {
