@@ -101,6 +101,62 @@ func TestMergeConcatSegmentRedeliveryIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMergeConcatSegmentNormalizesCumulativeIMSPart(t *testing.T) {
+	first := strings.Repeat("安全提醒", 17)
+	want := first + "请通过官方渠道核实。"
+	_, extra, _, err := mergeConcatSegment(nil, first, concatExtra(t, 8, 2, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, normalized, changed, err := mergeConcatSegment(extra, want, concatExtra(t, 8, 2, 2))
+	if err != nil || !changed {
+		t.Fatalf("cumulative segment: body=%q changed=%v err=%v", body, changed, err)
+	}
+	if body != want {
+		t.Fatalf("body = %q, want cumulative text once %q", body, want)
+	}
+
+	// Redelivering the cumulative wire representation must compare equal to the
+	// normalized stored representation and must not churn the durable row id.
+	body, _, changed, err = mergeConcatSegment(normalized, want, concatExtra(t, 8, 2, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed || body != want {
+		t.Fatalf("redelivery: body=%q changed=%v, want %q/false", body, changed, want)
+	}
+}
+
+func TestMergeConcatSegmentNormalizesCumulativeIMSPartOutOfOrder(t *testing.T) {
+	first := strings.Repeat("甲", 67)
+	want := first + "尾段"
+	_, extra, _, err := mergeConcatSegment(nil, want, concatExtra(t, 12, 2, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _, changed, err := mergeConcatSegment(extra, first, concatExtra(t, 12, 2, 1))
+	if err != nil || !changed {
+		t.Fatalf("out-of-order segment: body=%q changed=%v err=%v", body, changed, err)
+	}
+	if body != want {
+		t.Fatalf("body = %q, want cumulative text once %q", body, want)
+	}
+}
+
+func TestMergeConcatSegmentKeepsEqualRepeatedPart(t *testing.T) {
+	_, extra, _, err := mergeConcatSegment(nil, "重复", concatExtra(t, 13, 2, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _, _, err := mergeConcatSegment(extra, "重复", concatExtra(t, 13, 2, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "重复重复" {
+		t.Fatalf("body = %q, want intentional equal segments preserved", body)
+	}
+}
+
 func TestMergeConcatSegmentWithoutHeaderPassesThrough(t *testing.T) {
 	extra, err := json.Marshal(map[string]any{"encoding": "gsm7"})
 	if err != nil {

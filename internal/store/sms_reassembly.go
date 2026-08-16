@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -94,9 +95,15 @@ func mergeConcatSegment(
 			}
 		}
 	}
-	prior, alreadyHad := parts[sequence]
-	changed = !alreadyHad || prior != segmentBody
+	// Some IMS stacks hand us a cumulative segment: sequence 2 contains the
+	// already-decoded text of sequence 1 followed by its own payload. Keep a
+	// snapshot so normalizing that representation remains idempotent on a later
+	// redelivery of the same segment.
+	previousParts := maps.Clone(parts)
+	normalizeCumulativeConcatParts(previousParts)
 	parts[sequence] = segmentBody
+	normalizeCumulativeConcatParts(parts)
+	changed = !maps.Equal(previousParts, parts)
 
 	sequences := make([]int, 0, len(parts))
 	for n := range parts {
@@ -129,4 +136,25 @@ func mergeConcatSegment(
 		return "", nil, false, fmt.Errorf("encode merged concat extra: %w", err)
 	}
 	return joined.String(), json.RawMessage(encoded), changed, nil
+}
+
+// normalizeCumulativeConcatParts converts cumulative IMS segment bodies back
+// into ordinary per-segment bodies. It only removes an exact, non-empty prefix
+// assembled from every preceding sequence starting at 1, and only when the
+// current value also contains additional text. That deliberately leaves equal
+// repeated segments and incomplete/out-of-order prefixes untouched.
+func normalizeCumulativeConcatParts(parts map[int]string) {
+	var prefix strings.Builder
+	for sequence := 1; ; sequence++ {
+		text, ok := parts[sequence]
+		if !ok {
+			return
+		}
+		assembled := prefix.String()
+		if assembled != "" && len(text) > len(assembled) && strings.HasPrefix(text, assembled) {
+			text = strings.TrimPrefix(text, assembled)
+			parts[sequence] = text
+		}
+		prefix.WriteString(text)
+	}
 }
