@@ -234,3 +234,48 @@ func TestCallResponseDiagnosticIncludesNetworkReason(t *testing.T) {
 		t.Fatalf("diagnostic = %q, want %q", got, want)
 	}
 }
+
+func TestRejectedInviteACKUsesOriginalTransaction(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	session := &Session{
+		provider:  &Provider{config: Config{UserAgent: "VoCat Test"}},
+		request:   vowifi.IMSRequest{Identity: vowifi.SIMIdentity{HomeMCC: "234", HomeMNC: "33"}},
+		identity:  identitySet{domain: "ims.mnc033.mcc234.3gppnetwork.org"},
+		transport: "tcp",
+		conn:      client,
+	}
+	call := &imsCall{
+		callID:       "call-1",
+		inviteTarget: "sip:888@ims.mnc033.mcc234.3gppnetwork.org",
+		from:         "<sip:+447700900123@ims.mnc033.mcc234.3gppnetwork.org>;tag=local",
+		to:           "<sip:888@ims.mnc033.mcc234.3gppnetwork.org>",
+		branch:       "original-branch",
+		cseq:         41,
+		routes:       []string{"<sip:pcscf.test;lr>"},
+	}
+	response := &sipResponse{StatusCode: 487, Headers: map[string][]string{
+		"to": {"<sip:888@ims.mnc033.mcc234.3gppnetwork.org>;tag=tas"},
+	}}
+	ackResult := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, 4096)
+		count, _ := peer.Read(buffer)
+		ackResult <- string(buffer[:count])
+	}()
+	if err := session.sendRejectedInviteACK(call, response); err != nil {
+		t.Fatal(err)
+	}
+	ack := <-ackResult
+	for _, expected := range []string{
+		"ACK sip:888@ims.mnc033.mcc234.3gppnetwork.org SIP/2.0\r\n",
+		"branch=z9hG4bKoriginal-branch;rport",
+		"To: <sip:888@ims.mnc033.mcc234.3gppnetwork.org>;tag=tas\r\n",
+		"CSeq: 41 ACK\r\n",
+	} {
+		if !strings.Contains(ack, expected) {
+			t.Fatalf("rejected INVITE ACK omitted %q:\n%s", expected, ack)
+		}
+	}
+}

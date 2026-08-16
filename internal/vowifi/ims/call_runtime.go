@@ -225,13 +225,22 @@ func (session *Session) watchOutgoingCall(call *imsCall, key sipTransactionKey) 
 				session.setCallMediaReady(call.callID)
 				session.setCallState(call.callID, "active")
 				session.startSessionTimer(call, response.value("Session-Expires"))
-			} else if session.callWasTerminated(call.callID) {
-				// CANCEL normally causes the pending INVITE transaction to finish
-				// with 487 Request Terminated.  It is the expected response to our
-				// local hang-up, not a new network rejection.
-				session.finishCall(call.callID, "ended", response.StatusCode, diagnostic)
 			} else {
-				session.finishCall(call.callID, "failed", response.StatusCode, diagnostic)
+				if ackErr := session.sendRejectedInviteACK(call, response); ackErr != nil && session.provider != nil && session.provider.config.Logger != nil {
+					session.provider.config.Logger.Warn("IMS rejected INVITE ACK failed",
+						"carrier_profile", vowifi.ResolveCarrierProfile(session.request.Identity).ID,
+						"sip_status", response.StatusCode,
+						"error", safeSIPDiagnostic(ackErr.Error()),
+					)
+				}
+				if session.callWasTerminated(call.callID) {
+					// CANCEL normally causes the pending INVITE transaction to finish
+					// with 487 Request Terminated.  It is the expected response to our
+					// local hang-up, not a new network rejection.
+					session.finishCall(call.callID, "ended", response.StatusCode, diagnostic)
+				} else {
+					session.finishCall(call.callID, "failed", response.StatusCode, diagnostic)
+				}
 			}
 			return
 		}
@@ -419,6 +428,52 @@ func (session *Session) sendACK(call *imsCall) error {
 	request := session.buildDialogRequest(call, "ACK", call.cseq)
 	session.writeMu.Lock()
 	_, err := session.conn.Write(request)
+	session.writeMu.Unlock()
+	return err
+}
+
+// sendRejectedInviteACK acknowledges a non-2xx final response using the
+// original INVITE transaction branch and request URI. Unlike a 2xx ACK this is
+// part of the INVITE transaction; sending a dialog-style ACK with a new branch
+// leaves the P-CSCF retransmitting the rejection and leaking transaction state.
+func (session *Session) sendRejectedInviteACK(call *imsCall, response *sipResponse) error {
+	if call == nil || response == nil || response.StatusCode < 300 {
+		return nil
+	}
+	if session == nil || session.conn == nil {
+		return errors.New("ims: SIP connection unavailable for rejected INVITE ACK")
+	}
+	target := call.inviteTarget
+	if target == "" {
+		target = call.target
+	}
+	to := strings.TrimSpace(response.value("To"))
+	if to == "" {
+		to = call.to
+	}
+	lines := []string{
+		"ACK " + target + " SIP/2.0",
+		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(session.transport), session.conn.LocalAddr().String(), call.branch),
+		"Max-Forwards: 70",
+	}
+	session.mu.Lock()
+	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
+	session.mu.Unlock()
+	lines = append(lines, securityHeaders...)
+	for _, route := range call.routes {
+		lines = append(lines, "Route: "+route)
+	}
+	lines = append(lines,
+		"From: "+call.from,
+		"To: "+to,
+		"Call-ID: "+call.callID,
+		fmt.Sprintf("CSeq: %d ACK", call.cseq),
+		"P-Access-Network-Info: "+session.pAccessNetworkInfo(),
+		"User-Agent: "+session.callUserAgent(),
+		"Content-Length: 0", "", "",
+	)
+	session.writeMu.Lock()
+	_, err := session.conn.Write([]byte(strings.Join(lines, "\r\n")))
 	session.writeMu.Unlock()
 	return err
 }
