@@ -375,7 +375,6 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 			return fmt.Errorf("unexpected start line %q", startLine)
 		}
 		for _, forbidden := range []string{
-			"p-access-network-info",
 			"p-visited-network-id",
 			"p-preferred-identity",
 		} {
@@ -386,6 +385,13 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 					headers[forbidden],
 				)
 			}
+		}
+		if headers["p-access-network-info"] != "IEEE-802.11;i-wlan-node-id=000000000000;network-provided" {
+			return fmt.Errorf("REGISTER P-Access-Network-Info = %q", headers["p-access-network-info"])
+		}
+		if !strings.Contains(headers["allow"], "MESSAGE") ||
+			!strings.Contains(string(packet[:count]), "Accept-Contact: *;+g.3gpp.smsip") {
+			return fmt.Errorf("REGISTER omitted SMS-over-IMS capability: Allow=%q", headers["allow"])
 		}
 		if step == 0 {
 			if headers["authorization"] != "" {

@@ -287,14 +287,18 @@ func TestXFRMPlanContainsFourStatesAndProtocolSpecificPolicies(t *testing.T) {
 		"tcp 40666 50600 out": false,
 		"udp 40666 50600 out": false,
 		"tcp 50600 40666 in":  false,
-		"tcp 50601 55610 in":  false,
-		"udp 50601 55610 in":  false,
+		"tcp * 55610 in":      false,
+		"udp * 55610 in":      false,
 		"tcp 55610 50601 out": false,
 	}
 	for _, operation := range install[4:] {
+		sourcePort := "*"
+		if value, ok := optionalArgumentAfter(operation.arguments, "sport"); ok {
+			sourcePort = value
+		}
 		key := strings.Join([]string{
 			argumentAfter(t, operation.arguments, "proto"),
-			argumentAfter(t, operation.arguments, "sport"),
+			sourcePort,
 			argumentAfter(t, operation.arguments, "dport"),
 			argumentAfter(t, operation.arguments, "dir"),
 		}, " ")
@@ -395,6 +399,15 @@ func argumentAfter(t *testing.T, arguments []string, name string) string {
 	}
 	t.Fatalf("arguments %v omit %q", arguments, name)
 	return ""
+}
+
+func optionalArgumentAfter(arguments []string, name string) (string, bool) {
+	for index := 0; index+1 < len(arguments); index++ {
+		if arguments[index] == name {
+			return arguments[index+1], true
+		}
+	}
+	return "", false
 }
 
 func containsArguments(arguments []string, sequence ...string) bool {

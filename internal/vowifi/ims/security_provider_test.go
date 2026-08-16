@@ -531,8 +531,8 @@ func serveProtectedRegistrar(
 		return result, fmt.Errorf("protected Contact = %q", headers["contact"])
 	}
 	if strings.Contains(strings.ToUpper(startLine), "MESSAGE") ||
-		strings.Contains(strings.ToUpper(headers["allow"]), "MESSAGE") {
-		return result, errors.New("registration transaction advertised or sent MESSAGE")
+		!strings.Contains(strings.ToUpper(headers["allow"]), "MESSAGE") {
+		return result, errors.New("registration transaction did not advertise MESSAGE correctly")
 	}
 
 	if _, err := protectedConnection.Write(testResponse(
