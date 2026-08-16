@@ -20,7 +20,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -320,15 +322,61 @@ func RestartService(logger *slog.Logger) error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return fmt.Errorf("neither /etc/init.d/vocat nor systemctl is available")
 	}
+	unit := detectSystemdUnit(logger)
 	// Queue the restart and let systemctl exit before systemd stops this unit.
 	// A blocking restart command becomes part of vocat.service's own cgroup and
 	// waits for that same cgroup to terminate, creating a stop-timeout cycle.
-	cmd := exec.Command("systemctl", "restart", "--no-block", "vocat")
+	cmd := exec.Command("systemctl", "restart", "--no-block", unit)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		logger.Warn("systemctl restart failed", "error", err, "output", string(out))
-		return fmt.Errorf("systemctl restart vocat: %w", err)
+		return fmt.Errorf("systemctl restart %s: %w", unit, err)
 	}
 	return nil
+}
+
+var validSystemdUnit = regexp.MustCompile(`^[A-Za-z0-9_.@:-]+\.service$`)
+
+func detectSystemdUnit(logger *slog.Logger) string {
+	if configured := strings.TrimSpace(os.Getenv("VOCAT_SYSTEMD_UNIT")); validSystemdUnit.MatchString(configured) {
+		return configured
+	}
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		if unit := systemdUnitFromCgroup(string(data)); unit != "" {
+			return unit
+		}
+	}
+	// Some cgroup namespaces hide the unit name. Query loaded services and
+	// identify the unit whose MainPID is this process before falling back.
+	list := exec.Command("systemctl", "list-units", "--type=service", "--all", "--no-legend", "--plain")
+	if output, err := list.Output(); err == nil {
+		pid := strconv.Itoa(os.Getpid())
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 || !validSystemdUnit.MatchString(fields[0]) {
+				continue
+			}
+			show := exec.Command("systemctl", "show", fields[0], "--property=MainPID", "--value")
+			if value, showErr := show.Output(); showErr == nil && strings.TrimSpace(string(value)) == pid {
+				return fields[0]
+			}
+		}
+	}
+	if logger != nil {
+		logger.Warn("could not identify the current systemd unit; using vocat.service", "hint", "set VOCAT_SYSTEMD_UNIT for a custom unit")
+	}
+	return "vocat.service"
+}
+
+func systemdUnitFromCgroup(data string) string {
+	for _, line := range strings.Split(data, "\n") {
+		for _, part := range strings.Split(line, "/") {
+			part = strings.TrimSpace(part)
+			if validSystemdUnit.MatchString(part) {
+				return part
+			}
+		}
+	}
+	return ""
 }
 
 // resolveDefaultTarget returns the conventional install path when present,
