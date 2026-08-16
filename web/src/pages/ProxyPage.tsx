@@ -168,8 +168,8 @@ export default function ProxyPage() {
         },
       });
       setUpstreamProbe(data.probe || null);
-      if (data.probe?.udpAssociateOk) {
-        message.success(data.message || t("SOCKS5 鉴权和 UDP Associate 探测通过"));
+      if (data.probe?.udpExchangeOk) {
+        message.success(data.message || t("SOCKS5 认证与真实 UDP 往返探测通过"));
       } else {
         message.warning(data.message || t("代理不能承载 VoWiFi 所需的 UDP"));
       }
