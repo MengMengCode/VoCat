@@ -398,7 +398,7 @@ export default function DevicesPage() {
         modemImei: d.imei || "",
         usbPath: d.usbPath || "",
         deviceBackend: backend,
-		deviceType: isReader ? "usb_sim_reader" : prev.deviceType,
+		deviceType: d.deviceType || (isReader ? "usb_sim_reader" : prev.deviceType),
 		esimTransport: isReader ? "pcsc" : backend,
       };
     });

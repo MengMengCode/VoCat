@@ -387,6 +387,7 @@ func (s *Server) handleDiscoveredDevices(w http.ResponseWriter, r *http.Request)
 		result = append(result, map[string]any{
 			"hardware_kind":   candidate.HardwareKind,
 			"reader_name":     candidate.ReaderName,
+			"device_type":     discoveredDeviceType(candidate),
 			"discovery_key":   entry.ID,
 			"control_path":    controlPath,
 			"net_interface":   candidate.NetworkInterface,
@@ -1913,6 +1914,8 @@ func fillConfigFromPhysical(config *store.Device, entry device.Device) {
 		config.NetworkEnabled = false
 		config.SMSEnabled = true
 		config.VoWiFiEnabled = true
+	} else if modem.IsDJI4GUSB(candidate.VendorID, candidate.ProductID) {
+		config.DeviceType = store.DeviceTypeDJI4G
 	}
 	if config.Interface == "" {
 		config.Interface = candidate.NetworkInterface
@@ -1935,6 +1938,16 @@ func fillConfigFromPhysical(config *store.Device, entry device.Device) {
 	if config.ESIMTransport == "" {
 		config.ESIMTransport = config.DeviceBackend
 	}
+}
+
+func discoveredDeviceType(candidate modem.Candidate) string {
+	if candidate.HardwareKind == "pcsc" {
+		return store.DeviceTypeUSBSIMReader
+	}
+	if modem.IsDJI4GUSB(candidate.VendorID, candidate.ProductID) {
+		return store.DeviceTypeDJI4G
+	}
+	return ""
 }
 
 func modemSummary(snapshot *device.Snapshot, phone string, phoneSource string) map[string]any {

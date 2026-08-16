@@ -6,9 +6,27 @@ import (
 	"time"
 
 	"vocat/internal/device"
+	"vocat/internal/modem"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 )
+
+func TestFillConfigFromPhysicalClassifiesDJI4G(t *testing.T) {
+	config := store.Device{DeviceType: store.DeviceTypePCIeEC20EC25}
+	entry := device.Device{Candidate: modem.Candidate{
+		VendorID:  "2ca3",
+		ProductID: "4006",
+	}}
+
+	fillConfigFromPhysical(&config, entry)
+
+	if config.DeviceType != store.DeviceTypeDJI4G {
+		t.Fatalf("device type = %q, want %q", config.DeviceType, store.DeviceTypeDJI4G)
+	}
+	if got := discoveredDeviceType(entry.Candidate); got != store.DeviceTypeDJI4G {
+		t.Fatalf("discovered device type = %q, want %q", got, store.DeviceTypeDJI4G)
+	}
+}
 
 func TestConfiguredDeviceSummaryIgnoresVoWiFiRuntimeFromPreviousSIM(t *testing.T) {
 	database, err := store.Open(context.Background(), ":memory:")

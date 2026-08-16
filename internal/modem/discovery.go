@@ -11,7 +11,11 @@ import (
 	"strings"
 )
 
-const quectelVendorID = "2c7c"
+const (
+	quectelVendorID = "2c7c"
+	djiVendorID     = "2ca3"
+	dji4GProductID  = "4006"
+)
 
 type SysFSDiscoverer struct {
 	SysRoot string
@@ -70,13 +74,13 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			resolvedDevice = devicePath
 		}
 		vendorID := strings.ToLower(readTrimmed(filepath.Join(resolvedDevice, "idVendor")))
-		if vendorID != quectelVendorID {
+		productID := strings.ToLower(readTrimmed(filepath.Join(resolvedDevice, "idProduct")))
+		if !isSupportedUSBModem(vendorID, productID) {
 			continue
 		}
 
 		state := devices[deviceName]
 		if state == nil {
-			productID := strings.ToLower(readTrimmed(filepath.Join(resolvedDevice, "idProduct")))
 			serialNumber := readTrimmed(filepath.Join(resolvedDevice, "serial"))
 			state = &discoveredUSBDevice{
 				candidate: Candidate{
@@ -139,6 +143,19 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 	result = append(result, wwanCandidates...)
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
+}
+
+func isSupportedUSBModem(vendorID, productID string) bool {
+	return strings.EqualFold(strings.TrimSpace(vendorID), quectelVendorID) ||
+		IsDJI4GUSB(vendorID, productID)
+}
+
+// IsDJI4GUSB reports whether a USB identity belongs to the first-generation
+// DJI/Baiwang 4G module. It keeps the factory 2ca3:4006 identity usable without
+// requiring a persistent AT+QCFG USB identity rewrite to Quectel 2c7c:0125.
+func IsDJI4GUSB(vendorID, productID string) bool {
+	return strings.EqualFold(strings.TrimSpace(vendorID), djiVendorID) &&
+		strings.EqualFold(strings.TrimSpace(productID), dji4GProductID)
 }
 
 type discoveredWWANDevice struct {

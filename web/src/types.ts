@@ -174,6 +174,7 @@ export interface DeviceStatus {
 export interface DiscoveredDevice {
 	 hardwareKind?: string;
 	 readerName?: string;
+  deviceType?: DeviceType;
   discoveryKey: string;
   controlPath: string;
   netInterface: string;
