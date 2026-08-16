@@ -69,7 +69,12 @@ func (manager *Manager) readSnapshot(
 	if ccidErr != nil {
 		ccid, ccidErr = manager.command(ctx, client, "AT+QCCID")
 	}
-	if ccidErr != nil && strings.EqualFold(strings.TrimSpace(backend), "qmi") && isNativeQMICandidate(candidate) {
+	if ccidErr != nil && strings.EqualFold(strings.TrimSpace(backend), "qmi") && isNativeQMICandidate(candidate) &&
+		strings.EqualFold(strings.TrimSpace(snapshot.SIMStatus), "READY") {
+		// Without a READY SIM the QMI UIM ICCID read blocks until its (long)
+		// timeout, and every refresh holds the device lock while it does so,
+		// starving the AT terminal. Only fall back to QMI when the AT CPIN
+		// probe already proved a card is present.
 		qmiContext, cancelQMI := manager.withTimeout(ctx, manager.commandTimeout*5)
 		qmiICCID, qmiErr := manager.readNativeQMIICCID(qmiContext, candidate)
 		cancelQMI()
@@ -186,14 +191,18 @@ func (manager *Manager) readSnapshot(
 		snapshot.RegistrationSource = "COPS"
 	}
 	if snapshot.IMEI == "" {
-		response, ok := optional("AT+CGSN")
-		if ok {
-			snapshot.IMEI = parseIdentifier(
-				response,
-				[]string{"+CGSN:", "+GSN:"},
-				14,
-				17,
-			)
+		// AT+CGSN on some MHI modems (the UFI dongle behind the OpenStick 410)
+		// returns the IMEI line but never a final OK, so it would block until the
+		// caller's deadline (30s during a periodic refresh) and starve every other
+		// device operation behind the lock. Give it an independent short timeout
+		// and let the WWAN transport's drain discard the trailing stale bytes.
+		cgsnCtx, cancelCGSN := context.WithTimeout(ctx, manager.commandTimeout)
+		cgsnResponse, cgsnErr := manager.command(cgsnCtx, client, "AT+CGSN")
+		cancelCGSN()
+		if cgsnErr == nil {
+			if imei := parseIdentifier(cgsnResponse, []string{"+CGSN:", "+GSN:"}, 14, 17); imei != "" {
+				snapshot.IMEI = imei
+			}
 		}
 	}
 	if snapshot.IMEI == "" && strings.EqualFold(strings.TrimSpace(backend), "qmi") && isNativeQMICandidate(candidate) {
@@ -211,7 +220,6 @@ func (manager *Manager) readSnapshot(
 		// Preserve a prior successful read across a transient QMI/AT failure.
 		snapshot.IMEI = previousSnapshot.IMEI
 	}
-
 	if response, ok := optional("AT+CFUN?"); ok {
 		if mode, found := parseCFUN(response); found {
 			snapshot.OperatingMode = mode

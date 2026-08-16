@@ -148,13 +148,18 @@ func (session *Session) executeLocked(ctx context.Context, command string) (Resp
 	if err := ctx.Err(); err != nil {
 		return response, err
 	}
-	if err := writeAll(session.transport, []byte(command+"\r")); err != nil {
-		session.poisonLocked()
-		return response, fmt.Errorf("write %s: %w", command, err)
-	}
+	// Drain the transport before writing the command. Serial transports wait
+	// for any pending output here (a no-op after a synchronous command), while
+	// WWAN transports discard bytes left over from a previous command that
+	// timed out; without this, a late reply (e.g. a slow CGSN response) would
+	// be mis-parsed as this command's output.
 	if err := drainTransport(ctx, session.transport); err != nil {
 		session.poisonLocked()
 		return response, fmt.Errorf("drain %s: %w", command, err)
+	}
+	if err := writeAll(session.transport, []byte(command+"\r")); err != nil {
+		session.poisonLocked()
+		return response, fmt.Errorf("write %s: %w", command, err)
 	}
 	return session.readFinalLocked(ctx, started, command, "", response)
 }
