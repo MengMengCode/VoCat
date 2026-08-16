@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -27,6 +28,8 @@ type transcriptTransport struct {
 	unexpected    error
 	writePartial  bool
 	writeEvents   chan string
+	drainErrors   []error
+	drainCount    int
 }
 
 func (transport *transcriptTransport) Write(payload []byte) (int, error) {
@@ -114,7 +117,17 @@ func (transport *transcriptTransport) Read(buffer []byte) (int, error) {
 	return 0, nil
 }
 
-func (transport *transcriptTransport) Drain() error { return nil }
+func (transport *transcriptTransport) Drain() error {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	transport.drainCount++
+	if len(transport.drainErrors) == 0 {
+		return nil
+	}
+	err := transport.drainErrors[0]
+	transport.drainErrors = transport.drainErrors[1:]
+	return err
+}
 
 func (transport *transcriptTransport) ResetInputBuffer() error {
 	transport.mu.Lock()
@@ -136,6 +149,31 @@ func (transport *transcriptTransport) Close() error {
 	transport.closed = true
 	transport.mu.Unlock()
 	return nil
+}
+
+func TestSessionRetriesInterruptedDrain(t *testing.T) {
+	transport := &transcriptTransport{
+		steps: []transportStep{{
+			write:  "AT+CSQ\r",
+			chunks: []string{"\r\nAT+CSQ\r\n+CSQ: 24,99\r\nOK\r\n"},
+		}},
+		drainErrors: []error{syscall.EINTR},
+	}
+	session, err := NewSession(transport, SessionOptions{})
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+
+	response, err := session.Execute(context.Background(), "AT+CSQ")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if response.Final != "OK" {
+		t.Fatalf("response final = %q", response.Final)
+	}
+	if transport.drainCount != 2 {
+		t.Fatalf("Drain() calls = %d, want 2", transport.drainCount)
+	}
 }
 
 func TestSessionSeparatesInterleavedURCs(t *testing.T) {

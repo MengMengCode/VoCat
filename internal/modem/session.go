@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -151,7 +152,7 @@ func (session *Session) executeLocked(ctx context.Context, command string) (Resp
 		session.poisonLocked()
 		return response, fmt.Errorf("write %s: %w", command, err)
 	}
-	if err := session.transport.Drain(); err != nil {
+	if err := drainTransport(ctx, session.transport); err != nil {
 		session.poisonLocked()
 		return response, fmt.Errorf("drain %s: %w", command, err)
 	}
@@ -178,7 +179,7 @@ func (session *Session) executePromptLocked(
 		session.poisonLocked()
 		return response, fmt.Errorf("write %s: %w", command, err)
 	}
-	if err := session.transport.Drain(); err != nil {
+	if err := drainTransport(ctx, session.transport); err != nil {
 		session.poisonLocked()
 		return response, fmt.Errorf("drain %s: %w", command, err)
 	}
@@ -203,12 +204,27 @@ func (session *Session) executePromptLocked(
 		response.Duration = time.Since(started)
 		return response, fmt.Errorf("terminate %s payload: %w", command, err)
 	}
-	if err := session.transport.Drain(); err != nil {
+	if err := drainTransport(ctx, session.transport); err != nil {
 		session.poisonLocked()
 		response.Duration = time.Since(started)
 		return response, fmt.Errorf("drain %s payload: %w", command, err)
 	}
 	return session.readFinalLocked(ctx, started, command, string(payload), response)
+}
+
+// drainTransport retries tcdrain/TCSBRK when the kernel interrupts it with a
+// signal. go.bug.st/serial already retries EINTR for Read, but its Linux
+// Drain implementation currently returns the transient error directly.
+func drainTransport(ctx context.Context, transport Transport) error {
+	for {
+		err := transport.Drain()
+		if !errors.Is(err, syscall.EINTR) {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 }
 
 func (session *Session) readFinalLocked(
