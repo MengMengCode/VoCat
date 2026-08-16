@@ -76,13 +76,14 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 		return vowifi.Call{}, err
 	}
 	callID := callToken + "@" + addressHost(session.conn.LocalAddr())
-	target := callTargetURI(number, session.identity.domain)
+	carrierProfile := vowifi.ResolveCarrierProfile(session.request.Identity)
+	target := callTargetURI(number, session.identity.domain, carrierProfile)
 	session.mu.Lock()
 	cseq := session.cseq
 	session.cseq++
 	routes := append([]string(nil), session.evidence.ServiceRoute...)
 	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
-	fromIdentity, preferredIdentity, identitySource := session.callOriginatingIdentitiesLocked()
+	fromIdentity, preferredIdentity, identitySource := session.callOriginatingIdentitiesLocked(carrierProfile)
 	session.mu.Unlock()
 	media, err := newRTPMedia(session.localMediaIP())
 	if err != nil {
@@ -691,11 +692,19 @@ func (session *Session) dialogContactHeader() string {
 	return contact + `;audio;+g.3gpp.icsi-ref="` + mmtelFeatureTag + `"`
 }
 
-func callTargetURI(number, domain string) string {
+func callTargetURI(number, domain string, profile vowifi.CarrierProfile) string {
+	domain = strings.TrimSpace(domain)
+	if profile.IMSDialURIScheme == "sip" {
+		target := "sip:" + number + "@" + domain
+		if profile.IMSUserEqPhone {
+			target += ";user=phone"
+		}
+		return target
+	}
 	if strings.HasPrefix(number, "+") {
 		return "tel:" + number
 	}
-	return "tel:" + number + ";phone-context=" + strings.TrimSpace(domain)
+	return "tel:" + number + ";phone-context=" + domain
 }
 
 // callOriginatingIdentitiesLocked selects only a number that IMS explicitly
@@ -704,9 +713,13 @@ func callTargetURI(number, domain string) string {
 // accept an IMSI IMPU at the P-CSCF and then terminate the session immediately.
 // The fallback deliberately remains the registered IMPU and never derives a
 // telephone number from IMSI digits.
-func (session *Session) callOriginatingIdentitiesLocked() (from, preferred, source string) {
+func (session *Session) callOriginatingIdentitiesLocked(profile vowifi.CarrierProfile) (from, preferred, source string) {
 	if number, numberSource, ok := vowifi.ExtractAssociatedMSISDN(session.evidence); ok {
-		return "sip:" + number + "@" + session.identity.domain + ";user=phone", "tel:" + number, numberSource
+		from = "sip:" + number + "@" + session.identity.domain
+		if profile.IMSUserEqPhone {
+			from += ";user=phone"
+		}
+		return from, "tel:" + number, numberSource
 	}
 	return session.identity.public, session.identity.public, "registered_impu"
 }

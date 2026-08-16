@@ -33,6 +33,11 @@ type CarrierProfile struct {
 	IMSRegisterProfile string
 	IMSIPSecEncryption string
 	SMSCenter          string
+	PANICountry        string
+	PANINode           string
+	IMSDialURIScheme   string
+	IMSUserEqPhone     bool
+	IMSVoiceCodecs     []string
 }
 
 type carrierProfileDocument struct {
@@ -75,11 +80,16 @@ type carrierProfileIKE struct {
 }
 
 type carrierProfileIMS struct {
-	Transport       string `json:"transport"`
-	IdentityProfile string `json:"identity_profile"`
-	RegisterProfile string `json:"register_profile"`
-	IPSecEncryption string `json:"ipsec_encryption"`
-	SMSCenter       string `json:"sms_center"`
+	Transport       string   `json:"transport"`
+	IdentityProfile string   `json:"identity_profile"`
+	RegisterProfile string   `json:"register_profile"`
+	IPSecEncryption string   `json:"ipsec_encryption"`
+	SMSCenter       string   `json:"sms_center"`
+	PANICountry     string   `json:"pani_country"`
+	PANINode        string   `json:"pani_node"`
+	DialURIScheme   string   `json:"dial_uri_scheme"`
+	UserEqPhone     *bool    `json:"user_eq_phone"`
+	VoiceCodecs     []string `json:"voice_codecs"`
 }
 
 //go:embed carrier_profiles.json
@@ -140,6 +150,20 @@ func validCarrierProfileRule(rule carrierProfileRule) bool {
 		encryption != "aes-cbc" && encryption != "null" {
 		return false
 	}
+	if country := strings.ToUpper(strings.TrimSpace(rule.IMS.PANICountry)); country != "" &&
+		(len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z') {
+		return false
+	}
+	if scheme := strings.ToLower(strings.TrimSpace(rule.IMS.DialURIScheme)); scheme != "" && scheme != "tel" && scheme != "sip" {
+		return false
+	}
+	for _, codec := range rule.IMS.VoiceCodecs {
+		switch strings.ToUpper(strings.TrimSpace(codec)) {
+		case "PCMA", "PCMU", "AMR", "AMR-WB":
+		default:
+			return false
+		}
+	}
 	return true
 }
 
@@ -155,6 +179,8 @@ func ResolveCarrierProfile(identity SIMIdentity) CarrierProfile {
 		IMSIdentityProfile: IMSProfileStandard,
 		IMSRegisterProfile: IMSProfileStandard,
 		IMSIPSecEncryption: "aes-cbc",
+		IMSDialURIScheme:   "tel",
+		IMSVoiceCodecs:     []string{"PCMA", "PCMU"},
 	}
 	bestScore := -1
 	for _, rule := range builtinCarrierProfiles {
@@ -256,7 +282,35 @@ func applyCarrierProfileRule(base CarrierProfile, rule carrierProfileRule, sourc
 		base.IMSIPSecEncryption = value
 	}
 	base.SMSCenter = strings.TrimSpace(rule.IMS.SMSCenter)
+	base.PANICountry = strings.ToUpper(strings.TrimSpace(rule.IMS.PANICountry))
+	base.PANINode = strings.TrimSpace(rule.IMS.PANINode)
+	if value := strings.ToLower(strings.TrimSpace(rule.IMS.DialURIScheme)); value != "" {
+		base.IMSDialURIScheme = value
+	}
+	if rule.IMS.UserEqPhone != nil {
+		base.IMSUserEqPhone = *rule.IMS.UserEqPhone
+	}
+	if len(rule.IMS.VoiceCodecs) > 0 {
+		base.IMSVoiceCodecs = normalizeVoiceCodecs(rule.IMS.VoiceCodecs)
+	}
 	return base
+}
+
+func normalizeVoiceCodecs(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.ToUpper(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func canonicalPLMN(mcc, mnc string) string {

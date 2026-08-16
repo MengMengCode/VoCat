@@ -176,9 +176,9 @@ func TestOutgoingLocalNumberUsesIMSPhoneContextAndMMTelHeaders(t *testing.T) {
 	wire := <-wireResult
 
 	for _, expected := range []string{
-		"INVITE tel:888;phone-context=ims.mnc033.mcc234.3gppnetwork.org SIP/2.0\r\n",
-		"To: <tel:888;phone-context=ims.mnc033.mcc234.3gppnetwork.org>\r\n",
-		"From: <sip:+447700900123@ims.mnc033.mcc234.3gppnetwork.org;user=phone>;tag=local-tag\r\n",
+		"INVITE sip:888@ims.mnc033.mcc234.3gppnetwork.org SIP/2.0\r\n",
+		"To: <sip:888@ims.mnc033.mcc234.3gppnetwork.org>\r\n",
+		"From: <sip:+447700900123@ims.mnc033.mcc234.3gppnetwork.org>;tag=local-tag\r\n",
 		"P-Preferred-Identity: <tel:+447700900123>\r\n",
 		"P-Preferred-Service: " + mmtelServiceURN + "\r\n",
 		`Accept-Contact: *;+g.3gpp.icsi-ref="` + mmtelFeatureTag + `"` + "\r\n",
@@ -199,7 +199,7 @@ func TestCallOriginatingIdentitiesFallBackToRegisteredIMPU(t *testing.T) {
 			public: "sip:234330000000001@ims.mnc033.mcc234.3gppnetwork.org",
 		},
 	}
-	from, preferred, source := session.callOriginatingIdentitiesLocked()
+	from, preferred, source := session.callOriginatingIdentitiesLocked(vowifi.CarrierProfile{})
 	if from != session.identity.public || preferred != session.identity.public || source != "registered_impu" {
 		t.Fatalf("fallback identities = (%q, %q, %q)", from, preferred, source)
 	}
@@ -207,11 +207,17 @@ func TestCallOriginatingIdentitiesFallBackToRegisteredIMPU(t *testing.T) {
 
 func TestCallTargetURIUsesPhoneContextOnlyForLocalNumbers(t *testing.T) {
 	domain := "ims.mnc033.mcc234.3gppnetwork.org"
-	if got := callTargetURI("888", domain); got != "tel:888;phone-context="+domain {
+	if got := callTargetURI("888", domain, vowifi.CarrierProfile{IMSDialURIScheme: "tel"}); got != "tel:888;phone-context="+domain {
 		t.Fatalf("local target = %q", got)
 	}
-	if got := callTargetURI("+447700900123", domain); got != "tel:+447700900123" {
+	if got := callTargetURI("+447700900123", domain, vowifi.CarrierProfile{IMSDialURIScheme: "tel"}); got != "tel:+447700900123" {
 		t.Fatalf("global target = %q", got)
+	}
+	if got := callTargetURI("888", domain, vowifi.CarrierProfile{IMSDialURIScheme: "sip"}); got != "sip:888@"+domain {
+		t.Fatalf("SIP target = %q", got)
+	}
+	if got := callTargetURI("888", domain, vowifi.CarrierProfile{IMSDialURIScheme: "sip", IMSUserEqPhone: true}); got != "sip:888@"+domain+";user=phone" {
+		t.Fatalf("SIP user=phone target = %q", got)
 	}
 }
 
