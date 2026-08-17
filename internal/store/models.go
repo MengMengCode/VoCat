@@ -610,6 +610,9 @@ func mergeJSONSecrets(
 func redactJSONValue(value any, replacement string) any {
 	switch typed := value.(type) {
 	case string:
+		if typed == "" {
+			return ""
+		}
 		return replacement
 	case []any:
 		result := make([]any, len(typed))

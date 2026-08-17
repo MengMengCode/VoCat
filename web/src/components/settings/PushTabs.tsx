@@ -6,7 +6,7 @@ import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { ChannelHeader, EmptyLine, Field, UrlListEditor } from "./controls";
 import { HEADER_NAME_SUGGESTIONS, nextHeaderRowId } from "./model";
-import type { BarkForm, EmailForm, HeaderRow, WebhookForm, WecomForm } from "./model";
+import type { BarkForm, EmailForm, HeaderRow, LarkForm, WebhookForm, WecomForm } from "./model";
 
 const HEADER_LIST_ID = "vocat-webhook-header-names";
 
@@ -21,11 +21,11 @@ function hasAnyUrl(urls: string[]): boolean {
   return Array.isArray(urls) && urls.some((url) => String(url || "").trim().length > 0);
 }
 
-function SMSOnlyHint() {
+function OneWayNotificationHint() {
   const { t } = useI18n();
   return (
     <div className="mb-4 rounded-lg bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-500 dark:bg-gray-800/60 dark:text-gray-400">
-      {t("该渠道只推送新收到的短信，不提供设备控制功能。每条短信都会单独推送，不按内容合并。")}
+      {t("该渠道仅用于单向通知，不提供设备控制功能。新短信会逐条推送；启用通知的自动任务也会推送执行结果。")}
     </div>
   );
 }
@@ -51,7 +51,7 @@ export function BarkTab({ value, onChange, testing, onTest }: PushChannelProps<B
           </Button>
         }
       />
-      <SMSOnlyHint />
+      <OneWayNotificationHint />
       <div className="space-y-4">
         <UrlListEditor
           urls={value.urls}
@@ -97,7 +97,7 @@ export function EmailTab({ value, onChange, testing, onTest }: PushChannelProps<
           </Button>
         }
       />
-      <SMSOnlyHint />
+      <OneWayNotificationHint />
       <div className="space-y-4">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-10">
           <Field label={t("SMTP 主机")} className="sm:col-span-5">
@@ -163,7 +163,7 @@ export function WebhookTab({ value, onChange, testing, onTest }: PushChannelProp
           </Button>
         }
       />
-      <SMSOnlyHint />
+      <OneWayNotificationHint />
       <div className="space-y-4">
         <UrlListEditor
           urls={value.urls}
@@ -284,7 +284,7 @@ export function WecomTab({ value, onChange, testing, onTest }: PushChannelProps<
           </Button>
         }
       />
-      <SMSOnlyHint />
+      <OneWayNotificationHint />
       <div className="space-y-4">
         <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-500 dark:bg-gray-800/60 dark:text-gray-400">
           {t("每个企业微信消息推送 Webhook URL 单独占一行，点击添加 URL 新增一行；不使用逗号、空格或换行分隔多个 URL。")}
@@ -300,7 +300,81 @@ export function WecomTab({ value, onChange, testing, onTest }: PushChannelProps<
           label={t("JSON 请求体模板")}
           hint={
             <>
-              {t("支持完整企业微信消息推送 JSON。变量必须作为 JSON 值使用，例如")} <code>{"{{message}}"}</code>{lang === "zh" ? "。" : "."}
+              {t("支持完整企业微信消息推送 JSON。变量必须作为 JSON 值使用，例如")} <code>{"{{message}}"}</code>{lang === "zh" ? "。" : ". "}
+              {t("可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。")}
+            </>
+          }
+        >
+          <Textarea
+            value={value.payloadTemplate}
+            onChange={(event) => onChange({ payloadTemplate: event.target.value })}
+            disabled={off}
+            rows={12}
+            className="font-mono text-xs"
+          />
+        </Field>
+      </div>
+    </div>
+  );
+}
+
+export function LarkTab({ value, onChange, testing, onTest }: PushChannelProps<LarkForm>) {
+  const { t, lang } = useI18n();
+  const off = !value.enabled;
+  const complete = !!value.url.trim() && !!value.payloadTemplate.trim() && (!value.signingEnabled || !!value.secret.trim());
+  return (
+    <div className="pt-2">
+      <ChannelHeader
+        title={t("启用飞书 / Lark 群自定义机器人通知")}
+        enabled={value.enabled}
+        onToggle={(enabled) => onChange({ enabled })}
+        actions={
+          <Button size="small" variant="primary" plain loading={testing} disabled={off || !complete} onClick={onTest}>
+            {t("测试通知")}
+          </Button>
+        }
+      />
+      <OneWayNotificationHint />
+      <div className="space-y-4">
+        <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-500 dark:bg-gray-800/60 dark:text-gray-400">
+          {t("支持飞书 open.feishu.cn 与国际版 Lark open.larksuite.com 的群自定义机器人 Webhook，无需创建应用。")}
+        </div>
+        <Field label={t("群机器人 Webhook URL")}>
+          <Input
+            value={value.url}
+            onChange={(event) => {
+              const url = event.target.value;
+              onChange(value.url === "********" && url !== value.url ? { url, secret: "" } : { url });
+            }}
+            disabled={off}
+            placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+          />
+        </Field>
+        <div className="space-y-1">
+          <label className="block text-xs font-bold uppercase tracking-wider text-gray-500">{t("启用签名校验")}</label>
+          <div className="flex h-10 items-center">
+            <Switch checked={value.signingEnabled} onChange={(signingEnabled) => onChange({ signingEnabled })} disabled={off} />
+          </div>
+        </div>
+        {value.signingEnabled ? (
+          <Field
+            label={t("签名密钥 (Secret)")}
+            hint={t("填写群机器人安全设置生成的签名密钥；Webhook URL 与密钥都会作为敏感配置并在页面中脱敏。")}
+          >
+            <Input
+              value={value.secret}
+              onChange={(event) => onChange({ secret: event.target.value })}
+              disabled={off}
+              type="password"
+              placeholder={t("群机器人签名密钥")}
+            />
+          </Field>
+        ) : null}
+        <Field
+          label={t("JSON 请求体模板")}
+          hint={
+            <>
+              {t("支持完整飞书 / Lark 群自定义机器人 JSON。变量必须作为 JSON 值使用，例如")} <code>{"{{message}}"}</code>{lang === "zh" ? "。" : ". "}
               {t("可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。")}
             </>
           }

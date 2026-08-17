@@ -13,6 +13,7 @@ import { useAuth } from "../store/auth";
 import {
   buildBarkPayload,
   buildEmailPayload,
+  buildLarkPayload,
   buildNotificationsPayload,
   buildWecomPayload,
   buildWebhookPayload,
@@ -21,7 +22,7 @@ import {
   type NotifyForms,
 } from "../components/settings/model";
 import { PushplusTab, TelegramTab } from "../components/settings/BotTabs";
-import { BarkTab, EmailTab, WebhookTab, WecomTab } from "../components/settings/PushTabs";
+import { BarkTab, EmailTab, LarkTab, WebhookTab, WecomTab } from "../components/settings/PushTabs";
 import { PluginsCard } from "../components/settings/PluginsCard";
 import { HTTPSCard } from "../components/settings/HTTPSCard";
 import { DeviceQuotaCard } from "../components/settings/DeviceQuotaCard";
@@ -36,6 +37,7 @@ const NOTIFY_TABS = [
   { key: "pushplus", label: "Pushplus" },
   { key: "webhook", label: "Webhook" },
   { key: "wecom", label: "企业微信消息推送" },
+  { key: "lark", label: "飞书 / Lark 群机器人" },
 ];
 
 const EMPTY_SYSTEM_INFO: SystemInfo = { version: "", buildTime: "", config: "" };
@@ -54,6 +56,7 @@ export default function SettingsPage() {
   const [testingBark, setTestingBark] = useState(false);
   const [testingEmail, setTestingEmail] = useState(false);
   const [testingWecom, setTestingWecom] = useState(false);
+  const [testingLark, setTestingLark] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [applyingUpdate, setApplyingUpdate] = useState(false);
@@ -265,10 +268,11 @@ export default function SettingsPage() {
     setSavingNotif(true);
     try {
       // vocat 后端 PUT 成功即返回完整配置文档（参考实现返回 {applied, warning}）
-      await api("/settings/notifications", {
+      const data = await api<NotificationSettings>("/settings/notifications", {
         method: "PUT",
         body: buildNotificationsPayload(forms),
       });
+      setForms(formsFromNotifications(data));
       message.success(t("通知配置已保存"));
     } catch (error) {
       message.error(apiMessage(error) || t("通知配置保存失败"));
@@ -337,6 +341,21 @@ export default function SettingsPage() {
       setTestingWecom(false);
     }
   }, [forms.wecom]);
+
+  const onTestLark = useCallback(async () => {
+    setTestingLark(true);
+    try {
+      await api("/settings/notifications/lark/test", {
+        method: "POST",
+        body: buildLarkPayload(forms.lark, true),
+      });
+      message.success(t("测试通知已发送"));
+    } catch (error) {
+      message.error(apiMessage(error) || t("飞书 / Lark 群机器人通知测试失败"));
+    } finally {
+      setTestingLark(false);
+    }
+  }, [forms.lark]);
 
   const onCheckUpdate = useCallback(async () => {
     setCheckingUpdate(true);
@@ -466,7 +485,7 @@ export default function SettingsPage() {
               <CardIcon>
                 <AlertRegular className="text-[24px]" />
               </CardIcon>
-              <CardTitle title={t("通知")} subtitle={t("Telegram / Bark / Email / Pushplus / Webhook / 企业微信消息推送")} />
+              <CardTitle title={t("通知")} subtitle={t("Telegram / Bark / Email / Pushplus / Webhook / 企业微信 / 飞书 / Lark 群机器人")} />
             </div>
             <Button variant="primary" loading={savingNotif} disabled={loadingNotif} onClick={onSaveNotifications} className="!border-0" icon={<CheckmarkRegular />}>
               {t("保存通知配置")}
@@ -499,6 +518,9 @@ export default function SettingsPage() {
               ) : null}
               {activeTab === "wecom" ? (
                 <WecomTab value={forms.wecom} onChange={(p) => updateChannel("wecom", p)} testing={testingWecom} onTest={onTestWecom} />
+              ) : null}
+              {activeTab === "lark" ? (
+                <LarkTab value={forms.lark} onChange={(p) => updateChannel("lark", p)} testing={testingLark} onTest={onTestLark} />
               ) : null}
             </div>
           )}

@@ -24,6 +24,8 @@ func DefaultNotificationSensitiveFields(channel string) []string {
 		return []string{"token"}
 	case "wecom":
 		return []string{"urls"}
+	case "lark":
+		return []string{"url", "secret"}
 	default:
 		return nil
 	}

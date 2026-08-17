@@ -325,6 +325,7 @@ export const EN_DICT: Record<string, string> = {
   "Bark 测试失败": "Bark test failed",
   "Email 测试失败": "Email test failed",
   "企业微信消息推送测试失败": "WeCom message push test failed",
+  "飞书 / Lark 群机器人通知测试失败": "Feishu / Lark group bot notification test failed",
 
   // ---- 设置页：安全卡 ----
   安全: "Security",
@@ -394,8 +395,8 @@ export const EN_DICT: Record<string, string> = {
   "启用后会推送新短信，并允许指定管理员通过 Bot 查看状态、切卡、管理 WiFi Calling、发送短信和限时拨号。拨号只执行呼叫并自动挂断，不处理音频。":
     "When enabled, new SMS messages are pushed and the designated administrator can check status, switch profiles, manage WiFi Calling, send SMS, and place timed calls. Calls only dial and hang up automatically; audio is not processed.",
   "启用 Pushplus 推送": "Enable Pushplus",
-  "该渠道只推送新收到的短信，不提供设备控制功能。每条短信都会单独推送，不按内容合并。":
-    "This channel only pushes newly received SMS messages and provides no device controls. Every SMS is pushed separately and is not merged by content.",
+  "该渠道仅用于单向通知，不提供设备控制功能。新短信会逐条推送；启用通知的自动任务也会推送执行结果。":
+    "This channel is for one-way notifications only and provides no device controls. New SMS messages are delivered individually, and notification-enabled automatic tasks also send their results.",
   "例如 123456": "e.g. 123456",
   "接收短信通知和命令回复的私聊或群组 ID。群组 ID 可以是负数。":
     "Private chat or group ID that receives SMS notifications and command replies. Group IDs may be negative.",
@@ -424,7 +425,9 @@ export const EN_DICT: Record<string, string> = {
   "启用 Webhook 推送": "Enable Webhook",
   "企业微信消息推送": "WeCom Message Push",
   "启用企业微信消息推送": "Enable WeCom Message Push",
-  "Telegram / Bark / Email / Pushplus / Webhook / 企业微信消息推送": "Telegram / Bark / Email / Pushplus / Webhook / WeCom Message Push",
+  "飞书 / Lark 群机器人": "Feishu / Lark Group Bot",
+  "启用飞书 / Lark 群自定义机器人通知": "Enable Feishu / Lark Custom Group Bot Notifications",
+  "Telegram / Bark / Email / Pushplus / Webhook / 企业微信 / 飞书 / Lark 群机器人": "Telegram / Bark / Email / Pushplus / Webhook / WeCom / Feishu / Lark Group Bot",
   "目标 URLs": "Target URLs",
   "添加 URL": "Add URL",
   "尚未配置任何 Bark URL，点击右侧添加按钮。": "No Bark URLs yet. Click the add button on the right.",
@@ -436,6 +439,16 @@ export const EN_DICT: Record<string, string> = {
   "支持完整企业微信消息推送 JSON。变量必须作为 JSON 值使用，例如": "Supports a complete WeCom message push JSON payload. Use variables as JSON values, for example",
   "可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。":
     "Available variables: {{event}}, {{title}}, {{message}}, {{timestamp}}, {{content}}, {{number}}, {{device_id}}, {{device_name}}, {{device_label}}, {{time}}.",
+  "支持飞书 open.feishu.cn 与国际版 Lark open.larksuite.com 的群自定义机器人 Webhook，无需创建应用。":
+    "Supports custom group bot Webhooks for Feishu at open.feishu.cn and international Lark at open.larksuite.com; no app is required.",
+  "群机器人 Webhook URL": "Group Bot Webhook URL",
+  启用签名校验: "Enable Signature Verification",
+  "签名密钥 (Secret)": "Signing Secret",
+  "填写群机器人安全设置生成的签名密钥；Webhook URL 与密钥都会作为敏感配置并在页面中脱敏。":
+    "Enter the signing secret generated in the group bot security settings. The Webhook URL and secret are treated as sensitive and masked in the UI.",
+  群机器人签名密钥: "Group bot signing secret",
+  "支持完整飞书 / Lark 群自定义机器人 JSON。变量必须作为 JSON 值使用，例如":
+    "Supports a complete Feishu / Lark custom group bot JSON payload. Use variables as JSON values, for example",
   "分组 (Group)": "Group",
   "例如 vocat": "e.g. vocat",
   "iOS 设备上的通知分组。": "Notification group on iOS devices.",

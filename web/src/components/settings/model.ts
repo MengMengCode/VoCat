@@ -59,10 +59,25 @@ export interface WecomForm {
 	payloadTemplate: string;
 }
 
+export interface LarkForm {
+	enabled: boolean;
+	url: string;
+	signingEnabled: boolean;
+	secret: string;
+	payloadTemplate: string;
+}
+
 export const DEFAULT_WECOM_PAYLOAD_TEMPLATE = `{
   "msgtype": "text",
   "text": {
     "content": {{message}}
+  }
+}`;
+
+export const DEFAULT_LARK_PAYLOAD_TEMPLATE = `{
+  "msg_type": "text",
+  "content": {
+    "text": {{message}}
   }
 }`;
 
@@ -73,6 +88,7 @@ export interface NotifyForms {
 	email: EmailForm;
 	pushplus: PushplusForm;
 	wecom: WecomForm;
+	lark: LarkForm;
 }
 
 // 系统保留头，自定义同名头会被忽略（品牌 vocat）
@@ -148,6 +164,7 @@ export function formsFromNotifications(data: Partial<NotificationSettings>): Not
 	const email = asRecord(data.email);
 	const pushplus = asRecord(data.pushplus);
 	const wecom = asRecord(data.wecom);
+	const lark = asRecord(data.lark);
   return {
     telegram: {
       enabled: !!telegram.enabled,
@@ -196,6 +213,13 @@ export function formsFromNotifications(data: Partial<NotificationSettings>): Not
 			enabled: !!wecom.enabled,
 			urls: strList(wecom.urls),
 			payloadTemplate: str(wecom.payloadTemplate ?? wecom.payload_template) || DEFAULT_WECOM_PAYLOAD_TEMPLATE,
+		},
+		lark: {
+			enabled: !!lark.enabled,
+			url: str(lark.url),
+			signingEnabled: !!lark.signingEnabled,
+			secret: lark.signingEnabled ? str(lark.secret) : "",
+			payloadTemplate: str(lark.payloadTemplate ?? lark.payload_template) || DEFAULT_LARK_PAYLOAD_TEMPLATE,
 		},
 	};
 }
@@ -255,6 +279,24 @@ export function buildWecomPayload(form: WecomForm, forTest = false) {
 	};
 }
 
+export function buildLarkPayload(form: LarkForm, forTest = false) {
+	const payload: {
+		enabled: boolean;
+		url?: string;
+		signing_enabled: boolean;
+		payload_template: string;
+		secret?: string;
+	} = {
+		enabled: !!form.enabled,
+		signing_enabled: !!form.signingEnabled,
+		payload_template: String(form.payloadTemplate || ""),
+	};
+	const url = forTest ? String(form.url || "").trim() : String(form.url || "");
+	if (url) payload.url = url;
+	if (form.signingEnabled) payload.secret = String(form.secret || "");
+	return payload;
+}
+
 export function buildNotificationsPayload(forms: NotifyForms) {
   return {
     telegram: {
@@ -276,5 +318,6 @@ export function buildNotificationsPayload(forms: NotifyForms) {
     webhook: buildWebhookPayload(forms.webhook),
 		bark: buildBarkPayload(forms.bark),
 		wecom: buildWecomPayload(forms.wecom),
+		lark: buildLarkPayload(forms.lark),
 	};
 }

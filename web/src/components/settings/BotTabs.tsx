@@ -56,7 +56,7 @@ export function PushplusTab({ value, onChange }: ChannelProps<PushplusForm>) {
       <ChannelHeader title={t("启用 Pushplus 推送")} enabled={value.enabled} onToggle={(enabled) => onChange({ enabled })} />
       <div className="space-y-4">
         <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-500 dark:bg-gray-800/60 dark:text-gray-400">
-          {t("该渠道只推送新收到的短信，不提供设备控制功能。每条短信都会单独推送，不按内容合并。")}
+          {t("该渠道仅用于单向通知，不提供设备控制功能。新短信会逐条推送；启用通知的自动任务也会推送执行结果。")}
         </div>
         <Field label="Token">
           <Input value={value.token} onChange={(e) => onChange({ token: e.target.value })} disabled={off} placeholder={t("Pushplus 用户的 Token")} />

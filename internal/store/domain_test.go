@@ -917,6 +917,56 @@ func TestNotificationArraySecretPreservation(t *testing.T) {
 	}
 }
 
+func TestLarkNotificationSecretsAreRedactedAndPreserved(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t, ":memory:")
+	originalURL := "https://open.feishu.cn/open-apis/bot/v2/hook/lark-token"
+	if err := database.UpsertNotificationSetting(ctx, NotificationSetting{
+		Channel: "lark", Enabled: true,
+		Config: json.RawMessage(`{"url":"` + originalURL + `","secret":"signing-secret"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setting, err := database.NotificationSetting(ctx, "lark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var redacted map[string]any
+	if err := json.Unmarshal(setting.Redacted().Config, &redacted); err != nil {
+		t.Fatal(err)
+	}
+	if redacted["url"] != SecretMask || redacted["secret"] != SecretMask {
+		t.Fatalf("redacted Lark config = %#v", redacted)
+	}
+	if err := database.UpsertNotificationSetting(ctx, NotificationSetting{
+		Channel: "lark", Enabled: true,
+		Config: json.RawMessage(`{"url":"` + SecretMask + `","secret":"` + SecretMask + `"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setting, err = database.NotificationSetting(ctx, "lark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(setting.Config, []byte(originalURL)) || !bytes.Contains(setting.Config, []byte("signing-secret")) {
+		t.Fatalf("stored Lark config = %s", setting.Config)
+	}
+}
+
+func TestNotificationRedactionKeepsEmptySensitiveValuesEmpty(t *testing.T) {
+	setting := NotificationSetting{
+		Config:          json.RawMessage(`{"url":"","secret":""}`),
+		SensitiveFields: []string{"url", "secret"},
+	}
+	var redacted map[string]any
+	if err := json.Unmarshal(setting.Redacted().Config, &redacted); err != nil {
+		t.Fatal(err)
+	}
+	if redacted["url"] != "" || redacted["secret"] != "" {
+		t.Fatalf("empty sensitive values were masked: %#v", redacted)
+	}
+}
+
 func TestEventsPoliciesAndTraffic(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t, ":memory:")

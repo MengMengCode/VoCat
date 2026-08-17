@@ -41,6 +41,7 @@ var notificationChannels = []string{
 	"bark",
 	"pushplus",
 	"wecom",
+	"lark",
 }
 
 var notificationFields = map[string]map[string]string{
@@ -64,6 +65,9 @@ var notificationFields = map[string]map[string]string{
 	},
 	"wecom": {
 		"urls": "strings", "payload_template": "string",
+	},
+	"lark": {
+		"url": "string", "signing_enabled": "boolean", "secret": "string", "payload_template": "string",
 	},
 }
 
@@ -240,6 +244,20 @@ func decodeNotificationConfig(
 	if err != nil {
 		return false, nil, fmt.Errorf("encode %s notification config: %w", channel, err)
 	}
+	if enabled && channel == "lark" {
+		var resolved map[string]any
+		if err := json.Unmarshal(config, &resolved); err != nil {
+			return false, nil, fmt.Errorf("decode lark notification config: %w", err)
+		}
+		signingEnabled, _ := resolved["signing_enabled"].(bool)
+		if signingEnabled && configString(resolved, "url") != store.SecretMask &&
+			configString(resolved, "secret") == store.SecretMask {
+			return false, nil, errors.New("lark.secret must be re-entered when lark.url changes")
+		}
+		if err := validateLarkNotificationConfig(resolved); err != nil {
+			return false, nil, err
+		}
+	}
 	return enabled, config, nil
 }
 
@@ -264,6 +282,9 @@ func validateNotificationField(
 		limit := 4096
 		if name == "text_template" {
 			limit = 32768
+		}
+		if channel == "lark" && name == "payload_template" {
+			limit = maxLarkPayloadBytes
 		}
 		if len(value) > limit || strings.ContainsAny(value, "\x00") {
 			return fmt.Errorf("%s is too long or contains invalid characters", field)
@@ -298,6 +319,16 @@ func validateNotificationField(
 		if channel == "wecom" && name == "payload_template" && value != "" {
 			if _, err := renderWecomPayload(value, wecomTestValues(time.Unix(0, 0))); err != nil {
 				return fmt.Errorf("%s is not a valid JSON template: %w", field, err)
+			}
+		}
+		if channel == "lark" && name == "payload_template" && value != "" {
+			if _, err := renderLarkPayload(value, larkTestValues(time.Unix(0, 0))); err != nil {
+				return fmt.Errorf("%s is not a valid JSON template: %w", field, err)
+			}
+		}
+		if channel == "lark" && name == "url" && value != "" && value != store.SecretMask {
+			if _, err := parseLarkWebhookURL(value); err != nil {
+				return fmt.Errorf("%s must be a valid Feishu or Lark group bot webhook URL: %w", field, err)
 			}
 		}
 	case "integer":
@@ -387,7 +418,7 @@ func (s *Server) handleNotificationTest(
 		writeError(w, http.StatusNotFound, "not_found", "notification channel was not found")
 		return
 	}
-	if channel != "webhook" && channel != "telegram" && channel != "email" && channel != "bark" && channel != "wecom" {
+	if channel != "webhook" && channel != "telegram" && channel != "email" && channel != "bark" && channel != "wecom" && channel != "lark" {
 		writeError(
 			w,
 			http.StatusNotImplemented,
@@ -441,6 +472,8 @@ func (s *Server) handleNotificationTest(
 		err = sendBarkNotificationTest(notificationContext, resolved)
 	case "wecom":
 		err = sendWecomNotificationTest(notificationContext, resolved)
+	case "lark":
+		err = sendLarkNotificationTest(notificationContext, resolved)
 	}
 	if err != nil {
 		redacted := store.RedactText(err.Error(), provider)
@@ -546,8 +579,8 @@ func (s *Server) resolveNotificationTestConfig(
 
 // mergeNotificationTestSecretValue preserves masked values submitted by the
 // settings form while allowing newly entered sensitive values in the same
-// request. WeCom URLs are a sensitive list, unlike the string-based secrets
-// used by the other notification channels.
+// request. Provider webhook URLs can be sensitive lists, unlike the
+// string-based secrets used by the other notification channels.
 func mergeNotificationTestSecretValue(incoming, existing any) any {
 	if incoming == nil {
 		return existing
@@ -595,6 +628,8 @@ func validateNotificationTestConfig(channel string, config map[string]any) error
 		}
 	case "wecom":
 		return validateWecomNotificationConfig(config)
+	case "lark":
+		return validateLarkNotificationConfig(config)
 	case "telegram":
 		token := configString(config, "bot_token")
 		if token == "" || token == store.SecretMask {

@@ -73,7 +73,7 @@ func decodeSettingsResponse(t *testing.T, recorder *httptest.ResponseRecorder) m
 	return response
 }
 
-func TestNotificationSettingsAlwaysReturnsFiveChannelsAndPreservesSecrets(t *testing.T) {
+func TestNotificationSettingsAlwaysReturnsKnownChannelsAndPreservesSecrets(t *testing.T) {
 	test := newSettingsAPITest(t)
 	recorder := test.request(t, http.MethodGet, "/api/settings/notifications", "")
 	if recorder.Code != http.StatusOK {
@@ -179,6 +179,73 @@ func TestWecomNotificationSettingsPreserveWebhookURLs(t *testing.T) {
 	}
 }
 
+func TestLarkNotificationSettingsPreserveSecrets(t *testing.T) {
+	test := newSettingsAPITest(t)
+	webhookURL := "https://open.feishu.cn/open-apis/bot/v2/hook/lark-token"
+	secret := "lark-signing-secret"
+	template := `{"msg_type":"text","content":{"text":{{message}}}}`
+	first, err := json.Marshal(map[string]any{
+		"lark": map[string]any{
+			"enabled": true, "url": webhookURL, "signing_enabled": true, "secret": secret, "payload_template": template,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := test.request(t, http.MethodPut, "/api/settings/notifications", string(first))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("first PUT status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	if bytes.Contains(recorder.Body.Bytes(), []byte("lark-token")) || bytes.Contains(recorder.Body.Bytes(), []byte(secret)) {
+		t.Fatalf("PUT response leaked Lark secrets: %s", recorder.Body)
+	}
+	response := decodeSettingsResponse(t, recorder)
+	lark := response["data"].(map[string]any)["lark"].(map[string]any)
+	if lark["url"] != store.SecretMask || lark["secret"] != store.SecretMask {
+		t.Fatalf("redacted Lark config = %#v", lark)
+	}
+
+	second, err := json.Marshal(map[string]any{
+		"lark": map[string]any{
+			"enabled": true, "url": store.SecretMask, "signing_enabled": true, "secret": store.SecretMask, "payload_template": template,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder = test.request(t, http.MethodPut, "/api/settings/notifications", string(second))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("masked PUT status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	stored, err := test.database.NotificationSetting(context.Background(), "lark")
+	if err != nil || !bytes.Contains(stored.Config, []byte("lark-token")) || !bytes.Contains(stored.Config, []byte(secret)) {
+		t.Fatalf("stored Lark config = %s, err = %v", stored.Config, err)
+	}
+}
+
+func TestUnsignedLarkNotificationDoesNotCreateSigningSecret(t *testing.T) {
+	test := newSettingsAPITest(t)
+	template := `{"msg_type":"text","content":{"text":{{message}}}}`
+	body, err := json.Marshal(map[string]any{
+		"lark": map[string]any{
+			"enabled": true, "url": "https://open.larksuite.com/open-apis/bot/v2/hook/token",
+			"signing_enabled": false, "payload_template": template,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := test.request(t, http.MethodPut, "/api/settings/notifications", string(body))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	response := decodeSettingsResponse(t, recorder)
+	lark := response["data"].(map[string]any)["lark"].(map[string]any)
+	if _, exists := lark["secret"]; exists {
+		t.Fatalf("unsigned Lark config unexpectedly contains a secret: %#v", lark)
+	}
+}
+
 func TestResolveWecomNotificationTestConfigAcceptsUnsavedWebhookURLs(t *testing.T) {
 	test := newSettingsAPITest(t)
 	raw, err := json.Marshal(map[string]any{
@@ -232,6 +299,45 @@ func TestResolveWecomNotificationTestConfigMergesMaskedAndUnsavedWebhookURLs(t *
 	}
 }
 
+func TestResolveLarkNotificationTestConfigMergesMaskedSecrets(t *testing.T) {
+	test := newSettingsAPITest(t)
+	storedURL := "https://open.larksuite.com/open-apis/bot/v2/hook/stored"
+	storedConfig, err := json.Marshal(map[string]any{
+		"url":              storedURL,
+		"signing_enabled":  true,
+		"secret":           "stored-signing-secret",
+		"payload_template": `{"msg_type":"text","content":{"text":{{message}}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := test.database.UpsertNotificationSetting(context.Background(), store.NotificationSetting{
+		Channel: "lark",
+		Config:  storedConfig,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"url":              store.SecretMask,
+		"signing_enabled":  true,
+		"secret":           store.SecretMask,
+		"payload_template": `{"msg_type":"text","content":{"text":{{message}}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, _, err := test.server.resolveNotificationTestConfig(context.Background(), "lark", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved["url"] != storedURL {
+		t.Fatalf("resolved URL = %#v", resolved["url"])
+	}
+	if resolved["secret"] != "stored-signing-secret" {
+		t.Fatalf("resolved secret = %#v", resolved["secret"])
+	}
+}
+
 func TestNotificationSettingsRejectsUnknownAndMalformedInput(t *testing.T) {
 	test := newSettingsAPITest(t)
 	cases := []struct {
@@ -282,6 +388,36 @@ func TestNotificationSettingsRejectsUnknownAndMalformedInput(t *testing.T) {
 		{
 			name: "header name with colon",
 			body: `{"webhook":{"enabled":true,"headers":{"X:Bad":"v"}}}`,
+			code: "invalid_notification_config",
+		},
+		{
+			name: "invalid Lark payload template",
+			body: `{"lark":{"enabled":true,"payload_template":"[]"}}`,
+			code: "invalid_notification_config",
+		},
+		{
+			name: "enabled Lark config without webhook URL",
+			body: `{"lark":{"enabled":true,"payload_template":"{\"msg_type\":\"text\"}"}}`,
+			code: "invalid_notification_config",
+		},
+		{
+			name: "enabled Lark signing without secret",
+			body: `{"lark":{"enabled":true,"url":"https://open.larksuite.com/open-apis/bot/v2/hook/token","signing_enabled":true,"payload_template":"{\"msg_type\":\"text\"}"}}`,
+			code: "invalid_notification_config",
+		},
+		{
+			name: "changed Lark URL with masked signing secret",
+			body: `{"lark":{"enabled":true,"url":"https://open.larksuite.com/open-apis/bot/v2/hook/new-token","signing_enabled":true,"secret":"********","payload_template":"{\"msg_type\":\"text\"}"}}`,
+			code: "invalid_notification_config",
+		},
+		{
+			name: "insecure Lark group bot URL",
+			body: `{"lark":{"enabled":false,"url":"http://open.larksuite.com/open-apis/bot/v2/hook/token"}}`,
+			code: "invalid_notification_config",
+		},
+		{
+			name: "non-Lark group bot URL",
+			body: `{"lark":{"enabled":false,"url":"https://example.com/open-apis/bot/v2/hook/token"}}`,
 			code: "invalid_notification_config",
 		},
 		{

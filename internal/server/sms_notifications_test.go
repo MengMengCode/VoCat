@@ -66,6 +66,31 @@ func TestWecomAutomaticTaskValuesLeaveSMSFieldsEmpty(t *testing.T) {
 	}
 }
 
+func TestLarkTemplateValuesCoverSMSAndAutomaticTasks(t *testing.T) {
+	message := smsNotification{
+		DeviceID: "device-1", DeviceName: "客厅", DeviceLabel: "EC20",
+		Number: "+447386", Time: time.Unix(1_700_000_000, 0), Content: "hello",
+	}
+	smsValues := larkSMSValues(message)
+	if smsValues["event"] != "sms.received" || smsValues["title"] != "收到新短信" ||
+		smsValues["message"] != message.Text() || smsValues["content"] != "hello" ||
+		smsValues["device_label"] != "EC20" {
+		t.Fatalf("Lark SMS values = %#v", smsValues)
+	}
+
+	taskValues := larkAutomaticTaskValues(automaticTaskNotification{
+		Title: "自动任务执行成功", Text: "任务已完成", Time: time.Unix(1_700_000_000, 0),
+	})
+	if taskValues["event"] != "automatic_task.completed" || taskValues["title"] != "自动任务执行成功" || taskValues["message"] != "任务已完成" {
+		t.Fatalf("Lark automatic task values = %#v", taskValues)
+	}
+	for _, name := range []string{"content", "number", "device_id", "device_name", "device_label", "time"} {
+		if taskValues[name] != "" {
+			t.Fatalf("%s = %q, want empty", name, taskValues[name])
+		}
+	}
+}
+
 func TestValidateSMSNotificationConfig(t *testing.T) {
 	valid := map[string]map[string]any{
 		"bark":     {"urls": []any{"https://api.day.app/key"}},
@@ -75,6 +100,12 @@ func TestValidateSMSNotificationConfig(t *testing.T) {
 		"wecom": {
 			"urls":             []any{"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=secret"},
 			"payload_template": `{"msgtype":"text","text":{"content":{{message}}}}`,
+		},
+		"lark": {
+			"url":              "https://open.larksuite.com/open-apis/bot/v2/hook/secret",
+			"signing_enabled":  true,
+			"secret":           "signing-secret",
+			"payload_template": `{"msg_type":"text","content":{"text":{{message}}}}`,
 		},
 	}
 	for channel, config := range valid {
