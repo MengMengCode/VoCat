@@ -33,14 +33,17 @@ type doctorReport struct {
 }
 
 type djiQMIRepairResult struct {
-	USBName          string `json:"usb_name"`
-	Interface        string `json:"interface"`
-	USBDevice        string `json:"usb_device"`
-	OriginalDriver   string `json:"original_driver,omitempty"`
-	ControlDevice    string `json:"control_device"`
-	NetworkInterface string `json:"network_interface,omitempty"`
-	QMIProbe         string `json:"qmi_probe"`
-	Attempts         int    `json:"attempts"`
+	USBName          string   `json:"usb_name"`
+	Interface        string   `json:"interface"`
+	USBDevice        string   `json:"usb_device"`
+	OriginalDriver   string   `json:"original_driver,omitempty"`
+	SerialInterfaces []string `json:"serial_interfaces,omitempty"`
+	SerialDevices    []string `json:"serial_devices,omitempty"`
+	ATDevice         string   `json:"at_device,omitempty"`
+	ControlDevice    string   `json:"control_device"`
+	NetworkInterface string   `json:"network_interface,omitempty"`
+	QMIProbe         string   `json:"qmi_probe"`
+	Attempts         int      `json:"attempts"`
 }
 
 func runDoctor(args []string) error {
@@ -49,7 +52,7 @@ func runDoctor(args []string) error {
 	proxyAddress := flags.String("proxy", "", "SOCKS5 host:port to test")
 	proxyUsername := flags.String("proxy-username", "", "SOCKS5 username")
 	passwordEnv := flags.String("proxy-password-env", "VOCAT_DOCTOR_PROXY_PASSWORD", "environment variable containing the proxy password")
-	repairDJI := flags.Bool("repair-dji-qmi", false, "rebind DJI 2ca3:4006 interface 4 to qmi_wwan and assert DTR (Linux/root only; no NV write)")
+	repairDJI := flags.Bool("repair-dji-qmi", false, "bind DJI 2ca3:4006 interfaces 0-3 to option and interface 4 to qmi_wwan, then assert DTR (Linux/root only; no NV write)")
 	jsonOutput := flags.Bool("json", false, "write machine-readable JSON")
 	timeout := flags.Duration("timeout", 12*time.Second, "per-probe timeout")
 	if err := flags.Parse(args); err != nil {
@@ -79,7 +82,7 @@ func runDoctor(args []string) error {
 		if err != nil {
 			return fmt.Errorf("repair DJI QMI binding: %w", err)
 		}
-		add("dji_qmi_repair", "passed", "dji_qmi_dtr_asserted", "DJI interface 4 was bound to qmi_wwan after a transient CDC DTR assertion; modem NV and USB identity were not changed", result)
+		add("dji_qmi_repair", "passed", "dji_usb_interfaces_repaired", "DJI serial interfaces 0-3 were bound to option and interface 4 to qmi_wwan after a transient CDC DTR assertion; modem NV and USB identity were not changed", result)
 	}
 
 	candidates, discoverErr := modem.NewSystemDiscoverer().Discover(ctx)
