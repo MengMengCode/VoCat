@@ -49,13 +49,13 @@ jobs:
             BUILD_TIME=${{ github.event.repository.updated_at }}
           cache-from: type=gha
 
-      - name: Verify ${{ matrix.platform }} runtime and smart-card stack
+      - name: Verify ${{ matrix.platform }} runtime, QMI, and smart-card stack
         run: |
           docker run --rm --platform '${{ matrix.platform }}' \
             vocat-smoke:${{ matrix.arch }} version
           docker run --rm --platform '${{ matrix.platform }}' \
             --entrypoint /bin/sh vocat-smoke:${{ matrix.arch }} -c \
-            'command -v pcscd && test -d /usr/lib/pcsc/drivers'
+            'command -v qmicli && command -v qmi-network && command -v pcscd && test -d /usr/lib/pcsc/drivers'
 
   build-and-push:
     needs: smoke

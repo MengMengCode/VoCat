@@ -197,6 +197,18 @@ managers. On Debian/Ubuntu, the equivalent manual setup is
 VoCat keeps the reader visible in the add-device dialog and reports the missing
 service or driver instead of silently hiding it.
 
+### QMI command-line utilities
+
+VoCat uses `qmicli` to verify that a QMI control channel is ready and
+`qmi-network` to manage packet-data sessions. The one-click installer installs
+and verifies the corresponding utilities automatically. For manual deployment,
+Debian/Ubuntu uses `apt install libqmi-utils`; Arch Linux uses
+`pacman -S libqmi`, and Alpine uses `apk add qmi-utils`.
+
+`vocat doctor --repair-dji-qmi` checks for `qmicli` before changing any USB
+driver binding or asserting DTR. If the utility is unavailable, the command
+stops with an installation hint and leaves the current device state untouched.
+
 ## Configuration
 
 Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applies `VOCAT_*` environment variables. Environment variables take precedence.

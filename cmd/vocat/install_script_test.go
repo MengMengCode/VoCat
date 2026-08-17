@@ -29,3 +29,29 @@ func TestInstallerValidatesDatabaseBeforeReplacingBinary(t *testing.T) {
 		t.Fatal("installer replaces the current binary before validating database compatibility")
 	}
 }
+
+func TestInstallerProvidesRequiredQMIUtilities(t *testing.T) {
+	scriptBytes, err := os.ReadFile("../../scripts/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	for _, required := range []string{
+		"install_qmi_support()",
+		"command -v qmicli",
+		"command -v qmi-network",
+		"apt-get install -y libqmi-utils",
+		"dnf install -y libqmi-utils",
+		"pacman -Sy --noconfirm libqmi",
+		"apk add --no-cache qmi-utils",
+		"Could not install or find qmicli/qmi-network",
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("installer is missing required QMI handling %q", required)
+		}
+	}
+	mainStart := strings.LastIndex(script, "# --- Main ")
+	if mainStart < 0 || !strings.Contains(script[mainStart:], "install_qmi_support") {
+		t.Error("installer does not install QMI utilities from its main path")
+	}
+}

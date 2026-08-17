@@ -35,8 +35,12 @@ type usbControlTransfer struct {
 }
 
 func repairDJIQMI(ctx context.Context) (djiQMIRepairResult, error) {
+	qmicli, err := exec.LookPath("qmicli")
+	if err != nil {
+		return djiQMIRepairResult{}, errors.New("qmicli is required to verify DJI QMI readiness; install libqmi-utils on Debian/Ubuntu/Fedora, libqmi on Arch Linux, or qmi-utils on Alpine")
+	}
 	return retryDJIQMI(ctx, 3, 500*time.Millisecond, func(attemptContext context.Context) (djiQMIRepairResult, error) {
-		return repairDJIQMIAt(attemptContext, "/sys", "/dev")
+		return repairDJIQMIAt(attemptContext, "/sys", "/dev", qmicli)
 	})
 }
 
@@ -68,7 +72,7 @@ func retryDJIQMI(
 	return result, fmt.Errorf("failed after %d DTR repair attempt(s): %w", result.Attempts, err)
 }
 
-func repairDJIQMIAt(ctx context.Context, sysRoot, devRoot string) (result djiQMIRepairResult, returnErr error) {
+func repairDJIQMIAt(ctx context.Context, sysRoot, devRoot, qmicli string) (result djiQMIRepairResult, returnErr error) {
 	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
 	entries, err := os.ReadDir(usbRoot)
 	if err != nil {
@@ -179,17 +183,14 @@ func repairDJIQMIAt(ctx context.Context, sysRoot, devRoot string) (result djiQMI
 		time.Sleep(25 * time.Millisecond)
 	}
 	time.Sleep(250 * time.Millisecond)
-	qmicli, err := exec.LookPath("qmicli")
-	if err != nil {
-		return result, errors.New("qmicli is required to verify DJI QMI readiness after DTR repair")
-	}
 	probeContext, cancelProbe := context.WithTimeout(ctx, 8*time.Second)
 	output, probeErr := exec.CommandContext(probeContext, qmicli, "-d", result.ControlDevice, "--dms-get-operating-mode").CombinedOutput()
+	probeContextErr := probeContext.Err()
 	cancelProbe()
 	result.QMIProbe = strings.TrimSpace(string(output))
 	if probeErr != nil {
-		if probeContext.Err() != nil {
-			probeErr = errors.Join(probeErr, probeContext.Err())
+		if probeContextErr != nil {
+			probeErr = errors.Join(probeErr, probeContextErr)
 		}
 		return result, fmt.Errorf("DMS readiness check after DTR repair: %w: %s", probeErr, result.QMIProbe)
 	}

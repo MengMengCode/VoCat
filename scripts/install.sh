@@ -195,6 +195,39 @@ install_linux_ip_tool() {
     fi
 }
 
+install_qmi_support() {
+    msg "正在检查 QMI 命令行工具..." "Checking QMI command-line utilities..."
+    if command -v qmicli >/dev/null 2>&1 && command -v qmi-network >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if is_openwrt && command -v opkg >/dev/null 2>&1; then
+        opkg update >/dev/null 2>&1 || true
+        if opkg_has_package libqmi; then
+            opkg install libqmi >/dev/null 2>&1 || true
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y libqmi-utils || true
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y libqmi-utils || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y libqmi-utils || true
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm libqmi || true
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache qmi-utils || true
+    fi
+
+    if command -v qmicli >/dev/null 2>&1 && command -v qmi-network >/dev/null 2>&1; then
+        msg "QMI 命令行工具已就绪。" "QMI command-line utilities are ready."
+        return 0
+    fi
+    die \
+        "无法安装或找到 qmicli/qmi-network。请安装系统提供的 libqmi/qmi-utils 软件包后重试。" \
+        "Could not install or find qmicli/qmi-network. Install your distribution's libqmi/qmi-utils package and retry."
+}
+
 install_pcsc_support() {
     msg "正在检查 USB SIM 读卡器的 PC/SC 运行环境..." "Checking the PC/SC environment for USB SIM readers..."
     local installed=0
@@ -538,6 +571,7 @@ enable_and_start() {
 
 # --- Main --------------------------------------------------------------------
 detect_arch
+install_qmi_support
 install_pcsc_support
 check_vowifi_environment
 if [ "$CHECK_ENV" -eq 1 ]; then

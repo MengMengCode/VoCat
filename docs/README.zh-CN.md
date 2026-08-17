@@ -175,6 +175,16 @@ USB SIM 读卡器通过 Linux PC/SC 服务访问。一键安装脚本会在支�
 `apt install pcscd libccid`。如果 USB 已识别 CCID 读卡器但 PC/SC 尚未就绪，
 VoCat 会继续在添加设备窗口显示该硬件，并明确提示缺少服务或驱动，不再静默隐藏。
 
+### QMI 命令行工具
+
+VoCat 使用 `qmicli` 验证 QMI 控制通道是否就绪，并使用 `qmi-network` 管理
+分组数据会话。一键安装脚本会自动安装并验证对应工具。手动部署时，
+Debian/Ubuntu 使用 `apt install libqmi-utils`；Arch Linux 使用
+`pacman -S libqmi`，Alpine 使用 `apk add qmi-utils`。
+
+`vocat doctor --repair-dji-qmi` 会在修改 USB 驱动绑定或触发 DTR 之前检查
+`qmicli`。如果工具不可用，命令会给出安装提示并停止，保持设备当前状态不变。
+
 ## 配置
 
 Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件,再应用 `VOCAT_*` 环境变量。环境变量优先级更高。

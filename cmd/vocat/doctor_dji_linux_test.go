@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -46,6 +47,21 @@ func TestWriteSysfsDoesNotCreateMissingPath(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("missing sysfs path was created: %v", err)
+	}
+}
+
+func TestRepairDJIQMIRequiresQMICLIBeforeUSBAccess(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	_, err := repairDJIQMI(context.Background())
+	if err == nil {
+		t.Fatal("repairDJIQMI() unexpectedly succeeded without qmicli")
+	}
+	if !strings.Contains(err.Error(), "qmicli is required") || !strings.Contains(err.Error(), "libqmi-utils") {
+		t.Fatalf("repairDJIQMI() error = %q, want an actionable qmicli prerequisite error", err)
+	}
+	if strings.Contains(err.Error(), "DTR repair attempt") || strings.Contains(err.Error(), "USB topology") {
+		t.Fatalf("repairDJIQMI() touched the repair path before checking qmicli: %v", err)
 	}
 }
 
