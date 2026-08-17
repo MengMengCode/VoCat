@@ -1636,7 +1636,14 @@ func (s *Server) configuredDeviceOverview(
 	result["id"] = config.ID
 	result["name"] = config.Name
 	result["interface"] = config.Interface
-	result["at_port"] = config.ATPort
+	// ttyUSB allocation changes across USB reconnects and boot cycles. The AT
+	// terminal must use only the currently discovered physical port; a stored
+	// path may point at another modem after enumeration order changes.
+	liveATPort := ""
+	if present {
+		liveATPort = entry.Candidate.ATPort.OpenPath()
+	}
+	result["at_port"] = liveATPort
 	result["audio_device"] = config.AudioDevice
 	result["backend_mode"] = config.DeviceBackend
 	result["control_device"] = config.ControlDevice

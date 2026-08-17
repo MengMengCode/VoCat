@@ -134,6 +134,29 @@ func TestConfiguredDeviceSummaryMarksIdleRuntimeAsNotInUse(t *testing.T) {
 	}
 }
 
+func TestConfiguredDeviceOverviewAlwaysUsesLiveDiscoveredATPort(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	s := &Server{store: database}
+	config := store.Device{ID: "ec20_1", ATPort: "/dev/ttyUSB9"}
+	entry := device.Device{Candidate: modem.Candidate{
+		ATPort: modem.Port{Path: "/dev/ttyUSB2", Role: modem.PortRoleAT},
+	}}
+
+	connected := s.configuredDeviceOverview(config, entry, true)
+	if got := connected["at_port"]; got != "/dev/ttyUSB2" {
+		t.Fatalf("connected AT port = %#v, want live /dev/ttyUSB2", got)
+	}
+
+	offline := s.configuredDeviceOverview(config, entry, false)
+	if got := offline["at_port"]; got != "" {
+		t.Fatalf("offline AT port = %#v, want empty instead of stored port", got)
+	}
+}
+
 func TestSnapshotHasSIMDoesNotTreatUnknownStatusAsInserted(t *testing.T) {
 	for _, snapshot := range []*device.Snapshot{
 		{IMEI: "867123456789012"},

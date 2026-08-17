@@ -22,8 +22,9 @@ Usage:
                      vocat without arguments would enter the menu).
   vocat version      Print the build version and exit.
   vocat doctor       Diagnose USB modem, AT, QMI, PC/SC and proxy UDP paths.
-                     Use --repair-dji-qmi on Linux to safely wake a factory-ID
-                     DJI/Baiwang 2ca3:4006 QMI interface without changing NV.
+                     Use --repair-dji-qmi on Linux to restore the factory-ID
+                     DJI/Baiwang 2ca3:4006 AT/QMI interface bindings and wake
+                     QMI without changing NV.
   vocat carrier import-ipcc [flags] FILE.ipcc
                      Convert an Apple carrier bundle into a reviewable VoCat
                      profile. Preview is the default; --install writes it to
