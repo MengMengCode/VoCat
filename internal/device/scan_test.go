@@ -121,3 +121,22 @@ func TestCarrierForSIMUsesAndroidGIDRuleBeforePLMNFallback(t *testing.T) {
 		t.Fatalf("CarrierForSIM generic fallback = (%q, %q, %q, %v)", plmn, name, country, ok)
 	}
 }
+
+func TestCarrierForSIMRecognizesGiffgaffWithoutRelabelingGenericO2(t *testing.T) {
+	for _, identity := range []CarrierIdentity{
+		{IMSI: "234100000000001", GID1: "508FFFFF", MNCLength: 2},
+		{IMSI: "234100000000001", SPN: "GiffGaff", MNCLength: 2},
+	} {
+		plmn, name, country, ok := CarrierForSIM(identity)
+		if !ok || plmn != "23410" || name != "giffgaff" || country != "GB" {
+			t.Fatalf("giffgaff identity = (%q, %q, %q, %v)", plmn, name, country, ok)
+		}
+	}
+
+	_, name, _, ok := CarrierForSIM(CarrierIdentity{
+		IMSI: "234100000000001", MNCLength: 2,
+	})
+	if !ok || name == "giffgaff" {
+		t.Fatalf("generic O2 SIM was mislabeled as giffgaff: (%q, %v)", name, ok)
+	}
+}
