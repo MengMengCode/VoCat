@@ -878,30 +878,6 @@ func (session *Session) CallMedia(_ context.Context, id string) (vowifi.CallMedi
 	return call.media, nil
 }
 
-func (session *Session) SendDTMF(ctx context.Context, id, digits string) error {
-	if len(digits) == 0 || len(digits) > 32 {
-		return errors.New("ims: DTMF must contain between 1 and 32 digits")
-	}
-	session.callMu.Lock()
-	call := session.calls[id]
-	if call == nil {
-		session.callMu.Unlock()
-		return ErrCallNotFound
-	}
-	if call.public.State != "active" || call.media == nil || !call.media.ready() {
-		session.callMu.Unlock()
-		return ErrCallState
-	}
-	media := call.media
-	session.callMu.Unlock()
-	for index := 0; index < len(digits); index++ {
-		if err := media.SendDTMF(ctx, digits[index]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (session *Session) finishCall(id, state string, code int, reason string) {
 	now := time.Now().UTC()
 	var media *rtpMedia
@@ -995,4 +971,3 @@ func reverseStrings(values []string) []string {
 
 var _ vowifi.CallController = (*Session)(nil)
 var _ vowifi.CallMediaController = (*Session)(nil)
-var _ vowifi.CallDTMFController = (*Session)(nil)

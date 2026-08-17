@@ -50,6 +50,10 @@ The backend is written in Go, the interface is built with React and TypeScript, 
 | Operations | Authentication, CSRF protection, access policies, audit events, live logs, log retention, health checks, responsive layout, dark mode, and English/Chinese application UI. |
 | Distribution | Static Linux binaries, systemd installation script, self-update with SHA-256 verification, Docker image, GHCR publishing, and GitHub Actions release builds. |
 
+IMS voice signaling is experimental and carrier-dependent. The sanitized test
+boundary and known limitations are documented in
+[docs/IMS_CALL_INTEROPERABILITY.md](docs/IMS_CALL_INTEROPERABILITY.md).
+
 ## Supported hardware
 
 Vocat targets Qualcomm-based Quectel modules that expose compatible AT, QMI, serial, and USB networking interfaces, including:

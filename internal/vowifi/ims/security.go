@@ -783,7 +783,7 @@ func zeroBytes(value []byte) {
 }
 
 func (session *Session) securityOffered() bool {
-	return session.provider.config.SecurityMode != SecurityDisabled && !session.securityDeclined
+	return session.provider != nil && session.provider.config.SecurityMode != SecurityDisabled && !session.securityDeclined
 }
 
 func (session *Session) securityFromResponse(response *sipResponse) (securityAgreement, bool, error) {

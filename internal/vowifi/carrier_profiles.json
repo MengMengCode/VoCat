@@ -22,7 +22,7 @@
       "ims": {
         "pani_country": "GB",
         "pani_node": "000000000000",
-		"dial_uri_scheme": "sip",
+        "dial_uri_scheme": "sip",
         "voice_codecs": ["PCMA", "PCMU"]
       }
     },
@@ -64,8 +64,8 @@
       "match": { "home_plmns": ["23410"] },
       "ims": {
         "transport": "udp",
-		"sms_center": "+447802000332",
-		"user_eq_phone": true
+        "sms_center": "+447802000332",
+        "user_eq_phone": true
       }
     },
     {

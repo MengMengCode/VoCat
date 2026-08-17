@@ -405,6 +405,7 @@ type Call struct {
 	Direction  string     `json:"direction"`
 	State      string     `json:"state"`
 	StartedAt  time.Time  `json:"started_at"`
+	AnsweredAt *time.Time `json:"answered_at,omitempty"`
 	SIPCode    int        `json:"sip_code,omitempty"`
 	Reason     string     `json:"reason,omitempty"`
 	MediaReady bool       `json:"media_ready,omitempty"`
