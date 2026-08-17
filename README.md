@@ -212,6 +212,10 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 | `VOCAT_REPO` | `MengMengCode/VoCat` | Trusted GitHub repository used by the self-updater, in `owner/name` form. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token for private repositories or higher API limits. |
 
+User-supplied Apple carrier bundles can be converted into reviewable,
+allow-listed carrier profiles with `vocat carrier import-ipcc`; see
+[docs/CARRIER_IPCC_IMPORT.md](docs/CARRIER_IPCC_IMPORT.md).
+
 Administrator credentials are stored only in SQLite. Initialize an empty
 database once with `vocat bootstrap-admin`; environment variables and JSON
 configuration cannot set or overwrite the administrator username or password.

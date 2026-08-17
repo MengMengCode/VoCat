@@ -81,6 +81,53 @@ func TestResolveCarrierProfilePrefersConstrainedMVNO(t *testing.T) {
 	}
 }
 
+func TestResolveCarrierProfileUsesAlternativeMVNOSelectors(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity SIMIdentity
+		source   string
+	}{
+		{
+			name:     "Apple GID1 selector",
+			identity: SIMIdentity{IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10", GID1: "508FFFFF"},
+			source:   "hplmn+gid1",
+		},
+		{
+			name:     "Android SPN selector",
+			identity: SIMIdentity{IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10", SPN: "GiffGaff"},
+			source:   "hplmn+spn",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profile := ResolveCarrierProfile(test.identity)
+			if profile.ID != "giffgaff-o2-uk" || profile.MatchSource != test.source {
+				t.Fatalf("giffgaff profile = %#v", profile)
+			}
+			if profile.SMSCenter != "+447802002606" || profile.IMSTransport != "udp" {
+				t.Fatalf("giffgaff IMS settings = %#v", profile)
+			}
+		})
+	}
+
+	generic := ResolveCarrierProfile(SIMIdentity{
+		IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10",
+	})
+	if generic.ID != "o2-uk" || generic.SMSCenter != "+447802000332" {
+		t.Fatalf("generic O2 profile = %#v", generic)
+	}
+}
+
+func TestEEHostedProfileDoesNotClaimCTExcelBrand(t *testing.T) {
+	profile := ResolveCarrierProfile(SIMIdentity{
+		ICCID: "8944300000000000001", IMSI: "234336000000001",
+		HomeMCC: "234", HomeMNC: "33",
+	})
+	if profile.ID != "ee-uk-hosted-23433" || profile.RouteMCC != "234" || profile.RouteMNC != "30" {
+		t.Fatalf("EE-hosted profile = %#v", profile)
+	}
+}
+
 func TestResolveCarrierProfileNormalizesMNCWidth(t *testing.T) {
 	for _, mnc := range []string{"03", "003"} {
 		profile := ResolveCarrierProfile(SIMIdentity{HomeMCC: "262", HomeMNC: mnc})

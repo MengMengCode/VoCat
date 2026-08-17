@@ -195,6 +195,25 @@ Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件,再应用 `VOCAT_*
 
 请勿将 Telegram token、SMTP 密码、Webhook 密钥、SIM 凭据或其他私密数据存放在仓库中。请通过应用设置或受保护的环境文件来配置它们。
 
+## Apple IPCC 运营商规则导入
+
+VoCat 可以离线解析用户提供的 `.ipcc`，将 Apple 的 XML/二进制 plist
+转换为可审查的运营商 Profile。默认只预览，不会修改配置：
+
+```bash
+vocat carrier import-ipcc Carrier_iPhone.ipcc
+```
+
+确认警告和匹配范围后，使用 `--install` 安装；重启 VoCat 后生效：
+
+```bash
+vocat carrier import-ipcc --install Carrier_iPhone.ipcc
+```
+
+导入器不会复制关闭证书验证、绕过运营商授权、APN 凭据、紧急呼叫或
+设备型号专属媒体参数。完整字段和冲突处理说明见
+[CARRIER_IPCC_IMPORT.md](CARRIER_IPCC_IMPORT.md)。
+
 ## Telegram 机器人
 
 启用 Telegram 通知并配置好 Chat ID 与 Admin ID 后,机器人支持:

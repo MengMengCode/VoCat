@@ -12,7 +12,7 @@
       "ike": { "proposal": "legacy-sha1-modp1024" }
     },
     {
-      "id": "ctexcel-ee-uk",
+      "id": "ee-uk-hosted-23433",
       "match": {
         "home_plmns": ["23433"],
         "imsi_prefixes": ["23433"],
@@ -52,6 +52,23 @@
       "id": "vodafone-netherlands",
       "match": { "home_plmns": ["20404"] },
       "ike": { "proposal": "legacy-sha1-modp1024" }
+    },
+    {
+      "id": "giffgaff-o2-uk",
+      "match_any": [
+        {
+          "home_plmns": ["23410"],
+          "gid1_prefixes": ["508"]
+        },
+        {
+          "home_plmns": ["23410"],
+          "spns": ["giffgaff"]
+        }
+      ],
+      "ims": {
+        "transport": "udp",
+        "sms_center": "+447802002606"
+      }
     },
     {
       "id": "o2-uk",
