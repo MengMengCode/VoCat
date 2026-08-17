@@ -18,6 +18,7 @@ import AutomaticTasksPage from "./pages/AutomaticTasksPage";
 import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
 import ExtensionPage from "./pages/ExtensionPage";
+import CallPage from "./pages/CallPage";
 
 const THEME_KEY = "theme";
 const DISCLAIMER_KEY = "vocat_disclaimer_agreed_at";
@@ -114,6 +115,7 @@ function AppRoot() {
           <Route path="proxy" element={<ProxyPage />} />
           <Route path="export-proxy" element={<ExportProxyPage />} />
           <Route path="sms" element={<SmsPage />} />
+          <Route path="calls" element={<CallPage />} />
           <Route path="automatic-tasks" element={<AutomaticTasksPage />} />
           <Route path="extensions/:pluginId/:contributionId" element={<ExtensionPage />} />
           <Route path="logs" element={<LogsPage />} />

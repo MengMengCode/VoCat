@@ -872,7 +872,10 @@ func (session *Session) CallMedia(_ context.Context, id string) (vowifi.CallMedi
 	if call == nil {
 		return nil, ErrCallNotFound
 	}
-	if call.public.State != "active" || call.media == nil || !call.media.ready() {
+	// Allow early media (183 Session Progress with SDP) as well as an
+	// established call: the RTP path is already negotiated and usable, so the
+	// web voice gateway can play ringback/announcements before the answer.
+	if (call.public.State != "active" && call.public.State != "early_media") || call.media == nil || !call.media.ready() {
 		return nil, ErrCallState
 	}
 	return call.media, nil

@@ -229,3 +229,36 @@ export function eventStreamURL(path: string, params?: URLSearchParams) {
   const suffix = params?.toString();
   return `${path.startsWith("/api") ? path : `/api${path}`}${suffix ? `?${suffix}` : ""}`;
 }
+
+// ---- Call / voice gateway API (VoWiFi IMS calls) ----
+
+export interface CallActionPayload {
+  number?: string;
+  call_id?: string;
+  duration_seconds?: number;
+}
+
+export async function deviceCallAction(
+  deviceId: string,
+  action: "dial" | "answer" | "hangup",
+  payload: CallActionPayload = {},
+): Promise<unknown> {
+  return api(`/api/devices/${encodeURIComponent(deviceId)}/calls/${action}`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export interface DeviceCallsResponse {
+  deviceId?: string;
+  transport?: string;
+  calls?: unknown[];
+}
+
+export async function deviceCalls(deviceId: string): Promise<DeviceCallsResponse> {
+  return api<DeviceCallsResponse>(`/api/devices/${encodeURIComponent(deviceId)}/calls`);
+}
+
+export function callMediaSocketURL(deviceId: string, callId: string): string {
+  return `/api/devices/${encodeURIComponent(deviceId)}/calls/media?call_id=${encodeURIComponent(callId)}`;
+}

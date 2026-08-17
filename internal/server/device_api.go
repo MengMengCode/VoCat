@@ -680,7 +680,11 @@ func native410UnsupportedOperation(tail []string) bool {
 		return false
 	}
 	operation := strings.Join(tail, "/")
-	return tail[0] == "calls" || operation == "actions/reboot"
+	// The native OpenStick 410 (wifi_410) backend exposes a full IMS stack
+	// (IKEv2/ePDG tunnel, SIP call control, RTP media) through the native QMI
+	// adapter, so the "calls" API is supported. Only operations that genuinely
+	// make no sense on the 410 remain blocked here.
+	return operation == "actions/reboot"
 }
 
 func (s *Server) handleUSBNetMode(w http.ResponseWriter, r *http.Request, physicalID string) bool {
