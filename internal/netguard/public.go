@@ -3,6 +3,7 @@ package netguard
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -48,6 +49,13 @@ func ValidatePublicURL(ctx context.Context, raw string, requireHTTPS bool) (*url
 // rejects private/special-use destinations at dial time, and validates every
 // redirect before following it.
 func NewPublicHTTPClient(timeout time.Duration, requireHTTPS bool) *http.Client {
+	return NewPublicHTTPClientWithRootCAs(timeout, requireHTTPS, nil)
+}
+
+// NewPublicHTTPClientWithRootCAs creates the same guarded client while using
+// the supplied trust pool for protocols whose standards define additional
+// public roots beyond the host operating system's CA bundle.
+func NewPublicHTTPClientWithRootCAs(timeout time.Duration, requireHTTPS bool, roots *x509.CertPool) *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -60,6 +68,7 @@ func NewPublicHTTPClient(timeout time.Duration, requireHTTPS bool) *http.Client 
 		ExpectContinueTimeout: time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
+			RootCAs:    roots,
 		},
 	}
 	return &http.Client{

@@ -3,14 +3,41 @@ package device
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 )
+
+func TestES9PRootCAsIncludeGSMARSP2RootCI1(t *testing.T) {
+	roots, err := es9pRootCAs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(gsmaRSP2RootCI1PEM)
+	if block == nil {
+		t.Fatal("GSMA Root CI1 PEM did not decode")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := sha256.Sum256(certificate.Raw); actual != gsmaRSP2RootCI1SHA256 {
+		t.Fatalf("GSMA root SHA-256 = %X, want %X", actual, gsmaRSP2RootCI1SHA256)
+	}
+	if certificate.Subject.CommonName != "GSM Association - RSP2 Root CI1" || !certificate.IsCA {
+		t.Fatalf("unexpected GSMA root certificate: subject=%q ca=%v", certificate.Subject.CommonName, certificate.IsCA)
+	}
+	if _, err := certificate.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+		t.Fatalf("GSMA root is not trusted by the ES9+ pool: %v", err)
+	}
+}
 
 // newTestES9P routes an es9pClient at a throwaway TLS server.
 func newTestES9P(t *testing.T, handler http.HandlerFunc) *es9pClient {

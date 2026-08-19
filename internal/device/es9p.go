@@ -3,6 +3,7 @@ package device
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -14,8 +15,23 @@ import (
 	"strings"
 	"time"
 
+	_ "embed"
+
 	"vocat/internal/netguard"
 )
+
+// GSM Association RSP2 Root CI1; SHA-256 fingerprint:
+// 5E:3E:91:FD:45:43:27:C3:AF:5D:32:A7:A7:3B:BC:59:FE:43:AA:7D:85:FD:32:D5:DB:44:42:3F:80:A5:6B:B3.
+//
+//go:embed certs/gsma-rsp2-root-ci1.pem
+var gsmaRSP2RootCI1PEM []byte
+
+var gsmaRSP2RootCI1SHA256 = [32]byte{
+	0x5e, 0x3e, 0x91, 0xfd, 0x45, 0x43, 0x27, 0xc3,
+	0xaf, 0x5d, 0x32, 0xa7, 0xa7, 0x3b, 0xbc, 0x59,
+	0xfe, 0x43, 0xaa, 0x7d, 0x85, 0xfd, 0x32, 0xd5,
+	0xdb, 0x44, 0x42, 0x3f, 0x80, 0xa5, 0x6b, 0xb3,
+}
 
 // es9pClient speaks SGP.22 ES9+ — JSON over HTTPS — to one SM-DP+. It is the
 // network half of the LPA download flow: the host authenticates nothing itself
@@ -50,11 +66,26 @@ func newES9PClient(ctx context.Context, smdp string) (*es9pClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("esim: unsafe SM-DP+ address: %w", err)
 	}
+	roots, err := es9pRootCAs()
+	if err != nil {
+		return nil, err
+	}
 	return &es9pClient{
 		smdp:     validated.Host,
 		endpoint: validated,
-		http:     netguard.NewPublicHTTPClient(90*time.Second, true),
+		http:     netguard.NewPublicHTTPClientWithRootCAs(90*time.Second, true, roots),
 	}, nil
+}
+
+func es9pRootCAs() (*x509.CertPool, error) {
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if !roots.AppendCertsFromPEM(gsmaRSP2RootCI1PEM) {
+		return nil, errors.New("esim: load GSMA RSP2 Root CI1 certificate")
+	}
+	return roots, nil
 }
 
 // es9pError is a failed ES9+ functionExecutionStatus. Message is the SM-DP+'s
