@@ -145,6 +145,18 @@ func TestSOCKS5InitialExchangeFallsBackAcrossResolvedEPDGAddresses(t *testing.T)
 		Exchange:     exchangeIKEInit,
 		Flags:        flagResponse,
 	}.marshal([]byte("response"))
+	cookieFirst, cookieBody, err := marshalPayloadChain([]payload{
+		makeNotify(notifyCookie, []byte{0x10, 0x20, 0x30, 0x40}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookieResponse := ikeHeader{
+		InitiatorSPI: requestHeader.InitiatorSPI,
+		NextPayload:  cookieFirst,
+		Exchange:     exchangeIKEInit,
+		Flags:        flagResponse,
+	}.marshal(cookieBody)
 	serverDone := make(chan error, 1)
 	go func() {
 		buffer := make([]byte, 2048)
@@ -160,6 +172,14 @@ func TestSOCKS5InitialExchangeFallsBackAcrossResolvedEPDGAddresses(t *testing.T)
 				return
 			}
 			if !destination.IP.Equal(second.IP) {
+				cookieWire, marshalErr := marshalSOCKS5Datagram(first, cookieResponse)
+				if marshalErr == nil {
+					_, marshalErr = relay.WriteToUDP(cookieWire, peer)
+				}
+				if marshalErr != nil {
+					serverDone <- marshalErr
+					return
+				}
 				continue
 			}
 			wire, marshalErr := marshalSOCKS5Datagram(second, response)
@@ -183,6 +203,31 @@ func TestSOCKS5InitialExchangeFallsBackAcrossResolvedEPDGAddresses(t *testing.T)
 	}
 	if err := <-serverDone; err != nil {
 		t.Fatalf("relay: %v", err)
+	}
+}
+
+func TestIKEResponseMatchesCookieChallengeWithZeroResponderSPI(t *testing.T) {
+	request := ikeHeader{
+		InitiatorSPI: [8]byte{1, 2, 3, 4, 5, 6, 7, 8},
+		Exchange:     exchangeIKEInit,
+		Flags:        flagInitiator,
+		MessageID:    0,
+	}
+	first, body, err := marshalPayloadChain([]payload{
+		makeNotify(notifyCookie, []byte{0x10, 0x20, 0x30, 0x40}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := ikeHeader{
+		InitiatorSPI: request.InitiatorSPI,
+		Exchange:     exchangeIKEInit,
+		Flags:        flagResponse,
+		MessageID:    0,
+		NextPayload:  first,
+	}.marshal(body)
+	if !ikeResponseMatchesRequest(response, request) {
+		t.Fatal("IKE COOKIE response with zero Responder SPI was rejected")
 	}
 }
 

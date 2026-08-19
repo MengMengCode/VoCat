@@ -188,34 +188,60 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		makeNotify(notifyNATSource, sourceHash),
 		makeNotify(notifyNATDestination, destinationHash),
 	}
-	first, initBody, err := marshalPayloadChain(initPayloads)
-	if err != nil {
-		return nil, err
-	}
-	initRequest := ikeHeader{
-		InitiatorSPI: initiatorSPI,
-		NextPayload:  first,
-		Exchange:     exchangeIKEInit,
-		Flags:        flagInitiator,
-		MessageID:    0,
-	}.marshal(initBody)
-	initResponse, err := transport.RoundTrip(ctx, initRequest)
-	if err != nil {
-		return nil, err
-	}
-	responseHeader, responseBody, err := validateResponse(initResponse, initiatorSPI, [8]byte{}, exchangeIKEInit, 0)
-	if err != nil {
-		return nil, err
-	}
-	if responseHeader.ResponderSPI == [8]byte{} {
-		return nil, errors.New("ike: responder returned a zero SPI")
-	}
-	initResponsePayloads, err := parsePayloadChain(responseHeader.NextPayload, responseBody)
-	if err != nil {
-		return nil, err
-	}
-	if err := rejectFatalNotifications(initResponsePayloads); err != nil {
-		return nil, err
+	var (
+		initRequest          []byte
+		initResponse         []byte
+		responseHeader       ikeHeader
+		initResponsePayloads []payload
+		cookie               []byte
+	)
+	for attempt := 0; attempt < maxIKEInitCookieChallenges; attempt++ {
+		requestPayloads := append([]payload(nil), initPayloads...)
+		if len(cookie) > 0 {
+			requestPayloads = append([]payload{makeNotify(notifyCookie, cookie)}, requestPayloads...)
+		}
+		first, initBody, err := marshalPayloadChain(requestPayloads)
+		if err != nil {
+			return nil, err
+		}
+		initRequest = ikeHeader{
+			InitiatorSPI: initiatorSPI,
+			NextPayload:  first,
+			Exchange:     exchangeIKEInit,
+			Flags:        flagInitiator,
+			MessageID:    0,
+		}.marshal(initBody)
+		initResponse, err = transport.RoundTrip(ctx, initRequest)
+		if err != nil {
+			return nil, err
+		}
+		var responseBody []byte
+		responseHeader, responseBody, err = validateResponse(initResponse, initiatorSPI, [8]byte{}, exchangeIKEInit, 0)
+		if err != nil {
+			return nil, err
+		}
+		initResponsePayloads, err = parsePayloadChain(responseHeader.NextPayload, responseBody)
+		if err != nil {
+			return nil, err
+		}
+		if err := rejectFatalNotifications(initResponsePayloads); err != nil {
+			return nil, err
+		}
+		challenge, hasCookie, err := ikeInitCookie(initResponsePayloads)
+		if err != nil {
+			return nil, err
+		}
+		if hasCookie {
+			if attempt+1 == maxIKEInitCookieChallenges {
+				return nil, errors.New("ike: ePDG requested too many COOKIE challenges")
+			}
+			cookie = challenge
+			continue
+		}
+		if responseHeader.ResponderSPI == [8]byte{} {
+			return nil, errors.New("ike: responder returned a zero SPI")
+		}
+		break
 	}
 	saPayload, err := onePayload(initResponsePayloads, payloadSA)
 	if err != nil {
@@ -614,6 +640,29 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 	}
 	closeTransport = false
 	return session, nil
+}
+
+const maxIKEInitCookieChallenges = 2
+
+func ikeInitCookie(payloads []payload) ([]byte, bool, error) {
+	var cookie []byte
+	for _, item := range payloadsOfType(payloads, payloadNotify) {
+		kind, data, err := parseNotify(item)
+		if err != nil {
+			return nil, false, err
+		}
+		if kind != notifyCookie {
+			continue
+		}
+		if len(data) == 0 {
+			return nil, false, errors.New("ike: ePDG returned an empty COOKIE")
+		}
+		if cookie != nil {
+			return nil, false, errors.New("ike: ePDG returned multiple COOKIE notifications")
+		}
+		cookie = append([]byte(nil), data...)
+	}
+	return cookie, cookie != nil, nil
 }
 
 func buildInitialEAPAuth(

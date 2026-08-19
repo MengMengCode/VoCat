@@ -576,16 +576,26 @@ func (transport *socks5UDP) RoundTrip(ctx context.Context, packet []byte) ([]byt
 	// Once a gateway answers, keep it pinned for the lifetime of the IKE SA.
 	if !transport.floated && requestHeader.Exchange == exchangeIKEInit && requestHeader.MessageID == 0 && len(transport.remotes) > 1 {
 		var lastErr error
+		var cookieResponse []byte
 		for _, candidate := range transport.remotes {
 			transport.remote = cloneUDPAddr(candidate)
 			response, attemptErr := transport.roundTripLocked(ctx, packet, requestHeader)
 			if attemptErr == nil {
+				if ikeInitResponseHasCookie(response) {
+					if cookieResponse == nil {
+						cookieResponse = append([]byte(nil), response...)
+					}
+					continue
+				}
 				return response, nil
 			}
 			lastErr = attemptErr
 			if ctx.Err() != nil || !isNetworkTimeout(attemptErr) {
 				return nil, attemptErr
 			}
+		}
+		if cookieResponse != nil {
+			return cookieResponse, nil
 		}
 		return nil, fmt.Errorf("ike: all %d resolved ePDG addresses timed out: %w", len(transport.remotes), lastErr)
 	}
@@ -824,9 +834,32 @@ func ikeResponseMatchesRequest(
 	}
 	var zeroSPI [8]byte
 	if request.ResponderSPI == zeroSPI {
-		return response.ResponderSPI != zeroSPI
+		if response.ResponderSPI != zeroSPI {
+			return true
+		}
+		return response.Exchange == exchangeIKEInit &&
+			response.MessageID == 0 &&
+			ikeInitResponseHasCookie(packet)
 	}
 	return response.ResponderSPI == request.ResponderSPI
+}
+
+func ikeInitResponseHasCookie(packet []byte) bool {
+	header, body, err := parseIKEPacket(packet)
+	if err != nil || header.Exchange != exchangeIKEInit || header.MessageID != 0 {
+		return false
+	}
+	payloads, err := parsePayloadChain(header.NextPayload, body)
+	if err != nil {
+		return false
+	}
+	for _, item := range payloadsOfType(payloads, payloadNotify) {
+		kind, data, err := parseNotify(item)
+		if err == nil && kind == notifyCookie && len(data) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func marshalSOCKS5Datagram(remote *net.UDPAddr, payload []byte) ([]byte, error) {
