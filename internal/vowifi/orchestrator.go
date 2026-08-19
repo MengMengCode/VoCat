@@ -560,6 +560,35 @@ func (orchestrator *Orchestrator) SendSMS(
 	return sender.SendSMS(ctx, request)
 }
 
+// SendUSSI submits a USSD dialog turn through the currently registered IMS
+// session. USSI only requires IMS registration — it does not depend on the
+// +g.3gpp.smsip contact being confirmed, so the readiness gate is IMSReady
+// alone (unlike SendSMS which also requires SMSReady).
+func (orchestrator *Orchestrator) SendUSSI(
+	ctx context.Context,
+	request USSISubmitRequest,
+) (USSISubmitResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := orchestrator.lockOperation(ctx); err != nil {
+		return USSISubmitResult{}, err
+	}
+	defer orchestrator.unlockOperation()
+	orchestrator.mu.Lock()
+	resources := orchestrator.resources
+	ready := orchestrator.state.IMSReady
+	orchestrator.mu.Unlock()
+	if resources == nil || resources.ims == nil || !ready {
+		return USSISubmitResult{}, ErrUSSINotReady
+	}
+	sender, ok := resources.ims.(USSISender)
+	if !ok {
+		return USSISubmitResult{}, ErrUSSINotReady
+	}
+	return sender.SendUSSI(ctx, request)
+}
+
 func (orchestrator *Orchestrator) Calls() ([]Call, error) {
 	orchestrator.mu.Lock()
 	resources := orchestrator.resources

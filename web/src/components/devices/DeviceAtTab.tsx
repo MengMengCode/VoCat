@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { WindowConsoleRegular, WarningRegular } from "@fluentui/react-icons";
 import { api } from "../../api";
-import { Button, Input, Select } from "../ui";
+import { Button, Input, Select, Switch } from "../ui";
 import { AT_COMMAND_GROUPS } from "./atCommands";
 import { AtLogEntry, AtTypingBubble, type AtLogItem } from "./AtLogEntry";
 import { useI18n } from "../../lib/i18n";
@@ -19,6 +19,7 @@ export function DeviceAtTab({ deviceId, backendMode, atPort, running }: DeviceAt
   const [template, setTemplate] = useState("");
   const [timeoutMs, setTimeoutMs] = useState<number>(10000);
   const [sending, setSending] = useState(false);
+  const [force, setForce] = useState(false);
   const [log, setLog] = useState<AtLogItem[]>([]);
 
   const hasAtPort = String(atPort || "").trim().length > 0;
@@ -40,7 +41,7 @@ export function DeviceAtTab({ deviceId, backendMode, atPort, running }: DeviceAt
     try {
       const res = await api<{ ok?: boolean; response?: string; result?: string }>(`/devices/${deviceId}/actions/at`, {
         method: "POST",
-        body: { cmd: command, timeoutMs: timeoutMs || 10000 },
+        body: { cmd: command, timeoutMs: timeoutMs || 10000, force },
       });
       setLog((prev) => [
         ...prev,
@@ -119,6 +120,13 @@ export function DeviceAtTab({ deviceId, backendMode, atPort, running }: DeviceAt
                 </Button>
               </div>
             </div>
+          </div>
+          <div className="mt-3 flex items-center justify-end gap-3">
+            <div className="flex items-center gap-2 text-sm text-orange-600 dark:text-orange-400">
+              <WarningRegular className="text-base" />
+              <span>{t("强制模式允许发送默认被拦截的 AT 指令（如切网、拨号、短信、USSD），误操作可能导致断网或费用扣除。")}</span>
+            </div>
+            <Switch checked={force} onChange={setForce} ariaLabel={t("强制发送 AT 指令")} />
           </div>
         </>
       ) : (

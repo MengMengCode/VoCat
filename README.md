@@ -96,6 +96,14 @@ to install matching `ip-full`, `kmod-ipsec`, `kmod-ipsec4/6`,
 If matching kernel modules are unavailable, use a firmware that includes them;
 never force-install kmods built for a different kernel.
 
+If your kernel cannot provide XFRM/IPsec and you only need non-VoWiFi features
+such as cellular SMS or data, install with `--skip-vowifi-check`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
+sudo bash install.sh --skip-vowifi-check
+```
+
 The installer:
 
 - detects `amd64`, `386`, `arm64`, `aarch64`, or `armv7`;

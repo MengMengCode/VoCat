@@ -18,6 +18,7 @@ import (
 	"vocat/internal/modem"
 	"vocat/internal/store"
 	"vocat/internal/update"
+	"vocat/internal/vowifi"
 )
 
 func decodeData(t *testing.T, recorder *httptest.ResponseRecorder) map[string]any {
@@ -263,6 +264,143 @@ func TestHandleUSSDContinueRequiresSession(t *testing.T) {
 	server.handleUSSDContinue(recorder, request)
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("missing session status = %d, want 400", recorder.Code)
+	}
+}
+
+// fakeUSSIController implements both VoWiFiController and the optional
+// imsUSSIController interface so the HTTP layer USSI path can be exercised
+// without a real runtime manager.
+type fakeUSSIController struct {
+	fakeVoWiFiController
+	sendErr    error
+	sendResult vowifi.USSISubmitResult
+	sendCalled int
+	lastInput  string
+}
+
+func (controller *fakeUSSIController) SendUSSI(
+	_ context.Context,
+	_ string,
+	request vowifi.USSISubmitRequest,
+) (vowifi.USSISubmitResult, error) {
+	controller.sendCalled++
+	controller.lastInput = request.Input
+	if request.Code != "" {
+		controller.lastInput = request.Code
+	}
+	return controller.sendResult, controller.sendErr
+}
+
+func TestHandleUSSDRoutesOverIMSWhenReady(t *testing.T) {
+	controller := &fakeUSSIController{
+		fakeVoWiFiController: fakeVoWiFiController{state: vowifi.State{IMSReady: true}},
+		sendResult:           vowifi.USSISubmitResult{Status: "final", Text: "IMS balance"},
+	}
+	devices := fakeDeviceController{ussdResult: device.USSDResult{Status: "final", Text: "cellular"}}
+	server := &Server{
+		logger:              regionTestLogger(),
+		maxRequestBodyBytes: 4096,
+		devices:             devices,
+		vowifi:              controller,
+	}
+	request := httptest.NewRequest(http.MethodPost, "/actions/ussd", strings.NewReader(`{"command":"*100#"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.handleUSSD(recorder, request, store.Device{ID: "dev1", VoWiFiEnabled: true}, "dev1")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	data := decodeData(t, recorder)
+	result, _ := data["result"].(map[string]any)
+	if result["text"] != "IMS balance" {
+		t.Fatalf("result = %v, want IMS routed response", result)
+	}
+	if controller.sendCalled != 1 {
+		t.Fatalf("SendUSSI called %d times, want 1", controller.sendCalled)
+	}
+}
+
+func TestHandleUSSDFallsBackToCellularWhenIMSNotReady(t *testing.T) {
+	controller := &fakeUSSIController{
+		fakeVoWiFiController: fakeVoWiFiController{state: vowifi.State{}},
+	}
+	devices := fakeDeviceController{ussdResult: device.USSDResult{Status: "final", Text: "cellular"}}
+	server := &Server{
+		logger:              regionTestLogger(),
+		maxRequestBodyBytes: 4096,
+		devices:             devices,
+		vowifi:              controller,
+	}
+	request := httptest.NewRequest(http.MethodPost, "/actions/ussd", strings.NewReader(`{"command":"*100#"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.handleUSSD(recorder, request, store.Device{ID: "dev1", VoWiFiEnabled: true}, "dev1")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	data := decodeData(t, recorder)
+	result, _ := data["result"].(map[string]any)
+	if result["text"] != "cellular" {
+		t.Fatalf("result = %v, want cellular fallback", result)
+	}
+	if controller.sendCalled != 0 {
+		t.Fatalf("SendUSSI called %d times, want 0", controller.sendCalled)
+	}
+}
+
+func TestHandleUSSDContinueUsesIMSForUSSIPersistedSession(t *testing.T) {
+	database, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if err := database.UpsertDevice(context.Background(), store.Device{ID: "dev1", Name: "test", DeviceType: store.DeviceTypePCIeEC20EC25, VoWiFiEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeUSSIController{
+		fakeVoWiFiController: fakeVoWiFiController{state: vowifi.State{IMSReady: true}},
+		sendResult:           vowifi.USSISubmitResult{Status: "awaiting_input", Text: "Sub-menu"},
+	}
+	server := &Server{
+		logger:              regionTestLogger(),
+		maxRequestBodyBytes: 4096,
+		store:               database,
+		vowifi:              controller,
+	}
+	sessionID := server.openUSSDSession("dev1")
+	request := httptest.NewRequest(http.MethodPost, "/actions/ussd/continue", strings.NewReader(`{"session_id":"`+sessionID+`","input":"1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.handleUSSDContinue(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	data := decodeData(t, recorder)
+	result, _ := data["result"].(map[string]any)
+	if result["text"] != "Sub-menu" {
+		t.Fatalf("result = %v, want IMS continue response", result)
+	}
+	if controller.sendCalled != 1 || controller.lastInput != "1" {
+		t.Fatalf("SendUSSI called %d times with input %q, want 1/1", controller.sendCalled, controller.lastInput)
+	}
+}
+
+func TestHandleUSSDCancelDropsUSSIPersistedSession(t *testing.T) {
+	server := &Server{
+		logger:              regionTestLogger(),
+		maxRequestBodyBytes: 4096,
+		vowifi:              &fakeUSSIController{},
+	}
+	sessionID := server.openUSSDSession("dev1")
+	request := httptest.NewRequest(http.MethodPost, "/actions/ussd/cancel", strings.NewReader(`{"session_id":"`+sessionID+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.handleUSSDCancel(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := server.ussdSessionDevice(sessionID); !errors.Is(err, device.ErrUSSDSessionNotFound) {
+		t.Fatalf("session token was not dropped: %v", err)
 	}
 }
 

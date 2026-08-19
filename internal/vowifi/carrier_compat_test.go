@@ -1,6 +1,9 @@
 package vowifi
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAssignedRoutePLMNUsesNarrowCardAndSubscriptionMatches(t *testing.T) {
 	tests := []struct {
@@ -143,5 +146,78 @@ func TestEPDGDNSClientSubnetComesFromCarrierProfileData(t *testing.T) {
 	}
 	if got := EPDGDNSClientSubnet("epdg.epc.mnc015.mcc234.pub.3gppnetwork.org"); got != "" {
 		t.Fatalf("ordinary ePDG received geographic DNS fallback %q", got)
+	}
+}
+
+func TestResolveCarrierProfileDITOPhilippinesUsesLegacyIKE(t *testing.T) {
+	profile := ResolveCarrierProfile(SIMIdentity{HomeMCC: "515", HomeMNC: "66"})
+	if profile.ID != "dito-philippines" {
+		t.Fatalf("DITO profile = %#v", profile)
+	}
+	if profile.IKEProposal != IKEProposalLegacy {
+		t.Fatalf("DITO IKE proposal = %q, want %q", profile.IKEProposal, IKEProposalLegacy)
+	}
+	if !profile.AllowSMSWithoutContactConfirmation {
+		t.Fatalf("DITO profile should allow SMS without contact confirmation")
+	}
+}
+
+func TestResolveCarrierProfileATTRegisterOptions(t *testing.T) {
+	profile := ResolveCarrierProfile(SIMIdentity{IMSI: "310280000000001", HomeMCC: "310", HomeMNC: "280"})
+	if profile.ID != "att-us" {
+		t.Fatalf("AT&T profile = %#v", profile)
+	}
+	if profile.IMSRegisterOptions.ContactFormat != IMSContactFormatATT {
+		t.Fatalf("AT&T contact format = %q, want %q", profile.IMSRegisterOptions.ContactFormat, IMSContactFormatATT)
+	}
+	if profile.IMSRegisterOptions.ExpirySeconds != 18400 {
+		t.Fatalf("AT&T expiry = %d, want 18400", profile.IMSRegisterOptions.ExpirySeconds)
+	}
+	if profile.IMSRegisterOptions.UserAgent != "SimAdmin VoWiFi" {
+		t.Fatalf("AT&T user agent = %q", profile.IMSRegisterOptions.UserAgent)
+	}
+	if profile.IMSRegisterOptions.PVisitedNetworkID != "one.att.net" {
+		t.Fatalf("AT&T P-Visited-Network-ID = %q", profile.IMSRegisterOptions.PVisitedNetworkID)
+	}
+	if len(profile.IMSRegisterOptions.AcceptContactTags) != 2 {
+		t.Fatalf("AT&T Accept-Contact tags = %v", profile.IMSRegisterOptions.AcceptContactTags)
+	}
+}
+
+func TestResolveCarrierProfileO2GermanyRegisterOptions(t *testing.T) {
+	profile := ResolveCarrierProfile(SIMIdentity{HomeMCC: "262", HomeMNC: "03"})
+	if profile.ID != "o2-germany" {
+		t.Fatalf("O2 Germany profile = %#v", profile)
+	}
+	if profile.IMSRegisterOptions.ContactFormat != "" {
+		t.Fatalf("O2 Germany contact format = %q, want empty", profile.IMSRegisterOptions.ContactFormat)
+	}
+	if profile.IMSRegisterOptions.SupportedHeader == nil || !strings.Contains(*profile.IMSRegisterOptions.SupportedHeader, "sec-agree") {
+		t.Fatalf("O2 Germany Supported header = %v", profile.IMSRegisterOptions.SupportedHeader)
+	}
+	if profile.IMSRegisterOptions.AllowHeader == nil || !strings.Contains(*profile.IMSRegisterOptions.AllowHeader, "MESSAGE") {
+		t.Fatalf("O2 Germany Allow header = %v", profile.IMSRegisterOptions.AllowHeader)
+	}
+	if !profile.IMSRegisterOptions.PPreferredIdentity {
+		t.Fatal("O2 Germany should add P-Preferred-Identity")
+	}
+}
+
+func TestResolveCarrierProfileStandardHasNoRegisterOverrides(t *testing.T) {
+	profile := ResolveCarrierProfile(SIMIdentity{HomeMCC: "001", HomeMNC: "01"})
+	if profile.ID != CarrierProfileStandard {
+		t.Fatalf("profile = %q", profile.ID)
+	}
+	if profile.IMSRegisterOptions.ExpirySeconds != 0 {
+		t.Fatalf("standard expiry = %d", profile.IMSRegisterOptions.ExpirySeconds)
+	}
+	if profile.IMSRegisterOptions.ContactFormat != "" {
+		t.Fatalf("standard contact format = %q", profile.IMSRegisterOptions.ContactFormat)
+	}
+	if profile.IMSRegisterOptions.SupportedHeader != nil {
+		t.Fatalf("standard supported header = %v", *profile.IMSRegisterOptions.SupportedHeader)
+	}
+	if profile.AllowSMSWithoutContactConfirmation {
+		t.Fatal("standard profile should require SMS contact confirmation")
 	}
 }

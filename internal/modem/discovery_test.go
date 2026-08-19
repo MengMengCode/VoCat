@@ -444,6 +444,115 @@ func TestParseWWANPortName(t *testing.T) {
 	}
 }
 
+func TestSysFSDiscoveryFindsQuectelSerialModemWithoutQMIWWANBinding(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+	// A Quectel EC200A in its USB-serial composition (2c7c:6005) exposes ttyUSB
+	// control ports but no qmi_wwan-bound interface, so discovery must re-admit
+	// it by vendor instead of skipping it.
+	mustWrite(t, filepath.Join(usbRoot, "1-6", "idVendor"), "2c7c\n")
+	mustWrite(t, filepath.Join(usbRoot, "1-6", "idProduct"), "6005\n")
+	for number, tty := range []string{"ttyUSB0", "ttyUSB1", "ttyUSB2", "ttyUSB3"} {
+		interfaceName := "1-6:1." + strconv.Itoa(number)
+		mustWrite(t, filepath.Join(usbRoot, interfaceName, "bInterfaceNumber"), fmt.Sprintf("%02x\n", number))
+		mustMkdir(t, filepath.Join(usbRoot, interfaceName, tty, "tty", tty))
+	}
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.VendorID != "2c7c" || candidate.ProductID != "6005" {
+		t.Fatalf("candidate = %#v", candidate)
+	}
+	if candidate.ID != "usb-2c7c-6005-1-6" {
+		t.Fatalf("ID = %q", candidate.ID)
+	}
+	if candidate.ATPort.Name != "ttyUSB2" || candidate.ATPort.Role != PortRoleAT {
+		t.Fatalf("AT port = %#v, want ttyUSB2 at role AT", candidate.ATPort)
+	}
+	if candidate.DiscoveryIssue != "" {
+		t.Fatalf("discovery issue = %q, want none", candidate.DiscoveryIssue)
+	}
+}
+
+func TestSysFSDiscoveryMarksQuectelPeripheralWithoutATPort(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+	// A Quectel-branded peripheral exposing only a network interface (no
+	// ttyUSB/ttyACM, no qmi_wwan binding) cannot be driven yet, but vocat
+	// surfaces it with at_port_missing instead of silently dropping it so the
+	// operator sees the device is present and learns what to fix.
+	mustWrite(t, filepath.Join(usbRoot, "1-8", "idVendor"), "2c7c\n")
+	mustWrite(t, filepath.Join(usbRoot, "1-8", "idProduct"), "6005\n")
+	mustMkdir(t, filepath.Join(usbRoot, "1-8:1.0", "net", "enx001122334455"))
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.DiscoveryIssue != "at_port_missing" {
+		t.Fatalf("discovery issue = %q, want at_port_missing", candidate.DiscoveryIssue)
+	}
+	if candidate.HasATPort() {
+		t.Fatalf("candidate unexpectedly has an AT port: %#v", candidate.ATPort)
+	}
+	if candidate.NetworkInterface != "enx001122334455" {
+		t.Fatalf("network interface = %q", candidate.NetworkInterface)
+	}
+}
+
+func TestSysFSDiscoveryMarksQuectelMBIMCompositionWithoutATPort(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+	// An EG25-G in MBIM composition (2c7c:0900) exposes cdc-wdm + net but no
+	// ttyUSB and has no qmi_wwan binding (cdc_mbim binds the control interface
+	// instead). vocat has no MBIM backend, so it must surface the device with
+	// at_port_missing rather than hiding it.
+	mustWrite(t, filepath.Join(usbRoot, "1-6", "idVendor"), "2c7c\n")
+	mustWrite(t, filepath.Join(usbRoot, "1-6", "idProduct"), "0900\n")
+	mustWrite(t, filepath.Join(usbRoot, "1-6", "product"), "EG25-G\n")
+	mustMkdir(t, filepath.Join(usbRoot, "1-6:1.0", "usbmisc", "cdc-wdm0"))
+	mustMkdir(t, filepath.Join(usbRoot, "1-6:1.0", "net", "wwp0s20f0u6"))
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.DiscoveryIssue != "at_port_missing" {
+		t.Fatalf("discovery issue = %q, want at_port_missing", candidate.DiscoveryIssue)
+	}
+	if candidate.HasATPort() {
+		t.Fatalf("candidate unexpectedly has an AT port: %#v", candidate.ATPort)
+	}
+	if candidate.Product != "EG25-G" {
+		t.Fatalf("product = %q", candidate.Product)
+	}
+	// cdc-wdm0 sits under usbmisc/, which scanUSBInterface reports as a QMI
+	// control name; either way the device must appear present, not vanish.
+	if candidate.QMIControl == "" && candidate.NetworkInterface == "" {
+		t.Fatalf("candidate has neither QMI control nor net interface: %#v", candidate)
+	}
+}
+
 func mustWrite(t *testing.T, path, value string) {
 	t.Helper()
 	mustMkdir(t, filepath.Dir(path))

@@ -759,6 +759,7 @@ func newVoWiFiOrchestrator(
 				"service_center_timestamp": message.ServiceCenterTimestamp,
 				"raw_rpdu":                 message.RawRPDU,
 				"raw_tpdu":                 message.RawTPDU,
+				"decode_error":             message.DecodeError,
 			})
 			partsTotal := 1
 			if message.Concat != nil && message.Concat.Total > 0 {
@@ -822,6 +823,31 @@ func newVoWiFiOrchestrator(
 			// A late report from before this process started must still be
 			// acknowledged, otherwise the SMSC will keep retransmitting it.
 			return nil
+		},
+		OnUSSD: func(ctx context.Context, message ims.ReceivedUSSD) error {
+			extra, _ := json.Marshal(map[string]any{
+				"transport":   "ims-ussd",
+				"dcs":         message.DCS,
+				"call_id":     message.CallID,
+				"received_at": message.Timestamp,
+				"raw_body":    message.RawBody,
+			})
+			_, saveErr := database.SaveSMSMessage(ctx, store.SMSMessage{
+				MessageID:  message.MessageID,
+				DeviceID:   message.DeviceID,
+				ModemIMEI:  deviceConfig.ModemIMEI,
+				IMSI:       message.IMSI,
+				Peer:       message.From,
+				Direction:  "inbound",
+				Body:       message.Text,
+				Timestamp:  message.Timestamp,
+				Status:     "received",
+				Source:     "ims-ussd",
+				PartsTotal: 1,
+				Read:       false,
+				Extra:      extra,
+			})
+			return saveErr
 		},
 	})
 	if err != nil {

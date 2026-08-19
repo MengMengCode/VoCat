@@ -1981,7 +1981,7 @@ func (bot *telegramBot) handleATCommand(ctx context.Context, config telegramRunt
 
 func (bot *telegramBot) executeATCommand(ctx context.Context, deviceID, command string) (string, error) {
 	command = strings.TrimSpace(command)
-	if err := validateATCommand(command); err != nil {
+	if err := validateATCommand(command, false); err != nil {
 		return "", err
 	}
 	_, _, physicalID, err := bot.device(deviceID)

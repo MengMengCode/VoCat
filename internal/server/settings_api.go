@@ -295,7 +295,7 @@ func validateNotificationField(
 			}
 		}
 		if name == "proxy" && value != "" {
-			if _, err := parseOutboundURL(value, false); err != nil {
+			if _, err := parseProxyURL(value); err != nil {
 				return fmt.Errorf("%s is not a valid HTTP URL", field)
 			}
 		}
@@ -989,12 +989,32 @@ func validateOutboundURL(
 }
 
 func validateNotificationProxyURL(ctx context.Context, raw string) (*url.URL, error) {
-	parsed, err := parseOutboundURL(raw, false)
+	parsed, err := parseProxyURL(raw)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := resolveNotificationProxyAddresses(ctx, parsed.Hostname()); err != nil {
 		return nil, err
+	}
+	return parsed, nil
+}
+
+// parseProxyURL parses an HTTP(S) proxy URL. Unlike parseOutboundURL, it
+// permits embedded userinfo (http://user:pass@host:port) because HTTP proxies
+// commonly authenticate with Proxy-Authorization derived from the URL.
+func parseProxyURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Hostname() == "" || parsed.IsAbs() == false {
+		return nil, errors.New("proxy must be an absolute HTTP URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("proxy URL must use HTTP or HTTPS")
+	}
+	if parsed.Port() != "" {
+		port, err := strconv.Atoi(parsed.Port())
+		if err != nil || port < 1 || port > 65535 {
+			return nil, errors.New("proxy URL has an invalid port")
+		}
 	}
 	return parsed, nil
 }

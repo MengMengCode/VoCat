@@ -548,6 +548,14 @@ func decodeGSM7(septets []byte) (string, error) {
 	return result.String(), nil
 }
 
+// DecodeGSM7Septets decodes a GSM 7-bit default-alphabet string whose septets
+// are stored one code per byte (the form USSI bodies use when DCS=0x0F). It
+// returns the decoded text and ok=false if a code is out of range.
+func DecodeGSM7Septets(data string) (string, bool) {
+	decoded, err := decodeGSM7([]byte(data))
+	return decoded, err == nil
+}
+
 type pduCursor struct {
 	data  []byte
 	index int
@@ -758,13 +766,29 @@ func readTPAddress(cursor *pduCursor) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	byteCount := (int(length) + 1) / 2
+	var byteCount int
+	var septetCount int
+	if toa&0x70 == 0x50 {
+		// 3GPP TS 23.040 §9.1.2.5: For alphanumeric addresses, the length field
+		// indicates the number of useful semi-octets (i.e. characters * 7 / 4, rounded up).
+		// The number of characters is (length * 4) / 7 and byte count is (length + 1) / 2.
+		// However, some non-standard sources specify length as the direct count of septets
+		// (e.g. length=4 for 4 chars, which needs 4 bytes instead of (4+1)/2=2 bytes).
+		if length >= 7 {
+			byteCount = (int(length) + 1) / 2
+			septetCount = int(length) * 4 / 7
+		} else {
+			byteCount = (int(length)*7 + 7) / 8
+			septetCount = int(length)
+		}
+	} else {
+		byteCount = (int(length) + 1) / 2
+	}
 	value, err := cursor.bytes(byteCount)
 	if err != nil {
 		return "", err
 	}
 	if toa&0x70 == 0x50 {
-		septetCount := int(length) * 4 / 7
 		septets, unpackErr := unpackSeptets(value, septetCount, 0)
 		if unpackErr != nil {
 			return "", unpackErr

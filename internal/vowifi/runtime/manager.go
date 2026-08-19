@@ -318,6 +318,27 @@ func (manager *Manager) SendSMS(
 	return item.orchestrator.SendSMS(ctx, request)
 }
 
+func (manager *Manager) SendUSSI(
+	ctx context.Context,
+	deviceID string,
+	request vowifi.USSISubmitRequest,
+) (vowifi.USSISubmitResult, error) {
+	if err := manager.Ensure(ctx, deviceID); err != nil {
+		return vowifi.USSISubmitResult{}, err
+	}
+	manager.mu.Lock()
+	if manager.closed {
+		manager.mu.Unlock()
+		return vowifi.USSISubmitResult{}, ErrClosed
+	}
+	item := manager.entries[deviceID]
+	manager.mu.Unlock()
+	if item == nil {
+		return vowifi.USSISubmitResult{}, ErrNotRegistered
+	}
+	return item.orchestrator.SendUSSI(ctx, request)
+}
+
 func (manager *Manager) Calls(deviceID string) ([]vowifi.Call, error) {
 	if err := manager.Ensure(manager.ctx, deviceID); err != nil {
 		return nil, err

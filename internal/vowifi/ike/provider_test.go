@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,17 +66,20 @@ func (reader constantReader) Read(destination []byte) (int, error) {
 }
 
 type firstAuthCaptureTransport struct {
-	t           *testing.T
-	wantEAPOnly bool
-	wantGroup   uint16
-	calls       int
-	suite       negotiatedSuite
-	keys        ikeKeys
-	spii        [8]byte
-	spir        [8]byte
-	nonceI      []byte
-	nonceR      []byte
-	floated     bool
+	t               *testing.T
+	wantEAPOnly     bool
+	wantGroup       uint16
+	calls           int
+	suite           negotiatedSuite
+	keys            ikeKeys
+	spii            [8]byte
+	spir            [8]byte
+	nonceI          []byte
+	nonceR          []byte
+	floated         bool
+	cookieChallenge []byte
+	cookieSeen      bool
+	cookieLoop      bool
 }
 
 func (transport *firstAuthCaptureTransport) LocalAddr() *net.UDPAddr {
@@ -92,6 +97,24 @@ func (transport *firstAuthCaptureTransport) Float(context.Context) error {
 
 func (transport *firstAuthCaptureTransport) RoundTrip(_ context.Context, packet []byte) ([]byte, error) {
 	transport.calls++
+	if len(transport.cookieChallenge) > 0 {
+		switch transport.calls {
+		case 1:
+			return transport.answerIKECookie(packet)
+		case 2:
+			if err := transport.verifyIKECookie(packet); err != nil {
+				return nil, err
+			}
+			if transport.cookieLoop {
+				return transport.answerIKECookie(packet)
+			}
+			return transport.answerIKEInit(packet)
+		case 3:
+			return nil, transport.observeFirstAuth(packet)
+		default:
+			return nil, errors.New("test: unexpected exchange")
+		}
+	}
 	switch transport.calls {
 	case 1:
 		return transport.answerIKEInit(packet)
@@ -100,6 +123,69 @@ func (transport *firstAuthCaptureTransport) RoundTrip(_ context.Context, packet 
 	default:
 		return nil, errors.New("test: unexpected exchange")
 	}
+}
+
+func (transport *firstAuthCaptureTransport) answerIKECookie(packet []byte) ([]byte, error) {
+	header, _, err := parseIKEPacket(packet)
+	if err != nil {
+		return nil, err
+	}
+	first, body, err := marshalPayloadChain([]payload{
+		makeNotify(notifyCookie, transport.cookieChallenge),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ikeHeader{
+		InitiatorSPI: header.InitiatorSPI,
+		NextPayload:  first,
+		Exchange:     exchangeIKEInit,
+		Flags:        flagResponse,
+		MessageID:    0,
+	}.marshal(body), nil
+}
+
+func (transport *firstAuthCaptureTransport) verifyIKECookie(packet []byte) error {
+	header, body, err := parseIKEPacket(packet)
+	if err != nil {
+		return err
+	}
+	if header.Exchange != exchangeIKEInit || header.MessageID != 0 || header.Flags != flagInitiator {
+		return errors.New("test: invalid retried IKE_SA_INIT header")
+	}
+	payloads, err := parsePayloadChain(header.NextPayload, body)
+	if err != nil {
+		return err
+	}
+	if len(payloads) == 0 || payloads[0].Type != payloadNotify {
+		return errors.New("test: retried IKE_SA_INIT did not put COOKIE first")
+	}
+	firstKind, firstData, err := parseNotify(payloads[0])
+	if err != nil || firstKind != notifyCookie || !bytes.Equal(firstData, transport.cookieChallenge) {
+		return errors.New("test: first retried IKE_SA_INIT payload is not the expected COOKIE")
+	}
+	cookies := payloadsOfType(payloads, payloadNotify)
+	if len(cookies) != 3 {
+		return fmt.Errorf("test: retried IKE_SA_INIT has %d notify payloads, want 3", len(cookies))
+	}
+	found := false
+	for _, item := range cookies {
+		kind, data, err := parseNotify(item)
+		if err != nil {
+			return err
+		}
+		if kind == notifyCookie {
+			if !bytes.Equal(data, transport.cookieChallenge) {
+				return fmt.Errorf("test: cookie = %x, want %x", data, transport.cookieChallenge)
+			}
+			found = true
+		}
+	}
+	if !found {
+		return errors.New("test: retried IKE_SA_INIT did not carry COOKIE")
+	}
+	transport.cookieSeen = true
+	return nil
 }
 
 func (transport *firstAuthCaptureTransport) answerIKEInit(packet []byte) ([]byte, error) {
@@ -288,6 +374,93 @@ func TestProviderVodafoneFirstAuthIsEAPOnlyAndRequestsIMSAPN(t *testing.T) {
 	}
 	if capture.calls != 2 || capture.floated || aka.calls != 0 {
 		t.Fatalf("capture calls=%d floated=%v AKA calls=%d", capture.calls, capture.floated, aka.calls)
+	}
+}
+
+func TestProviderRetriesIKEInitAfterCookie(t *testing.T) {
+	capture := &firstAuthCaptureTransport{
+		t:               t,
+		wantEAPOnly:     true,
+		cookieChallenge: []byte{0x10, 0x20, 0x30, 0x40},
+	}
+	provider, err := NewProvider(Config{
+		Random:    constantReader{value: 0x42},
+		Timeout:   time.Second,
+		Installer: unusedInstaller{},
+		APN:       "ims",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.transportFactory = func(
+		context.Context,
+		transportConfig,
+		vowifi.ProxyRoute,
+		string,
+	) (datagramTransport, error) {
+		return capture, nil
+	}
+	aka := &testAKAProvider{}
+	_, err = provider.Start(context.Background(), vowifi.TunnelRequest{
+		DeviceID: "ec20-cookie",
+		Identity: vowifi.SIMIdentity{
+			ICCID:   "8944100000000000000",
+			IMSI:    "234150123456789",
+			HomeMCC: "234",
+			HomeMNC: "15",
+		},
+		EPDG: "epdg.epc.mnc015.mcc234.pub.3gppnetwork.org",
+		AKA:  aka,
+	})
+	if !errors.Is(err, errFirstAuthObserved) {
+		t.Fatalf("Start() error = %v, want capture sentinel", err)
+	}
+	if capture.calls != 3 || !capture.cookieSeen || capture.floated || aka.calls != 0 {
+		t.Fatalf("capture calls=%d cookie_seen=%v floated=%v AKA calls=%d", capture.calls, capture.cookieSeen, capture.floated, aka.calls)
+	}
+}
+
+func TestProviderBoundsRepeatedIKEInitCookieChallenges(t *testing.T) {
+	capture := &firstAuthCaptureTransport{
+		t:               t,
+		wantEAPOnly:     true,
+		cookieChallenge: []byte{0x10, 0x20, 0x30, 0x40},
+		cookieLoop:      true,
+	}
+	provider, err := NewProvider(Config{
+		Random:    constantReader{value: 0x42},
+		Timeout:   time.Second,
+		Installer: unusedInstaller{},
+		APN:       "ims",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.transportFactory = func(
+		context.Context,
+		transportConfig,
+		vowifi.ProxyRoute,
+		string,
+	) (datagramTransport, error) {
+		return capture, nil
+	}
+	aka := &testAKAProvider{}
+	_, err = provider.Start(context.Background(), vowifi.TunnelRequest{
+		DeviceID: "ec20-cookie-loop",
+		Identity: vowifi.SIMIdentity{
+			ICCID:   "8944100000000000000",
+			IMSI:    "234150123456789",
+			HomeMCC: "234",
+			HomeMNC: "15",
+		},
+		EPDG: "epdg.epc.mnc015.mcc234.pub.3gppnetwork.org",
+		AKA:  aka,
+	})
+	if err == nil || !strings.Contains(err.Error(), "too many COOKIE challenges") {
+		t.Fatalf("Start() error = %v, want bounded COOKIE error", err)
+	}
+	if capture.calls != maxIKEInitCookieChallenges || aka.calls != 0 {
+		t.Fatalf("capture calls=%d AKA calls=%d", capture.calls, aka.calls)
 	}
 }
 

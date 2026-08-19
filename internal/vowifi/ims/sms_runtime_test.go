@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"mime/multipart"
 	"net"
 	"net/textproto"
@@ -155,6 +156,57 @@ func TestSupportsSMSContentType(t *testing.T) {
 		if got := supportsSMSContentType(test.value); got != test.want {
 			t.Errorf("supportsSMSContentType(%q) = %v, want %v", test.value, got, test.want)
 		}
+	}
+}
+
+func TestSupportsUSSIContentType(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{ussiContentType, true},
+		{"Application/Vnd.3gpp.Ussd; charset=binary", true},
+		{smsContentType, false},
+		{"text/plain", false},
+	} {
+		if got := supportsUSSIContentType(test.value); got != test.want {
+			t.Errorf("supportsUSSIContentType(%q) = %v, want %v", test.value, got, test.want)
+		}
+	}
+}
+
+func TestEncodeDecodeUSSDBody(t *testing.T) {
+	for _, text := range []string{"*100#", "Main menu 中文"} {
+		body, dcs, err := encodeUSSDBody(text)
+		if err != nil {
+			t.Fatalf("encodeUSSDBody(%q) error = %v", text, err)
+		}
+		if dcs == nil || *dcs != 0x48 {
+			t.Fatalf("encodeUSSDBody(%q) dcs = %v, want 0x48", text, dcs)
+		}
+		decoded := decodeUSSDBody(body, *dcs)
+		if decoded != text {
+			t.Fatalf("decodeUSSDBody(%q) = %q, want %q", text, decoded, text)
+		}
+	}
+}
+
+func TestExtractUSSDString(t *testing.T) {
+	text := "Main menu"
+	encoded, dcs, err := encodeUSSDBody(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := append([]byte{byte(len(encoded) + 1), byte(*dcs)}, encoded...)
+	raw, gotDCS, gotText := extractUSSDString(body)
+	if gotText != text || gotDCS == nil || *gotDCS != *dcs || !bytes.Equal(raw, body) {
+		t.Fatalf("extractUSSDString(%x) = (%q, %v, %q)", body, raw, gotDCS, gotText)
+	}
+
+	// A plain raw body without a length/DCS prefix falls back to DCS 0x0F.
+	raw, gotDCS, gotText = extractUSSDString([]byte("fallback"))
+	if gotDCS == nil || *gotDCS != 0x0F || gotText != "fallback" || !bytes.Equal(raw, []byte("fallback")) {
+		t.Fatalf("extractUSSDString fallback = (%q, %v, %q)", raw, gotDCS, gotText)
 	}
 }
 
@@ -539,3 +591,368 @@ func serveOutboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	_, err = listener.WriteToUDP(testResponse(200, "OK", registerCallID, headers["cseq"], nil), remote)
 	return err
 }
+
+func TestSessionReceivesUSSIOverIMS(t *testing.T) {
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_ = listener.SetDeadline(time.Now().Add(10 * time.Second))
+
+	received := make(chan ReceivedUSSD, 1)
+	serverDone := make(chan error, 1)
+	readyForClose := make(chan struct{})
+	nonce := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	go func() { serverDone <- serveInboundUSSI(listener, nonce, readyForClose) }()
+	provider, err := NewProvider(
+		smsTestAKA{&recordingAKA{result: vowifi.AKAResult{RES: []byte{1, 2, 3, 4}}}},
+		Config{
+			PCSCF: listener.LocalAddr().String(), LocalAddress: "127.0.0.1",
+			Transport: "udp", TransactionTimeout: 3 * time.Second, SecurityMode: SecurityDisabled,
+			OnUSSD: func(_ context.Context, message ReceivedUSSD) error {
+				received <- message
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := provider.Start(context.Background(), vowifi.IMSRequest{
+		DeviceID: "ec20",
+		Identity: vowifi.SIMIdentity{IMSI: "001010123456789", HomeMCC: "001", HomeMNC: "01"},
+		Tunnel: evidenceTunnel{evidence: vowifi.TunnelEvidence{
+			Established: true, LocalIPv4: "127.0.0.1", PCSCF: []string{listener.LocalAddr().String()},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case message := <-received:
+		if message.Text != "Main menu" || message.From != "sip:ussd@example.test" || message.CallID != "network-ussd-1" {
+			t.Fatalf("received = %#v", message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for inbound USSI")
+	}
+	select {
+	case <-readyForClose:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for USSI MESSAGE acceptance")
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serveInboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<- struct{}) error {
+	packet := make([]byte, 65535)
+	count, remote, err := listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	_, headers, err := parseTestRequest(packet[:count])
+	if err != nil {
+		return err
+	}
+	callID := headers["call-id"]
+	if _, err = listener.WriteToUDP(testResponse(401, "Unauthorized", callID, headers["cseq"], []string{
+		`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` + nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
+	}), remote); err != nil {
+		return err
+	}
+	count, remote, err = listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	_, headers, err = parseTestRequest(packet[:count])
+	if err != nil {
+		return err
+	}
+	if _, err = listener.WriteToUDP(testResponse(200, "OK", callID, headers["cseq"], []string{
+		"Contact: " + headers["contact"] + ";expires=600",
+	}), remote); err != nil {
+		return err
+	}
+
+	body := buildUSSDBody("Main menu")
+	request := []byte(strings.Join([]string{
+		"MESSAGE sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org SIP/2.0",
+		"Via: SIP/2.0/UDP " + listener.LocalAddr().String() + ";branch=z9hG4bKussd",
+		"From: <sip:ussd@example.test>;tag=gw",
+		"To: <sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org>",
+		"P-Asserted-Identity: <sip:ussd@example.test>",
+		"Call-ID: network-ussd-1",
+		"CSeq: 1 MESSAGE",
+		"Content-Type: application/vnd.3gpp.ussd",
+		"Content-Transfer-Encoding: binary",
+		fmt.Sprintf("Content-Length: %d", len(body)), "", "",
+	}, "\r\n"))
+	request = append(request, body...)
+	if _, err = listener.WriteToUDP(request, remote); err != nil {
+		return err
+	}
+	count, remote, err = listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	response, err := parseSIPResponse(packet[:count])
+	if err != nil || response.StatusCode != 200 {
+		return fmt.Errorf("USSI MESSAGE response = (%#v, %v)", response, err)
+	}
+	close(readyForClose)
+
+	count, remote, err = listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	_, headers, err = parseTestRequest(packet[:count])
+	if err != nil {
+		return err
+	}
+	if headers["expires"] != "0" {
+		return errors.New("expected deregistration")
+	}
+	_, err = listener.WriteToUDP(testResponse(200, "OK", callID, headers["cseq"], nil), remote)
+	return err
+}
+
+func TestSessionReceivesMalformedSMSBestEffort(t *testing.T) {
+	request := &sipRequest{
+		Headers: map[string][]string{
+			"content-type":              {smsContentType},
+			"content-transfer-encoding": {"binary"},
+			"call-id":                   {"malformed-test"},
+			"p-asserted-identity":       {"<sip:ipsmgw@example.test>"},
+		},
+		Body: []byte{0x01, 0x2a, 0x00, 0x00, 0x03, 0xff, 0xff, 0xff},
+	}
+
+	received := make(chan ReceivedSMS, 1)
+	session := &Session{
+		provider: &Provider{config: Config{
+			Logger: slog.Default(),
+			OnSMS: func(_ context.Context, message ReceivedSMS) error {
+				received <- message
+				return nil
+			},
+		}},
+		request:         vowifi.IMSRequest{DeviceID: "ec20", Identity: vowifi.SIMIdentity{IMSI: "001010123456789", HomeMCC: "001", HomeMNC: "01"}},
+		conn:            &fakeConn{},
+		transactions:    make(map[sipTransactionKey]chan *sipResponse),
+		fromTag:         "tag",
+		nextRPReference: 1,
+	}
+
+	session.processSMSMessage(request)
+
+	select {
+	case message := <-received:
+		if message.DecodeError == "" {
+			t.Fatal("expected DecodeError to be set")
+		}
+		if message.RawRPDU == "" || message.RawTPDU == "" {
+			t.Fatalf("expected raw payloads to be preserved, got %#v", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for best-effort SMS callback")
+	}
+}
+
+func TestSessionAllowsSMSWithoutContactConfirmationWhenProfilePermits(t *testing.T) {
+	session := &Session{
+		provider: &Provider{config: Config{Logger: slog.Default()}},
+		request: vowifi.IMSRequest{
+			Identity: vowifi.SIMIdentity{HomeMCC: "515", HomeMNC: "66"},
+		},
+		evidence: vowifi.IMSEvidence{
+			Registered:        true,
+			RegistrationState: "registered",
+		},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+
+	evidence, err := session.EnableSMS(context.Background())
+	if err != nil || !evidence.Ready {
+		t.Fatalf("EnableSMS() = (%#v, %v), want ready for DITO profile", evidence, err)
+	}
+}
+
+func TestSessionRequiresSMSContactConfirmationByDefault(t *testing.T) {
+	session := &Session{
+		provider: &Provider{config: Config{Logger: slog.Default()}},
+		request: vowifi.IMSRequest{
+			Identity: vowifi.SIMIdentity{HomeMCC: "001", HomeMNC: "01"},
+		},
+		evidence: vowifi.IMSEvidence{
+			Registered:        true,
+			RegistrationState: "registered",
+		},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+
+	evidence, err := session.EnableSMS(context.Background())
+	if !errors.Is(err, ErrSMSCapabilityNotConfirmed) || evidence.Ready {
+		t.Fatalf("EnableSMS() = (%#v, %v), want not-ready", evidence, err)
+	}
+}
+
+func buildUSSDBody(text string) []byte {
+	encoded, dcs, err := encodeUSSDBody(text)
+	if err != nil {
+		panic(err)
+	}
+	return append([]byte{byte(len(encoded) + 1), byte(*dcs)}, encoded...)
+}
+
+func TestSessionSendsUSSIOverIMS(t *testing.T) {
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	_ = listener.SetDeadline(time.Now().Add(10 * time.Second))
+	serverDone := make(chan error, 1)
+	readyForClose := make(chan struct{})
+	nonce := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	go func() { serverDone <- serveOutboundUSSI(listener, nonce, readyForClose) }()
+	provider, err := NewProvider(
+		smsTestAKA{&recordingAKA{result: vowifi.AKAResult{RES: []byte{1, 2, 3, 4}}}},
+		Config{
+			PCSCF: listener.LocalAddr().String(), LocalAddress: "127.0.0.1",
+			Transport: "udp", TransactionTimeout: 3 * time.Second, SecurityMode: SecurityDisabled,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := provider.Start(context.Background(), vowifi.IMSRequest{
+		DeviceID: "ec20",
+		Identity: vowifi.SIMIdentity{IMSI: "001010123456789", HomeMCC: "001", HomeMNC: "01"},
+		Tunnel: evidenceTunnel{evidence: vowifi.TunnelEvidence{
+			Established: true, LocalIPv4: "127.0.0.1", PCSCF: []string{listener.LocalAddr().String()},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.(vowifi.USSISender).SendUSSI(context.Background(), vowifi.USSISubmitRequest{Code: "*100#"})
+	if err != nil {
+		t.Fatalf("SendUSSI error = %v", err)
+	}
+	if result.Status != "final" || result.Text != "Reply" || result.SIPCode != 200 {
+		t.Fatalf("SendUSSI result = %#v", result)
+	}
+	select {
+	case <-readyForClose:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for USSI transaction to complete")
+	}
+	if err := session.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serveOutboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<- struct{}) error {
+	packet := make([]byte, 65535)
+	count, remote, err := listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	_, headers, err := parseTestRequest(packet[:count])
+	if err != nil {
+		return err
+	}
+	registerCallID := headers["call-id"]
+	if _, err = listener.WriteToUDP(testResponse(401, "Unauthorized", registerCallID, headers["cseq"], []string{
+		`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` + nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
+	}), remote); err != nil {
+		return err
+	}
+	count, remote, err = listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	_, headers, err = parseTestRequest(packet[:count])
+	if err != nil {
+		return err
+	}
+	if _, err = listener.WriteToUDP(testResponse(200, "OK", registerCallID, headers["cseq"], []string{
+		"Contact: " + headers["contact"] + ";expires=600",
+	}), remote); err != nil {
+		return err
+	}
+
+	count, remote, err = listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	message, err := parseSIPPacket(packet[:count])
+	if err != nil || message.Request == nil {
+		return fmt.Errorf("outbound MESSAGE parse: %v", err)
+	}
+	if message.Request.Method != "MESSAGE" ||
+		!strings.HasPrefix(message.Request.URI, "sip:") ||
+		strings.ToLower(message.Request.value("Content-Type")) != ussiContentType ||
+		message.Request.value("Request-Disposition") != "no-fork" ||
+		message.Request.value("Allow") != "MESSAGE" {
+		return fmt.Errorf("unexpected outbound MESSAGE %#v", message.Request)
+	}
+	_, _, text := extractUSSDString(message.Request.Body)
+	if text != "*100#" {
+		return fmt.Errorf("USSI text = %q, want *100#", text)
+	}
+	replyBody := buildUSSDBody("Reply")
+	reply := []byte(strings.Join([]string{
+		"SIP/2.0 200 OK",
+		"Call-ID: " + message.Request.value("Call-ID"),
+		"CSeq: " + message.Request.value("CSeq"),
+		"Content-Type: application/vnd.3gpp.ussd",
+		"Content-Transfer-Encoding: binary",
+		fmt.Sprintf("Content-Length: %d", len(replyBody)), "", "",
+	}, "\r\n"))
+	reply = append(reply, replyBody...)
+	if _, err = listener.WriteToUDP(reply, remote); err != nil {
+		return err
+	}
+	close(readyForClose)
+
+	count, remote, err = listener.ReadFromUDP(packet)
+	if err != nil {
+		return err
+	}
+	_, headers, err = parseTestRequest(packet[:count])
+	if err != nil {
+		return err
+	}
+	if headers["expires"] != "0" {
+		return errors.New("expected deregistration")
+	}
+	_, err = listener.WriteToUDP(testResponse(200, "OK", registerCallID, headers["cseq"], nil), remote)
+	return err
+}
+
+// fakeConn is a minimal net.Conn useful for tests that only need LocalAddr
+// to succeed and do not care about the actual SIP MESSAGE delivery report.
+type fakeConn struct{}
+
+func (*fakeConn) Read([]byte) (int, error)         { return 0, errors.New("fakeConn: closed") }
+func (*fakeConn) Write(source []byte) (int, error) { return len(source), nil }
+func (*fakeConn) Close() error                     { return nil }
+func (*fakeConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 5060}
+}
+func (*fakeConn) RemoteAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 5060}
+}
+func (*fakeConn) SetDeadline(time.Time) error      { return nil }
+func (*fakeConn) SetReadDeadline(time.Time) error  { return nil }
+func (*fakeConn) SetWriteDeadline(time.Time) error { return nil }

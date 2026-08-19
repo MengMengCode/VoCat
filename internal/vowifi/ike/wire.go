@@ -59,6 +59,7 @@ const (
 	notifyMOBIKESupported = 16396
 	notifyNATSource       = 16388
 	notifyNATDestination  = 16389
+	notifyCookie          = 16390
 	notifyEAPOnlyAuth     = 16417
 	notifyDeviceIdentity  = 41101
 	notifyInvalidKE       = 17

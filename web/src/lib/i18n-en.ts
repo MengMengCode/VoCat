@@ -685,6 +685,8 @@ export const EN_DICT: Record<string, string> = {
   "AT 终端暂不可用": "AT terminal unavailable",
   "AT=串口 / QMI=纯 QMI": "AT=serial / QMI=pure QMI",
   "AT=传统串口 / QMI=纯 QMI": "AT=legacy serial / QMI=pure QMI",
+  "强制发送 AT 指令": "Force-send AT command",
+  "强制模式允许发送默认被拦截的 AT 指令（如切网、拨号、短信、USSD），误操作可能导致断网或费用扣除。": "Force mode allows sending AT commands that are normally blocked (e.g. mode switching, dialing, SMS, USSD). Mistakes may disconnect the network or incur charges.",
   "E911地址": "E911 Address",
   "E911地址设置页面打开失败": "Failed to open the E911 address setup page",
   "IMEI 绑定": "IMEI Binding",
@@ -820,6 +822,8 @@ export const EN_DICT: Record<string, string> = {
   "匹配依据": "Profile Match",
   "方向": "Direction",
   "无法读取 IMEI（控制口可能挂死），暂不可添加。": "Cannot read the IMEI (the control port may be stuck); cannot add for now.",
+  "已发现该模组，但未找到 AT 串口：通常是 option 驱动未认该 PID 或模组处于 MBIM/RNDIS 组态。可 `echo 2c7c <pid> | sudo tee /sys/bus/usb-serial/drivers/option1/new_id` 后重扫，或用 AT+QCFG 切到 QMI+AT 组态。":
+    "The modem was discovered, but no AT serial port was found. This usually means the `option` driver does not recognize this PID, or the module is in an MBIM/RNDIS composition. Run `echo 2c7c <pid> | sudo tee /sys/bus/usb-serial/drivers/option1/new_id` then rescan, or use AT+QCFG to switch to a QMI+AT composition.",
   "未找到可用的 AT 端口（串口可能仍在枚举），系统会自动重试；也可点击重新扫描。":
     "No usable AT port was found (serial interfaces may still be enumerating). The system retries automatically; you can also rescan now.",
   "无法读取该设备 IMEI（可能控制口挂死），请执行 AT!RESET 或切换组态后重试": "Cannot read the device IMEI (the control port may be stuck); run AT!RESET or switch the USB composition and retry",
