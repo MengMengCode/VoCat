@@ -3,9 +3,9 @@
 # vocat install / update script for systemd and OpenWrt/procd deployments.
 #
 # Usage:
-#   bash install.sh [version]             # run directly when already root
-#   sudo bash install.sh [version]        # run through sudo as a normal user
-#   bash install.sh --check-env           # check VoWiFi host prerequisites
+#   bash install.sh [--check-env] [--skip-vowifi-check] [version]       # run directly when already root
+#   sudo bash install.sh [--check-env] [--skip-vowifi-check] [version]  # run through sudo as a normal user
+#   bash install.sh --check-env                                           # check VoWiFi host prerequisites
 #
 # Behavior:
 #   - Prompts for script language (中文 / English) as soon as it runs.
@@ -296,8 +296,8 @@ check_vowifi_environment() {
             "The OpenWrt/Kwrt kernel $(uname -r) lacks NETLINK_XFRM and its feed has no matching kmod-ipsec. Use a firmware built with matching kmod-ipsec, kmod-ipsec4/6, crypto-authenc, CBC, AES and SHA1 modules. Never force kmods from another kernel. Use --skip-vowifi-check only for non-VoWiFi operation."
     fi
     die \
-        "当前 Linux 内核不支持 XFRM/IPsec，VoWiFi IMS 无法工作。请启用 CONFIG_XFRM、CONFIG_XFRM_USER、CONFIG_INET_ESP、CONFIG_INET6_ESP、AES-CBC 和 HMAC-SHA1。" \
-        "This Linux kernel lacks XFRM/IPsec required by VoWiFi IMS. Enable CONFIG_XFRM, CONFIG_XFRM_USER, CONFIG_INET_ESP, CONFIG_INET6_ESP, AES-CBC and HMAC-SHA1."
+        "当前 Linux 内核不支持 XFRM/IPsec，VoWiFi IMS 无法工作。请启用 CONFIG_XFRM、CONFIG_XFRM_USER、CONFIG_INET_ESP、CONFIG_INET6_ESP、AES-CBC 和 HMAC-SHA1；若仅使用非 VoWiFi 功能（蜂窝短信/数据等），可重新运行安装脚本并加 --skip-vowifi-check。" \
+        "This Linux kernel lacks XFRM/IPsec required by VoWiFi IMS. Enable CONFIG_XFRM, CONFIG_XFRM_USER, CONFIG_INET_ESP, CONFIG_INET6_ESP, AES-CBC and HMAC-SHA1; or re-run with --skip-vowifi-check if you only need non-VoWiFi features (cellular SMS/data)."
 }
 
 # --- Skip if already installed at the same version ---------------------------

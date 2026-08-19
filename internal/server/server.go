@@ -57,6 +57,7 @@ type Server struct {
 	auth                *auth.Service
 	devices             DeviceController
 	vowifi              VoWiFiController
+	ussdSessions        ussdSessionStore
 	logs                *loghub.Hub
 	assets              fs.FS
 	indexHTML           []byte
@@ -117,6 +118,7 @@ func New(options Options) (*Server, error) {
 		auth:                options.Auth,
 		devices:             options.Devices,
 		vowifi:              options.VoWiFi,
+		ussdSessions:        newUSSDSessionStore(),
 		logs:                options.Logs,
 		assets:              options.Assets,
 		indexHTML:           indexHTML,

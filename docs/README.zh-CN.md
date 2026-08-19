@@ -92,6 +92,13 @@ sudo bash install.sh 0.0.2
 
 VoWiFi IMS 必须使用 Linux XFRM/IPsec。OpenWrt/Kwrt 上安装脚本会从当前固件自己的软件源尝试安装严格匹配的 `ip-full`、`kmod-ipsec`、`kmod-ipsec4/6`、`kmod-crypto-authenc`、AES-CBC 和 SHA1 组件。若软件源没有与当前内核匹配的模块，必须更换包含这些组件的固件，禁止强装其他内核版本的 kmod。
 
+如果你的内核确实无法提供 XFRM/IPsec，且仅需要非 VoWiFi 功能（蜂窝短信、数据等），可在安装时加上 `--skip-vowifi-check`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
+sudo bash install.sh --skip-vowifi-check
+```
+
 安装程序会:
 
 - 检测 `amd64`、`386`、`arm64` 或 `armv7` 架构;

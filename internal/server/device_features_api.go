@@ -9,6 +9,7 @@ import (
 
 	"vocat/internal/device"
 	"vocat/internal/store"
+	"vocat/internal/vowifi"
 )
 
 // overviewStreamInterval is the cadence at which the overview SSE stream pushes
@@ -192,6 +193,31 @@ func (s *Server) handleUSSDContinue(w http.ResponseWriter, r *http.Request) bool
 	input := firstNonEmpty(request.Input, request.Command)
 	ctx, cancel := actionRequestContext(r.Context(), request.TimeoutMs)
 	defer cancel()
+	// A session opened by the USSI path maps back to a device id that may still
+	// be VoWiFi-active. Prefer USSI continue when IMS is ready; otherwise report
+	// the session as unavailable rather than falling through to the cellular
+	// CUSD path, because the IMS session owns the actual dialog.
+	if deviceID, sessionErr := s.ussdSessionDevice(sessionID); sessionErr == nil {
+		if config, configErr := s.store.Device(r.Context(), deviceID); configErr == nil &&
+			config.VoWiFiEnabled && s.vowifi != nil {
+			if sender, ok := s.vowifi.(imsUSSIController); ok {
+				if state, stateErr := s.vowifi.State(deviceID); stateErr == nil && state.IMSReady {
+					result, sendErr := sender.SendUSSI(ctx, deviceID, vowifi.USSISubmitRequest{Input: input})
+					if sendErr == nil {
+						writeUSSDResult(w, ussdResultFromUSSI(result, deviceID, s))
+						return true
+					}
+					if !errors.Is(sendErr, vowifi.ErrUSSINotReady) {
+						s.writeDeviceError(w, sendErr)
+						return true
+					}
+				}
+			}
+		}
+		writeError(w, http.StatusServiceUnavailable, "ussi_session_unavailable",
+			"USSI session is no longer available because the IMS registration has dropped")
+		return true
+	}
 	result, err := s.devices.ContinueUSSD(ctx, sessionID, input)
 	if err != nil {
 		s.writeDeviceError(w, err)
@@ -217,6 +243,16 @@ func (s *Server) handleUSSDCancel(w http.ResponseWriter, r *http.Request) bool {
 	sessionID := firstNonEmpty(request.SessionID, request.Session)
 	if sessionID == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "session_id is required")
+		return true
+	}
+	// Drop a USSI-originated session token locally. USSI has no network-side
+	// release signalling in the minimal implementation, so dropping the handle
+	// matches the cellular AT+CUSD=2 "best-effort abort" behavior.
+	if _, sessionErr := s.ussdSessionDevice(sessionID); sessionErr == nil {
+		s.dropUSSDSession(sessionID)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"data": map[string]any{"cancelled": true, "session_id": sessionID},
+		})
 		return true
 	}
 	if err := s.devices.CancelUSSD(r.Context(), sessionID); err != nil {

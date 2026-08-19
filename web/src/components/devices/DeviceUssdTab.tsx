@@ -7,7 +7,7 @@ import { AtTypingBubble } from "./AtLogEntry";
 import { tf, useI18n } from "../../lib/i18n";
 
 interface UssdResult {
-  status?: number;
+  status?: string;
   text?: string;
   rawText?: string;
   dcs?: number;
@@ -40,7 +40,7 @@ export function DeviceUssdTab({ deviceId }: { deviceId: string }) {
     const res = await api<{ result?: Record<string, unknown>; channel?: string }>(path, { method: "POST", body });
     const r = (res?.result || {}) as Record<string, unknown>;
     return {
-      status: r.status as number | undefined,
+      status: r.status as string | undefined,
       text: (r.text as string) || "",
       rawText: ((r.rawText as string) || (r.rawXml as string) || "") as string,
       dcs: r.dcs as number | undefined,
@@ -59,15 +59,15 @@ export function DeviceUssdTab({ deviceId }: { deviceId: string }) {
       const v = await callUssd(command);
       if (v.channel) setChannel(v.channel);
       const text = v.text || v.rawText || t("[空响应]");
-      if (v.status === 5) {
+      if (v.status === "failed") {
         setLog((prev) => [...prev, { ts: Date.now(), type: "err", content: tf("[网络不支持/无响应]\n{text}", { text }), dcs: v.dcs, channel: v.channel }]);
         clearSession();
-      } else if (v.status === 2) {
+      } else if (v.status === "terminated") {
         setLog((prev) => [...prev, { ts: Date.now(), type: "err", content: tf("[被网络终止]\n{text}", { text }), dcs: v.dcs, channel: v.channel }]);
         clearSession();
       } else {
         setLog((prev) => [...prev, { ts: Date.now(), type: "res", content: text, dcs: v.dcs, channel: v.channel }]);
-        if (v.status === 1 && v.sessionId) setSessionId(v.sessionId);
+        if (v.status === "awaiting_input" && v.sessionId) setSessionId(v.sessionId);
         else clearSession();
       }
     } catch (e) {

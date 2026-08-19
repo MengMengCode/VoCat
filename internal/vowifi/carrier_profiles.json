@@ -36,7 +36,22 @@
       "ims": {
         "identity_profile": "att",
         "register_profile": "att",
-        "ipsec_encryption": "aes-cbc"
+        "ipsec_encryption": "aes-cbc",
+        "register_options": {
+          "contact_format": "att",
+          "expiry_seconds": 18400,
+          "contact_extra_tags": ["+g.3gpp.accesstype=\"wlan1\""],
+          "supported_header": "path,sec-agree,gruu",
+          "user_agent": "SimAdmin VoWiFi",
+          "p_preferred_identity": true,
+          "p_visited_network_id": "one.att.net",
+          "p_access_network_info": "IEEE-802.11;i-wlan-node-id=000000000000;network-provided",
+          "cellular_network_info": "3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=3102800000000;cell-info-age=0",
+          "accept_contact_tags": [
+            "*;+g.3gpp.smsip",
+            "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\""
+          ]
+        }
       }
     },
     {
@@ -45,7 +60,12 @@
       "ike": { "advertise_eap_only": false },
       "ims": {
         "register_profile": "o2-germany",
-        "ipsec_encryption": "null"
+        "ipsec_encryption": "null",
+        "register_options": {
+          "supported_header": "path, gruu, outbound, sec-agree, 100rel, timer",
+          "allow_header": "INVITE, ACK, CANCEL, BYE, PRACK, UPDATE, INFO, MESSAGE, OPTIONS",
+          "p_preferred_identity": true
+        }
       }
     },
     {
@@ -92,6 +112,14 @@
       "epdg": {
         "dns_hosts": ["epdg.epc.mnc002.mcc262.pub.3gppnetwork.org"],
         "dns_client_subnet": "109.192.0.0/24"
+      }
+    },
+    {
+      "id": "dito-philippines",
+      "match": { "home_plmns": ["51566"] },
+      "ike": { "proposal": "legacy-sha1-modp1024" },
+      "ims": {
+        "allow_sms_without_contact_confirmation": true
       }
     }
   ]

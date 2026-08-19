@@ -381,6 +381,10 @@ export default function DevicesPage() {
       message.warning(t("系统已发现 USB 读卡器，但 PC/SC 驱动未加载；请安装 libccid 或厂商驱动后重新扫描。"));
       return;
     }
+    if (d.discoveryIssue === "at_port_missing") {
+      message.warning(t("已发现该模组，但未找到 AT 串口：通常是 option 驱动未认该 PID 或模组处于 MBIM/RNDIS 组态。可 `echo 2c7c <pid> | sudo tee /sys/bus/usb-serial/drivers/option1/new_id` 后重扫，或用 AT+QCFG 切到 QMI+AT 组态。"));
+      return;
+    }
     if (d.degraded) {
       message.warning(t("无法读取该设备 IMEI（可能控制口挂死），请执行 AT!RESET 或切换组态后重试"));
       return;

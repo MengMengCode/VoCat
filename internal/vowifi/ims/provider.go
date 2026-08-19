@@ -66,6 +66,10 @@ type Config struct {
 	// OnSMSStatus is invoked for an SMS-STATUS-REPORT received after a
 	// submission that requested a delivery report.
 	OnSMSStatus func(context.Context, ReceivedSMSStatus) error
+	// OnUSSD is invoked for a network-originated USSD MESSAGE received over
+	// IMS (3GPP TS 24.390). Returning an error is logged but does not affect
+	// the 200 OK already sent, because USSI has no RP-ACK transport.
+	OnUSSD func(context.Context, ReceivedUSSD) error
 	// Logger receives structured IMS runtime diagnostics. Inbound SMS logs do
 	// not include message text or raw protocol payloads.
 	Logger *slog.Logger
@@ -704,10 +708,6 @@ func securityEncryptionForIdentity(identity vowifi.SIMIdentity) string {
 	return vowifi.ResolveCarrierProfile(identity).IMSIPSecEncryption
 }
 
-func usesO2GermanyIMSProfile(identity vowifi.SIMIdentity) bool {
-	return vowifi.ResolveCarrierProfile(identity).IMSRegisterProfile == vowifi.IMSProfileO2Germany
-}
-
 func (session *Session) abort() {
 	session.refreshCancel()
 	_ = session.conn.Close()
@@ -911,9 +911,10 @@ func (session *Session) buildRegister(
 	authorizationHeader string,
 	authorization string,
 ) ([]byte, error) {
-	att310280 := vowifi.IsATT310280(session.request.Identity)
-	if att310280 {
-		expires = 18400
+	profile := vowifi.ResolveCarrierProfile(session.request.Identity)
+	registerOptions := profile.IMSRegisterOptions
+	if registerOptions.ExpirySeconds != 0 {
+		expires = registerOptions.ExpirySeconds
 	}
 	branch, err := randomHex(12)
 	if err != nil {
@@ -924,43 +925,25 @@ func (session *Session) buildRegister(
 	transportUpper := strings.ToUpper(session.transport)
 	requestURI := "sip:" + session.identity.domain
 	routeURI := "sip:" + session.endpoint.address() + ";transport=" + session.transport + ";lr"
-	contact := fmt.Sprintf(
-		"<sip:%s@%s;transport=%s>;+sip.instance=\"<%s>\";+g.3gpp.smsip;audio;"+
-			`+g.3gpp.icsi-ref="%s"`,
-		session.identity.user,
-		contactAddress,
-		session.transport,
-		session.instanceID,
-		"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel",
-	)
-	if att310280 {
-		contact = fmt.Sprintf(
-			`<sip:%s@%s;transport=%s>;+g.3gpp.accesstype="wlan1";audio;+g.3gpp.smsip;`+
-				`+g.3gpp.icsi-ref="%s";+sip.instance="<%s>"`,
-			session.identity.user,
-			contactAddress,
-			session.transport,
-			"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel",
-			session.instanceID,
-		)
+	contact := session.buildContact(contactAddress, registerOptions)
+
+	defaultSupported := "path, gruu"
+	defaultAllow := "REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, SUBSCRIBE, NOTIFY"
+	supported := defaultSupported
+	if registerOptions.SupportedHeader != nil {
+		supported = *registerOptions.SupportedHeader
 	}
-	o2Germany := usesO2GermanyIMSProfile(session.request.Identity)
-	supported := "path, gruu"
-	allow := "REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, SUBSCRIBE, NOTIFY"
-	if o2Germany {
-		// Match the complete IMS capability set used by the previously working
-		// VoHive client. O2 validates more of the initial UE security profile
-		// than the other tested carriers do.
-		supported = "path, gruu, outbound, sec-agree, 100rel, timer"
-		allow = "INVITE, ACK, CANCEL, BYE, PRACK, UPDATE, INFO, MESSAGE, OPTIONS"
+	allow := defaultAllow
+	if registerOptions.AllowHeader != nil {
+		allow = *registerOptions.AllowHeader
 	}
-	if att310280 {
-		supported = "path,sec-agree,gruu"
-	}
+
 	userAgent := strings.TrimSpace(session.provider.config.UserAgent)
-	if att310280 && (userAgent == "" || userAgent == "vocat/1") {
-		userAgent = "SimAdmin VoWiFi"
+	if override := strings.TrimSpace(registerOptions.UserAgent); override != "" &&
+		(userAgent == "" || userAgent == "vocat/1") {
+		userAgent = override
 	}
+
 	lines := []string{
 		"REGISTER " + requestURI + " SIP/2.0",
 		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportUpper, local, branch),
@@ -972,28 +955,45 @@ func (session *Session) buildRegister(
 		fmt.Sprintf("CSeq: %d REGISTER", cseq),
 		"Contact: " + contact,
 		fmt.Sprintf("Expires: %d", expires),
-		"Supported: " + supported,
-		"Allow: " + allow,
-		"User-Agent: " + userAgent,
 	}
-	if o2Germany {
+	if supported != "" {
+		lines = append(lines, "Supported: "+supported)
+	}
+	if allow != "" {
+		lines = append(lines, "Allow: "+allow)
+	}
+	lines = append(lines, "User-Agent: "+userAgent)
+
+	defaultPANI := "IEEE-802.11;i-wlan-node-id=000000000000;network-provided"
+	pani := defaultPANI
+	if registerOptions.PAccessNetworkInfo != nil {
+		pani = *registerOptions.PAccessNetworkInfo
+	}
+
+	if registerOptions.PPreferredIdentity {
 		lines = append(lines, "P-Preferred-Identity: <"+session.identity.public+">")
-	} else if att310280 {
-		lines = append(lines,
-			"P-Preferred-Identity: <"+session.identity.public+">",
-			`P-Visited-Network-ID: "one.att.net"`,
-			"P-Access-Network-Info: IEEE-802.11;i-wlan-node-id=000000000000;network-provided",
-			"Cellular-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=3102800000000;cell-info-age=0",
-			"Accept-Contact: *;+g.3gpp.smsip",
-			`Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
-		)
-	} else {
-		lines = append(lines,
-			"P-Access-Network-Info: IEEE-802.11;i-wlan-node-id=000000000000;network-provided",
-			"Accept-Contact: *;+g.3gpp.smsip",
-			`Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
-		)
 	}
+	if value := strings.TrimSpace(registerOptions.PVisitedNetworkID); value != "" {
+		lines = append(lines, `P-Visited-Network-ID: "`+value+`"`)
+	}
+	if pani != "" {
+		lines = append(lines, "P-Access-Network-Info: "+pani)
+	}
+	if value := strings.TrimSpace(registerOptions.CellularNetworkInfo); value != "" {
+		lines = append(lines, "Cellular-Network-Info: "+value)
+	}
+
+	acceptContactTags := []string{
+		"*;+g.3gpp.smsip",
+		`*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
+	}
+	if registerOptions.AcceptContactTags != nil {
+		acceptContactTags = registerOptions.AcceptContactTags
+	}
+	for _, tag := range acceptContactTags {
+		lines = append(lines, "Accept-Contact: "+tag)
+	}
+
 	if session.securityOffered() {
 		lines = append(lines,
 			"Security-Client: "+session.securityClientValue(),
@@ -1018,6 +1018,33 @@ func (session *Session) buildRegister(
 	}
 	lines = append(lines, "Content-Length: 0", "", "")
 	return []byte(strings.Join(lines, "\r\n")), nil
+}
+
+func (session *Session) buildContact(contactAddress string, registerOptions vowifi.IMSRegisterOptions) string {
+	base := fmt.Sprintf("<sip:%s@%s;transport=%s>", session.identity.user, contactAddress, session.transport)
+	instanceID := session.instanceID
+	icsiRef := "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
+
+	switch registerOptions.ContactFormat {
+	case vowifi.IMSContactFormatATT:
+		extra := ""
+		for _, tag := range registerOptions.ContactExtraTags {
+			extra += ";" + tag
+		}
+		return fmt.Sprintf(
+			`%s%s;audio;+g.3gpp.smsip;+g.3gpp.icsi-ref="%s";+sip.instance="<%s>"`,
+			base, extra, icsiRef, instanceID,
+		)
+	default:
+		extra := ""
+		for _, tag := range registerOptions.ContactExtraTags {
+			extra += ";" + tag
+		}
+		return fmt.Sprintf(
+			`%s;+sip.instance="<%s>";+g.3gpp.smsip;audio;+g.3gpp.icsi-ref="%s"%s`,
+			base, instanceID, icsiRef, extra,
+		)
+	}
 }
 
 func (session *Session) exchange(ctx context.Context, request []byte, cseq uint32) (*sipResponse, error) {
@@ -1372,11 +1399,26 @@ func (session *Session) EnableSMS(ctx context.Context) (vowifi.SMSEvidence, erro
 		return vowifi.SMSEvidence{}, vowifi.ErrIMSNotRegistered
 	case !session.expiresAt.IsZero() && !time.Now().Before(session.expiresAt):
 		return vowifi.SMSEvidence{}, ErrRegistrationExpired
-	case !session.smsContactConfirmed:
+	case !session.smsCapabilityReady():
 		return vowifi.SMSEvidence{Ready: false}, ErrSMSCapabilityNotConfirmed
 	default:
 		return vowifi.SMSEvidence{Ready: true}, nil
 	}
+}
+
+func (session *Session) smsCapabilityReady() bool {
+	if session.smsContactConfirmed {
+		return true
+	}
+	profile := vowifi.ResolveCarrierProfile(session.request.Identity)
+	if profile.AllowSMSWithoutContactConfirmation {
+		session.provider.config.Logger.Warn("IMS SMS capability was not confirmed by registrar; proceeding because carrier profile permits it",
+			"device_id", session.request.DeviceID,
+			"carrier_profile", profile.ID,
+			"match_source", profile.MatchSource)
+		return true
+	}
+	return false
 }
 
 func (session *Session) Close(ctx context.Context) error {

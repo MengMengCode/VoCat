@@ -31,8 +31,38 @@ func TestValidateATCommandBlocksTrafficMessagingAndDialActions(t *testing.T) {
 		"AT+CSQ;+CMSS=7",
 		"AT+CSQ;D12345;",
 	} {
-		if err := validateATCommand(command); err == nil {
+		if err := validateATCommand(command, false); err == nil {
 			t.Errorf("validateATCommand(%q) permitted a guarded mutation", command)
+		}
+	}
+}
+
+func TestValidateATCommandForceBypassesGuard(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"AT+CGATT=1",
+		"AT+CFUN=1",
+		"AT+CGACT=1,1",
+		"AT+CUSD=1,\"*100#\"",
+		"ATD12345;",
+	} {
+		if err := validateATCommand(command, true); err != nil {
+			t.Errorf("validateATCommand(%q, true): %v", command, err)
+		}
+	}
+}
+
+func TestValidateATCommandForceKeepsSyntaxChecks(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"A",
+		"",
+		"AT\r",
+		"AT\n",
+		string(make([]byte, 513)),
+	} {
+		if err := validateATCommand(command, true); err == nil {
+			t.Errorf("validateATCommand(%q, true) skipped syntax check", command)
 		}
 	}
 }
@@ -48,7 +78,7 @@ func TestValidateATCommandAllowsReadOnlyStatusQueries(t *testing.T) {
 		"AT+CIMI",
 		"AT+CCID",
 	} {
-		if err := validateATCommand(command); err != nil {
+		if err := validateATCommand(command, false); err != nil {
 			t.Errorf("validateATCommand(%q): %v", command, err)
 		}
 	}

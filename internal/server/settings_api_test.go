@@ -421,6 +421,11 @@ func TestNotificationSettingsRejectsUnknownAndMalformedInput(t *testing.T) {
 			code: "invalid_notification_config",
 		},
 		{
+			name: "webhook URL with embedded credentials",
+			body: `{"webhook":{"enabled":true,"urls":["http://user:pass@example.com"]}}`,
+			code: "invalid_notification_config",
+		},
+		{
 			name: "null body",
 			body: `null`,
 			code: "invalid_request",
@@ -991,6 +996,41 @@ func TestRestrictedNotificationClientCapsTimeoutAndRedirects(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://example.com/next", nil)
 	if err := client.CheckRedirect(request, nil); err == nil {
 		t.Fatal("notification client followed a redirect")
+	}
+}
+
+func TestNotificationProxyAcceptsAuthenticatedURL(t *testing.T) {
+	test := newSettingsAPITest(t)
+	body := `{"telegram":{"enabled":true,"bot_token":"123456:abc","chat_id":"1","proxy":"http://user:password@127.0.0.1:8080"}}`
+	recorder := test.request(t, http.MethodPut, "/api/settings/notifications", body)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	response := decodeSettingsResponse(t, recorder)
+	data, ok := response["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data missing: %#v", response)
+	}
+	telegram, ok := data["telegram"].(map[string]any)
+	if !ok {
+		t.Fatalf("telegram response missing: %#v", data)
+	}
+	if telegram["proxy"] != "http://user:password@127.0.0.1:8080" {
+		t.Fatalf("proxy not preserved: %#v", telegram["proxy"])
+	}
+}
+
+func TestNotificationProxyRejectsMalformedURL(t *testing.T) {
+	test := newSettingsAPITest(t)
+	body := `{"telegram":{"enabled":true,"bot_token":"123456:abc","chat_id":"1","proxy":"not-a-url"}}`
+	recorder := test.request(t, http.MethodPut, "/api/settings/notifications", body)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	response := decodeSettingsResponse(t, recorder)
+	detail, ok := response["error"].(map[string]any)
+	if !ok || detail["code"] != "invalid_notification_config" {
+		t.Fatalf("error = %#v", detail)
 	}
 }
 

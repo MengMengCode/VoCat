@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"vocat/internal/device"
 	"vocat/internal/vowifi"
@@ -24,6 +25,7 @@ import (
 
 const (
 	smsContentType          = "application/vnd.3gpp.sms"
+	ussiContentType         = "application/vnd.3gpp.ussd"
 	sipMessageRetransmitT1  = 500 * time.Millisecond
 	sipMessageRetransmitMax = 4 * time.Second
 )
@@ -52,6 +54,7 @@ type ReceivedSMS struct {
 	CallID                 string
 	RawRPDU                string
 	RawTPDU                string
+	DecodeError            string
 }
 
 // ReceivedSMSStatus is network delivery evidence for one submitted SMS part.
@@ -69,6 +72,24 @@ type ReceivedSMSStatus struct {
 	CallID                 string
 	RawRPDU                string
 	RawTPDU                string
+	DecodeError            string
+}
+
+// ReceivedUSSD is a decoded network-originated USSD message delivered over IMS
+// (3GPP TS 24.390). Status carries the network's USSD operation code semantics
+// ("final", "awaiting_input", "terminated") when present in the body.
+type ReceivedUSSD struct {
+	MessageID    string
+	DeviceID     string
+	IMSI         string
+	From         string
+	Text         string
+	DCS          *int
+	Status       string
+	Continueable bool
+	Timestamp    time.Time
+	CallID       string
+	RawBody      string
 }
 
 type sipTransactionKey struct {
@@ -343,10 +364,16 @@ func (session *Session) handleSIPRequest(request *sipRequest, respond func([]byt
 		return
 	}
 	status := 200
+	ussiMessage := false
 	switch request.Method {
 	case "OPTIONS":
 	case "MESSAGE":
-		if !supportsSMSContentType(request.value("Content-Type")) {
+		switch {
+		case supportsSMSContentType(request.value("Content-Type")):
+			// SMS body handled below.
+		case supportsUSSIContentType(request.value("Content-Type")):
+			ussiMessage = true
+		default:
 			status = 415
 		}
 	default:
@@ -362,9 +389,15 @@ func (session *Session) handleSIPRequest(request *sipRequest, respond func([]byt
 	}
 	if status != 200 || request.Method != "MESSAGE" {
 		if request.Method == "MESSAGE" {
-			session.logInboundSMS(slog.LevelWarn, "IMS inbound SMS MESSAGE rejected", request,
+			session.logInboundSMS(slog.LevelWarn, "IMS inbound MESSAGE rejected", request,
 				"stage", "content_type", "sip_status", status)
 		}
+		return
+	}
+	if ussiMessage {
+		session.logInboundSMS(slog.LevelInfo, "IMS inbound USSD MESSAGE received", request,
+			"stage", "sip_accepted")
+		go session.processUSSIMessage(request)
 		return
 	}
 	session.logInboundSMS(slog.LevelInfo, "IMS inbound SMS MESSAGE received", request,
@@ -382,6 +415,14 @@ func supportsSMSContentType(value string) bool {
 	}
 	return strings.EqualFold(mediaType, "multipart/mixed") &&
 		strings.TrimSpace(parameters["boundary"]) != ""
+}
+
+func supportsUSSIContentType(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(value))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(mediaType, ussiContentType)
 }
 
 func buildSIPResponse(request *sipRequest, status int, tag string) ([]byte, error) {
@@ -414,7 +455,7 @@ func buildSIPResponse(request *sipRequest, status int, tag string) ([]byte, erro
 		lines = append(lines, "Allow: REGISTER, MESSAGE, OPTIONS")
 	}
 	if status == 415 {
-		lines = append(lines, "Accept: "+smsContentType)
+		lines = append(lines, "Accept: "+smsContentType+", "+ussiContentType)
 	}
 	lines = append(lines, "Content-Length: 0", "", "")
 	return []byte(strings.Join(lines, "\r\n")), nil
@@ -446,29 +487,28 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 			"rp_message_type", int(rpdu.messageType), "rp_reference", int(rpdu.reference))
 		return
 	}
-	message, err := device.DecodeSMSDeliverTPDU(rpdu.tpdu)
-	if err != nil {
-		session.logInboundSMS(slog.LevelWarn, "IMS inbound SMS decode failed", request,
-			"stage", "tpdu", "payload_source", payloadSource,
-			"rp_reference", int(rpdu.reference), "tpdu_bytes", len(rpdu.tpdu), "error", err)
-		session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 95), "rp_error")
-		return
-	}
+
+	message, decodeErr := device.DecodeSMSDeliverTPDU(rpdu.tpdu)
 	receivedAt := time.Now().UTC()
 	callID := strings.TrimSpace(request.value("Call-ID"))
-	if message.Direction == device.SMSDirectionStatusReport {
-		if message.MessageReference == nil || message.StatusCode == nil {
-			session.logInboundSMS(slog.LevelWarn, "IMS inbound SMS status report is incomplete", request,
-				"stage", "tpdu", "rp_reference", int(rpdu.reference))
-			session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 95), "rp_error")
-			return
-		}
+	carrierProfile := vowifi.ResolveCarrierProfile(session.request.Identity)
+
+	if decodeErr != nil {
+		session.logInboundSMS(slog.LevelWarn, "IMS inbound SMS decode failed; persisting raw payload", request,
+			"stage", "tpdu", "payload_source", payloadSource,
+			"rp_reference", int(rpdu.reference), "tpdu_bytes", len(rpdu.tpdu),
+			"carrier_profile", carrierProfile.ID,
+			"direction", message.Direction, "error", decodeErr)
+	}
+
+	switch {
+	case message.Direction == device.SMSDirectionStatusReport:
 		status := ReceivedSMSStatus{
 			DeviceID:               session.request.DeviceID,
 			IMSI:                   session.request.Identity.IMSI,
 			To:                     message.To,
-			MessageReference:       *message.MessageReference,
-			StatusCode:             *message.StatusCode,
+			MessageReference:       intPtrValue(message.MessageReference),
+			StatusCode:             intPtrValue(message.StatusCode),
 			DeliveryStatus:         message.DeliveryStatus,
 			ServiceCenterTimestamp: message.ServiceCenterTimestamp,
 			DischargeTimestamp:     message.DischargeTimestamp,
@@ -477,12 +517,15 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 			CallID:                 callID,
 			RawRPDU:                strings.ToUpper(hex.EncodeToString(payload)),
 			RawTPDU:                strings.ToUpper(hex.EncodeToString(rpdu.tpdu)),
+			DecodeError:            errorString(decodeErr),
 		}
-		if session.provider.config.OnSMSStatus != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err = session.provider.config.OnSMSStatus(ctx, status)
-			cancel()
+		if status.MessageReference == 0 && status.StatusCode == 0 && decodeErr == nil {
+			session.logInboundSMS(slog.LevelWarn, "IMS inbound SMS status report is incomplete", request,
+				"stage", "tpdu", "rp_reference", int(rpdu.reference))
+			session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 95), "rp_error")
+			return
 		}
+		err := session.invokeSMSStatusCallback(status)
 		if err != nil {
 			session.logInboundSMS(slog.LevelWarn, "IMS inbound SMS status persistence failed", request,
 				"stage", "status_callback", "rp_reference", int(rpdu.reference), "error", err)
@@ -491,55 +534,84 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 		}
 		session.logInboundSMS(slog.LevelInfo, "IMS inbound SMS status report processed", request,
 			"stage", "status_callback", "rp_reference", int(rpdu.reference),
-			"status_code", *message.StatusCode)
+			"status_code", status.StatusCode)
 		session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
-		return
-	}
-	if message.Direction != device.SMSDirectionReceived {
+
+	case message.Direction == device.SMSDirectionReceived || decodeErr != nil:
+		var serviceCenterTimestamp *time.Time
+		if message.ServiceCenterTimestamp != nil {
+			value := message.ServiceCenterTimestamp.UTC()
+			serviceCenterTimestamp = &value
+		}
+		received := ReceivedSMS{
+			// A retransmission inside the same SIP transaction is idempotent, but a
+			// fresh Call-ID/RP reference is a distinct network delivery and must stay
+			// visible even when its TPDU and text happen to be identical.
+			MessageID:              fmt.Sprintf("ims:%s:%d", callID, rpdu.reference),
+			DeviceID:               session.request.DeviceID,
+			IMSI:                   session.request.Identity.IMSI,
+			From:                   message.From,
+			Text:                   message.Text,
+			Timestamp:              receivedAt,
+			ServiceCenterTimestamp: serviceCenterTimestamp,
+			Encoding:               message.Encoding,
+			Concat:                 message.Concat,
+			RPReference:            int(rpdu.reference),
+			CallID:                 callID,
+			RawRPDU:                strings.ToUpper(hex.EncodeToString(payload)),
+			RawTPDU:                strings.ToUpper(hex.EncodeToString(rpdu.tpdu)),
+			DecodeError:            errorString(decodeErr),
+		}
+		err := session.invokeSMSCallback(received)
+		if err != nil {
+			session.logInboundSMS(slog.LevelWarn, "IMS inbound SMS persistence failed", request,
+				"stage", "sms_callback", "rp_reference", int(rpdu.reference), "error", err)
+			session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 22), "rp_error")
+			return
+		}
+		session.logInboundSMS(slog.LevelInfo, "IMS inbound SMS processed", request,
+			"stage", "sms_callback", "payload_source", payloadSource,
+			"rp_reference", int(rpdu.reference), "encoding", message.Encoding,
+			"concatenated", message.Concat != nil, "decode_error", decodeErr != nil)
+		session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
+
+	default:
 		session.logInboundSMS(slog.LevelWarn, "IMS inbound SMS has unexpected TPDU direction", request,
 			"stage", "tpdu", "rp_reference", int(rpdu.reference), "direction", message.Direction)
 		session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 95), "rp_error")
-		return
 	}
-	var serviceCenterTimestamp *time.Time
-	if message.ServiceCenterTimestamp != nil {
-		value := message.ServiceCenterTimestamp.UTC()
-		serviceCenterTimestamp = &value
+}
+
+func (session *Session) invokeSMSCallback(received ReceivedSMS) error {
+	if session.provider.config.OnSMS == nil {
+		return nil
 	}
-	received := ReceivedSMS{
-		// A retransmission inside the same SIP transaction is idempotent, but a
-		// fresh Call-ID/RP reference is a distinct network delivery and must stay
-		// visible even when its TPDU and text happen to be identical.
-		MessageID:              fmt.Sprintf("ims:%s:%d", callID, rpdu.reference),
-		DeviceID:               session.request.DeviceID,
-		IMSI:                   session.request.Identity.IMSI,
-		From:                   message.From,
-		Text:                   message.Text,
-		Timestamp:              receivedAt,
-		ServiceCenterTimestamp: serviceCenterTimestamp,
-		Encoding:               message.Encoding,
-		Concat:                 message.Concat,
-		RPReference:            int(rpdu.reference),
-		CallID:                 callID,
-		RawRPDU:                strings.ToUpper(hex.EncodeToString(payload)),
-		RawTPDU:                strings.ToUpper(hex.EncodeToString(rpdu.tpdu)),
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return session.provider.config.OnSMS(ctx, received)
+}
+
+func (session *Session) invokeSMSStatusCallback(status ReceivedSMSStatus) error {
+	if session.provider.config.OnSMSStatus == nil {
+		return nil
 	}
-	if session.provider.config.OnSMS != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err = session.provider.config.OnSMS(ctx, received)
-		cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return session.provider.config.OnSMSStatus(ctx, status)
+}
+
+func intPtrValue(value *int) int {
+	if value == nil {
+		return 0
 	}
-	if err != nil {
-		session.logInboundSMS(slog.LevelWarn, "IMS inbound SMS persistence failed", request,
-			"stage", "sms_callback", "rp_reference", int(rpdu.reference), "error", err)
-		session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 22), "rp_error")
-		return
+	return *value
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
 	}
-	session.logInboundSMS(slog.LevelInfo, "IMS inbound SMS processed", request,
-		"stage", "sms_callback", "payload_source", payloadSource,
-		"rp_reference", int(rpdu.reference), "encoding", message.Encoding,
-		"concatenated", message.Concat != nil)
-	session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
+	return err.Error()
 }
 
 func extractSMSPayload(request *sipRequest) ([]byte, string, error) {
@@ -607,6 +679,235 @@ func decodeSMSTransfer(body []byte, encoding string) ([]byte, error) {
 	}
 }
 
+// encodeUSSDBody encodes a USSD string for a TS 24.390 application/vnd.3gpp.ussd
+// body. To avoid carrier-specific GSM-7 packing conventions the body is always
+// UTF-16 (big-endian) with DCS 0x48, which every USSI-capable P-CSCF accepts.
+func encodeUSSDBody(text string) ([]byte, *int, error) {
+	dcs := 0x48
+	if text == "" {
+		return nil, &dcs, nil
+	}
+	encoded := utf16.Encode([]rune(text))
+	body := make([]byte, 0, len(encoded)*2)
+	for _, unit := range encoded {
+		body = append(body, byte(unit>>8), byte(unit))
+	}
+	return body, &dcs, nil
+}
+
+// decodeUSSDBody reverses encodeUSSDBody using the data coding scheme carried
+// alongside the USSD string. DCS 0x00/0x0F => GSM 7-bit default alphabet
+// (unpacked one code per byte, as some carriers send); 0x48 => UCS2/UTF-16.
+// Any other DCS is treated as raw bytes.
+func decodeUSSDBody(body []byte, dcs int) string {
+	switch dcs {
+	case 0x00, 0x0F:
+		if decoded, ok := device.DecodeGSM7Septets(string(body)); ok {
+			return decoded
+		}
+	}
+	if dcs == 0x48 && len(body) > 0 && len(body)%2 == 0 {
+		units := make([]uint16, 0, len(body)/2)
+		for index := 0; index < len(body); index += 2 {
+			units = append(units, uint16(body[index])<<8|uint16(body[index+1]))
+		}
+		return string(utf16.Decode(units))
+	}
+	return string(body)
+}
+
+// processUSSIMessage decodes a network-originated USSD MESSAGE and hands it to
+// the OnUSSD callback. Unlike SMS there is no RP-ACK transport, so the 200 OK
+// has already been sent by handleSIPRequest and this routine only logs callback
+// failures.
+func (session *Session) processUSSIMessage(request *sipRequest) {
+	body, dcs, text, err := extractUSSDBody(request)
+	if err != nil {
+		session.logInboundSMS(slog.LevelWarn, "IMS inbound USSD decode failed", request,
+			"stage", "mime", "error", err)
+		return
+	}
+	callID := strings.TrimSpace(request.value("Call-ID"))
+	received := ReceivedUSSD{
+		MessageID: fmt.Sprintf("ims-ussd:%s", callID),
+		DeviceID:  session.request.DeviceID,
+		IMSI:      session.request.Identity.IMSI,
+		From:      firstURI(request.value("P-Asserted-Identity")),
+		Text:      text,
+		DCS:       dcs,
+		Status:    "final",
+		Timestamp: time.Now().UTC(),
+		CallID:    callID,
+		RawBody:   strings.ToUpper(hex.EncodeToString(body)),
+	}
+	if session.provider.config.OnUSSD != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = session.provider.config.OnUSSD(ctx, received)
+		cancel()
+	}
+	if err != nil {
+		session.logInboundSMS(slog.LevelWarn, "IMS inbound USSD callback failed", request,
+			"stage", "ussd_callback", "error", err)
+		return
+	}
+	session.logInboundSMS(slog.LevelInfo, "IMS inbound USSD processed", request,
+		"stage", "ussd_callback", "dcs", dcsPointerToInt(dcs))
+}
+
+func dcsPointerToInt(value *int) int {
+	if value == nil {
+		return -1
+	}
+	return *value
+}
+
+// extractUSSDBody decodes a TS 24.390 USSD body. The body is a sequence of
+// information elements; the common form is an optional language/network
+// indicator followed by the USSD string with its DCS. We scan for a component
+// whose length leaves a trailing DCS+string pair, returning the string, its
+// DCS, and the raw bytes.
+func extractUSSDBody(request *sipRequest) (raw []byte, dcs *int, text string, err error) {
+	if request == nil {
+		return nil, nil, "", errors.New("ims: USSD MESSAGE is nil")
+	}
+	body, decodeErr := decodeSMSTransfer(request.Body, request.value("Content-Transfer-Encoding"))
+	if decodeErr != nil {
+		return nil, nil, "", fmt.Errorf("ims: decode USSD body: %w", decodeErr)
+	}
+	raw, dcs, text = extractUSSDString(body)
+	return raw, dcs, text, nil
+}
+
+// extractUSSDString walks the TS 24.390 information elements looking for the
+// USSD string component: [length][DCS][octets...]. A leading 0xAB language
+// indicator pair is skipped. If no structured component is found, the whole
+// body is treated as a DCS 0x0F string.
+func extractUSSDString(body []byte) (raw []byte, dcs *int, text string) {
+	for offset := 0; offset+1 < len(body); {
+		if body[offset] == 0xAB {
+			// Language/network indicator: [0xAB][length of language].
+			if offset+1 >= len(body) {
+				break
+			}
+			skip := int(body[offset+1])
+			offset += 2 + skip
+			continue
+		}
+		// USSD string component: [length][DCS][octets...], length counts
+		// everything after the length byte (DCS + string octets).
+		length := int(body[offset])
+		if length < 1 || offset+1+length > len(body) {
+			break
+		}
+		dcsValue := int(body[offset+1])
+		stringBytes := body[offset+2 : offset+1+length]
+		dcs = &dcsValue
+		return body, dcs, decodeUSSDBody(stringBytes, dcsValue)
+	}
+	zero := 0x0F
+	return body, &zero, decodeUSSDBody(body, zero)
+}
+
+// SendUSSI submits a USSD dialog turn over IMS. The first turn carries the
+// service code in request.Code; a follow-up turn on an open dialog carries the
+// menu reply in request.Input. USSI does not require the +g.3gpp.smsip contact
+// to be confirmed — only IMS registration.
+func (session *Session) SendUSSI(ctx context.Context, request vowifi.USSISubmitRequest) (vowifi.USSISubmitResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	session.smsMu.Lock()
+	defer session.smsMu.Unlock()
+
+	session.mu.Lock()
+	if session.closed || !session.evidence.Registered {
+		session.mu.Unlock()
+		return vowifi.USSISubmitResult{}, vowifi.ErrUSSINotReady
+	}
+	target := session.ussiTarget()
+	session.mu.Unlock()
+
+	payload := strings.TrimSpace(firstNonEmpty(request.Input, request.Code))
+	if payload == "" {
+		return vowifi.USSISubmitResult{}, errors.New("ims: USSI payload is empty")
+	}
+	body, dcs, err := encodeUSSDBody(payload)
+	if err != nil {
+		return vowifi.USSISubmitResult{}, err
+	}
+	// TS 24.390 §5.2.1: [language indicator]? [length][DCS][USSD string].
+	// The length byte counts the DCS plus the string octets that follow it.
+	stringOctets := body
+	length := len(stringOctets) + 1
+	if length > 255 {
+		return vowifi.USSISubmitResult{}, errors.New("ims: USSD string exceeds 254 octets")
+	}
+	message := make([]byte, 0, 2+len(stringOctets))
+	message = append(message, byte(length), byte(*dcs))
+	message = append(message, stringOctets...)
+	response, sendErr := session.sendSIPMessageWith(ctx, target, message, "", ussiContentType, "ussd")
+	result := vowifi.USSISubmitResult{
+		SubmissionStatus: "pending",
+	}
+	if response != nil {
+		result.SIPCode = response.StatusCode
+	}
+	if sendErr != nil {
+		result.SubmissionStatus = "failed"
+		result.Raw = strings.ToUpper(hex.EncodeToString(message))
+		return result, sendErr
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		result.SubmissionStatus = "rejected_by_ims"
+		result.Status = "failed"
+		result.Raw = strings.ToUpper(hex.EncodeToString(message))
+		return result, fmt.Errorf("ims: USSI rejected with SIP %d", response.StatusCode)
+	}
+	// A 2xx response may carry the network's reply in the same MESSAGE body.
+	text, replyDCS := session.parseUSSIReply(response)
+	result.Text = text
+	result.DCS = replyDCS
+	result.Status = "final"
+	result.Continueable = false
+	result.Raw = strings.ToUpper(hex.EncodeToString(message))
+	if result.Status == "" {
+		result.Status = "final"
+	}
+	result.SubmissionStatus = "accepted_by_ims"
+	return result, nil
+}
+
+// parseUSSIReply decodes the USSD body of a 2xx response when the network
+// returned the dialog reply inline. A missing body is a final empty reply.
+func (session *Session) parseUSSIReply(response *sipResponse) (string, *int) {
+	if response == nil || len(response.Body) == 0 {
+		return "", nil
+	}
+	if !supportsUSSIContentType(response.value("Content-Type")) {
+		return "", nil
+	}
+	_, dcs, text := extractUSSDString(response.Body)
+	return text, dcs
+}
+
+func (session *Session) ussiTarget() string {
+	if number, _, ok := vowifi.ExtractAssociatedMSISDN(session.evidence); ok {
+		if normalized := normalizeE164(number); normalized != "" {
+			return "tel:" + normalized
+		}
+	}
+	return session.identity.public
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (session *Session) logInboundSMS(level slog.Level, message string, request *sipRequest, attributes ...any) {
 	logger := slog.Default()
 	if session != nil && session.provider != nil && session.provider.config.Logger != nil {
@@ -664,7 +965,7 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 	defer session.smsMu.Unlock()
 
 	session.mu.Lock()
-	if session.closed || !session.evidence.Registered || !session.smsContactConfirmed {
+	if session.closed || !session.evidence.Registered || !session.smsCapabilityReady() {
 		session.mu.Unlock()
 		return vowifi.SMSSubmitResult{}, vowifi.ErrSMSNotReady
 	}
@@ -811,6 +1112,20 @@ func (session *Session) sendSIPMessage(
 	body []byte,
 	inReplyTo string,
 ) (*sipResponse, error) {
+	return session.sendSIPMessageWith(ctx, target, body, inReplyTo, smsContentType, "smsip")
+}
+
+// sendSIPMessageWith is the parameterized MESSAGE transaction used by both SMS
+// and USSI. acceptContactTag is the 3gpp feature tag (e.g. "smsip" or "ussd")
+// advertised via Accept-Contact; pass an empty string to omit the header.
+func (session *Session) sendSIPMessageWith(
+	ctx context.Context,
+	target string,
+	body []byte,
+	inReplyTo string,
+	contentType string,
+	acceptContactTag string,
+) (*sipResponse, error) {
 	callToken, err := randomHex(18)
 	if err != nil {
 		return nil, err
@@ -849,7 +1164,11 @@ func (session *Session) sendSIPMessage(
 		"Call-ID: "+callID,
 		fmt.Sprintf("CSeq: %d MESSAGE", cseq),
 		"P-Preferred-Identity: <"+session.identity.public+">",
-		"Accept-Contact: *;+g.3gpp.smsip",
+	)
+	if acceptContactTag != "" {
+		lines = append(lines, "Accept-Contact: *;+g.3gpp."+acceptContactTag)
+	}
+	lines = append(lines,
 		"Request-Disposition: no-fork",
 		"Allow: MESSAGE",
 	)
@@ -857,7 +1176,7 @@ func (session *Session) sendSIPMessage(
 		lines = append(lines, "In-Reply-To: "+inReplyTo)
 	}
 	lines = append(lines,
-		"Content-Type: "+smsContentType,
+		"Content-Type: "+contentType,
 		"Content-Transfer-Encoding: binary",
 		"Content-Length: "+strconv.Itoa(len(body)),
 		"", "",
@@ -1025,3 +1344,4 @@ func (session *Session) closeInboundConnections() {
 }
 
 var _ vowifi.SMSSender = (*Session)(nil)
+var _ vowifi.USSISender = (*Session)(nil)

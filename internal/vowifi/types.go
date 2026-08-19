@@ -53,6 +53,7 @@ var (
 	ErrTunnelNotEstablished      = errors.New("vowifi: tunnel is not established")
 	ErrIMSNotRegistered          = errors.New("vowifi: IMS is not registered")
 	ErrSMSNotReady               = errors.New("vowifi: SMS over IMS is not ready")
+	ErrUSSINotReady              = errors.New("vowifi: USSI over IMS is not ready")
 	ErrEAPAuthenticationRejected = errors.New("vowifi: EAP-AKA authentication rejected")
 	ErrResponderAUTHRequired     = errors.New("vowifi: verified IKE responder AUTH is required")
 	// ErrCleanupIncomplete marks a teardown that released its local IMS, tunnel,
@@ -297,6 +298,27 @@ type SMSSubmitResult struct {
 	PartResults       []SMSSubmitPart `json:"partResults"`
 }
 
+// USSISubmitRequest is one USSD dialog turn over IMS (3GPP TS 24.390). The
+// first turn carries the service code in Code; a follow-up turn on an open
+// dialog carries the menu reply in Input and leaves Code empty.
+type USSISubmitRequest struct {
+	Code  string
+	Input string
+}
+
+// USSISubmitResult mirrors the device.USSDResult shape so the HTTP layer can
+// present USSI and cellular CUSD results uniformly.
+type USSISubmitResult struct {
+	Status           string `json:"status,omitempty"`
+	Text             string `json:"text"`
+	Raw              string `json:"raw,omitempty"`
+	DCS              *int   `json:"dcs,omitempty"`
+	Continueable     bool   `json:"continueable,omitempty"`
+	SessionID        string `json:"sessionId,omitempty"`
+	SIPCode          int    `json:"sipCode,omitempty"`
+	SubmissionStatus string `json:"submissionStatus,omitempty"`
+}
+
 type PhoneRecord struct {
 	ICCID     string
 	Number    string
@@ -395,6 +417,13 @@ type IMSSession interface {
 // SMSSender is an optional capability of a registered IMS session.
 type SMSSender interface {
 	SendSMS(context.Context, SMSSubmitRequest) (SMSSubmitResult, error)
+}
+
+// USSISender is an optional capability of a registered IMS session. Unlike SMS
+// it does not require the +g.3gpp.smsip contact to be confirmed — USSI rides
+// directly on a SIP MESSAGE with application/vnd.3gpp.ussd (TS 24.390).
+type USSISender interface {
+	SendUSSI(context.Context, USSISubmitRequest) (USSISubmitResult, error)
 }
 
 // Call describes one IMS call and reports whether an RTP media stream is

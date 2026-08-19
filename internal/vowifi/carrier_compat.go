@@ -28,24 +28,47 @@ const (
 // protocol layers consume this common result so their carrier handling cannot
 // drift into separate MCC/MNC switch statements.
 type CarrierProfile struct {
-	ID                 string
-	MatchSource        string
-	RouteMCC           string
-	RouteMNC           string
-	EPDG               string
-	IKEProposal        string
-	AdvertiseEAPOnly   bool
-	IMSTransport       string
-	IMSIdentityProfile string
-	IMSRegisterProfile string
-	IMSIPSecEncryption string
-	SMSCenter          string
-	PANICountry        string
-	PANINode           string
-	IMSDialURIScheme   string
-	IMSUserEqPhone     bool
-	IMSVoiceCodecs     []string
+	ID                                 string
+	MatchSource                        string
+	RouteMCC                           string
+	RouteMNC                           string
+	EPDG                               string
+	IKEProposal                        string
+	AdvertiseEAPOnly                   bool
+	AllowSMSWithoutContactConfirmation bool
+	IMSRegisterOptions                 IMSRegisterOptions
+	IMSTransport                       string
+	IMSIdentityProfile                 string
+	IMSRegisterProfile                 string
+	IMSIPSecEncryption                 string
+	SMSCenter                          string
+	PANICountry                        string
+	PANINode                           string
+	IMSDialURIScheme                   string
+	IMSUserEqPhone                     bool
+	IMSVoiceCodecs                     []string
 }
+
+// IMSRegisterOptions carries carrier-specific SIP REGISTER header values.
+// Pointer fields distinguish "use default" (nil) from "explicitly omit" ("").
+type IMSRegisterOptions struct {
+	ContactFormat       string
+	ExpirySeconds       int
+	ContactExtraTags    []string
+	SupportedHeader     *string
+	AllowHeader         *string
+	UserAgent           string
+	PPreferredIdentity  bool
+	PVisitedNetworkID   string
+	PAccessNetworkInfo  *string
+	CellularNetworkInfo string
+	AcceptContactTags   []string
+}
+
+const (
+	IMSContactFormatStandard = "standard"
+	IMSContactFormatATT      = "att"
+)
 
 type carrierProfileDocument struct {
 	Version  int                  `json:"version"`
@@ -53,13 +76,13 @@ type carrierProfileDocument struct {
 }
 
 type carrierProfileRule struct {
-	ID       string                `json:"id"`
-	Match    carrierProfileMatch   `json:"match,omitzero"`
-	MatchAny []carrierProfileMatch `json:"match_any,omitempty"`
-	Route    carrierProfileRoute   `json:"route,omitzero"`
-	EPDG     carrierProfileEPDG    `json:"epdg,omitzero"`
-	IKE      carrierProfileIKE     `json:"ike,omitzero"`
-	IMS      carrierProfileIMS     `json:"ims,omitzero"`
+	ID       string                         `json:"id"`
+	Match    carrierProfileMatch            `json:"match,omitzero"`
+	MatchAny []carrierProfileMatch          `json:"match_any,omitempty"`
+	Route    carrierProfileRoute            `json:"route,omitzero"`
+	EPDG     carrierProfileEPDG             `json:"epdg,omitzero"`
+	IKE      carrierProfileIKE              `json:"ike,omitzero"`
+	IMS      carrierProfileIMS              `json:"ims,omitzero"`
 }
 
 type carrierProfileMatch struct {
@@ -88,16 +111,32 @@ type carrierProfileIKE struct {
 }
 
 type carrierProfileIMS struct {
-	Transport       string   `json:"transport,omitempty"`
-	IdentityProfile string   `json:"identity_profile,omitempty"`
-	RegisterProfile string   `json:"register_profile,omitempty"`
-	IPSecEncryption string   `json:"ipsec_encryption,omitempty"`
-	SMSCenter       string   `json:"sms_center,omitempty"`
-	PANICountry     string   `json:"pani_country,omitempty"`
-	PANINode        string   `json:"pani_node,omitempty"`
-	DialURIScheme   string   `json:"dial_uri_scheme,omitempty"`
-	UserEqPhone     *bool    `json:"user_eq_phone,omitempty"`
-	VoiceCodecs     []string `json:"voice_codecs,omitempty"`
+	Transport                          string                        `json:"transport,omitempty"`
+	IdentityProfile                    string                        `json:"identity_profile,omitempty"`
+	RegisterProfile                    string                        `json:"register_profile,omitempty"`
+	IPSecEncryption                    string                        `json:"ipsec_encryption,omitempty"`
+	SMSCenter                          string                        `json:"sms_center,omitempty"`
+	PANICountry                        string                        `json:"pani_country,omitempty"`
+	PANINode                           string                        `json:"pani_node,omitempty"`
+	DialURIScheme                      string                        `json:"dial_uri_scheme,omitempty"`
+	UserEqPhone                        *bool                         `json:"user_eq_phone,omitempty"`
+	VoiceCodecs                        []string                      `json:"voice_codecs,omitempty"`
+	RegisterOptions                    carrierProfileRegisterOptions `json:"register_options,omitzero"`
+	AllowSMSWithoutContactConfirmation *bool                         `json:"allow_sms_without_contact_confirmation,omitempty"`
+}
+
+type carrierProfileRegisterOptions struct {
+	ContactFormat       string   `json:"contact_format,omitempty"`
+	ExpirySeconds       int      `json:"expiry_seconds,omitempty"`
+	ContactExtraTags    []string `json:"contact_extra_tags,omitempty"`
+	SupportedHeader     *string  `json:"supported_header,omitempty"`
+	AllowHeader         *string  `json:"allow_header,omitempty"`
+	UserAgent           string   `json:"user_agent,omitempty"`
+	PPreferredIdentity  bool     `json:"p_preferred_identity,omitempty"`
+	PVisitedNetworkID   string   `json:"p_visited_network_id,omitempty"`
+	PAccessNetworkInfo  *string  `json:"p_access_network_info,omitempty"`
+	CellularNetworkInfo string   `json:"cellular_network_info,omitempty"`
+	AcceptContactTags   []string `json:"accept_contact_tags,omitempty"`
 }
 
 //go:embed carrier_profiles.json
@@ -292,6 +331,34 @@ func validCarrierProfileRule(rule carrierProfileRule) bool {
 			return false
 		}
 	}
+	if rule.IMS.RegisterOptions.ExpirySeconds != 0 &&
+		(rule.IMS.RegisterOptions.ExpirySeconds < 60 || rule.IMS.RegisterOptions.ExpirySeconds > 86400) {
+		return false
+	}
+	if format := strings.ToLower(strings.TrimSpace(rule.IMS.RegisterOptions.ContactFormat)); format != "" &&
+		format != IMSContactFormatStandard && format != IMSContactFormatATT {
+		return false
+	}
+	for _, value := range rule.IMS.RegisterOptions.ContactExtraTags {
+		if strings.ContainsAny(value, "\r\n") {
+			return false
+		}
+	}
+	for _, value := range []*string{rule.IMS.RegisterOptions.SupportedHeader, rule.IMS.RegisterOptions.AllowHeader, rule.IMS.RegisterOptions.PAccessNetworkInfo} {
+		if value != nil && strings.ContainsAny(*value, "\r\n") {
+			return false
+		}
+	}
+	for _, value := range []string{rule.IMS.RegisterOptions.UserAgent, rule.IMS.RegisterOptions.PVisitedNetworkID, rule.IMS.RegisterOptions.CellularNetworkInfo} {
+		if strings.ContainsAny(value, "\r\n") {
+			return false
+		}
+	}
+	for _, value := range rule.IMS.RegisterOptions.AcceptContactTags {
+		if strings.ContainsAny(value, "\r\n") {
+			return false
+		}
+	}
 	return true
 }
 
@@ -469,6 +536,50 @@ func applyCarrierProfileRule(base CarrierProfile, rule carrierProfileRule, sourc
 	}
 	if len(rule.IMS.VoiceCodecs) > 0 {
 		base.IMSVoiceCodecs = normalizeVoiceCodecs(rule.IMS.VoiceCodecs)
+	}
+	if rule.IMS.AllowSMSWithoutContactConfirmation != nil {
+		base.AllowSMSWithoutContactConfirmation = *rule.IMS.AllowSMSWithoutContactConfirmation
+	}
+	base.IMSRegisterOptions = applyRegisterOptions(base.IMSRegisterOptions, rule.IMS.RegisterOptions)
+	return base
+}
+
+func applyRegisterOptions(base IMSRegisterOptions, rule carrierProfileRegisterOptions) IMSRegisterOptions {
+	if value := strings.ToLower(strings.TrimSpace(rule.ContactFormat)); value != "" {
+		base.ContactFormat = value
+	}
+	if rule.ExpirySeconds != 0 {
+		base.ExpirySeconds = rule.ExpirySeconds
+	}
+	if len(rule.ContactExtraTags) > 0 {
+		base.ContactExtraTags = append([]string(nil), rule.ContactExtraTags...)
+	}
+	if rule.SupportedHeader != nil {
+		value := strings.TrimSpace(*rule.SupportedHeader)
+		base.SupportedHeader = &value
+	}
+	if rule.AllowHeader != nil {
+		value := strings.TrimSpace(*rule.AllowHeader)
+		base.AllowHeader = &value
+	}
+	if value := strings.TrimSpace(rule.UserAgent); value != "" {
+		base.UserAgent = value
+	}
+	if rule.PPreferredIdentity {
+		base.PPreferredIdentity = true
+	}
+	if value := strings.TrimSpace(rule.PVisitedNetworkID); value != "" {
+		base.PVisitedNetworkID = value
+	}
+	if rule.PAccessNetworkInfo != nil {
+		value := strings.TrimSpace(*rule.PAccessNetworkInfo)
+		base.PAccessNetworkInfo = &value
+	}
+	if value := strings.TrimSpace(rule.CellularNetworkInfo); value != "" {
+		base.CellularNetworkInfo = value
+	}
+	if len(rule.AcceptContactTags) > 0 {
+		base.AcceptContactTags = append([]string(nil), rule.AcceptContactTags...)
 	}
 	return base
 }

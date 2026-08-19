@@ -548,6 +548,14 @@ func decodeGSM7(septets []byte) (string, error) {
 	return result.String(), nil
 }
 
+// DecodeGSM7Septets decodes a GSM 7-bit default-alphabet string whose septets
+// are stored one code per byte (the form USSI bodies use when DCS=0x0F). It
+// returns the decoded text and ok=false if a code is out of range.
+func DecodeGSM7Septets(data string) (string, bool) {
+	decoded, err := decodeGSM7([]byte(data))
+	return decoded, err == nil
+}
+
 type pduCursor struct {
 	data  []byte
 	index int

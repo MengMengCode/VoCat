@@ -145,3 +145,13 @@ func TestEPDGDNSClientSubnetComesFromCarrierProfileData(t *testing.T) {
 		t.Fatalf("ordinary ePDG received geographic DNS fallback %q", got)
 	}
 }
+
+func TestResolveCarrierProfileDITOPhilippinesUsesLegacyIKE(t *testing.T) {
+	profile := ResolveCarrierProfile(SIMIdentity{HomeMCC: "515", HomeMNC: "66"})
+	if profile.ID != "dito-philippines" {
+		t.Fatalf("DITO profile = %#v", profile)
+	}
+	if profile.IKEProposal != IKEProposalLegacy {
+		t.Fatalf("DITO IKE proposal = %q, want %q", profile.IKEProposal, IKEProposalLegacy)
+	}
+}

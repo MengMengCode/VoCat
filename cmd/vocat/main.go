@@ -823,6 +823,31 @@ func newVoWiFiOrchestrator(
 			// acknowledged, otherwise the SMSC will keep retransmitting it.
 			return nil
 		},
+		OnUSSD: func(ctx context.Context, message ims.ReceivedUSSD) error {
+			extra, _ := json.Marshal(map[string]any{
+				"transport":   "ims-ussd",
+				"dcs":         message.DCS,
+				"call_id":     message.CallID,
+				"received_at": message.Timestamp,
+				"raw_body":    message.RawBody,
+			})
+			_, saveErr := database.SaveSMSMessage(ctx, store.SMSMessage{
+				MessageID:  message.MessageID,
+				DeviceID:   message.DeviceID,
+				ModemIMEI:  deviceConfig.ModemIMEI,
+				IMSI:       message.IMSI,
+				Peer:       message.From,
+				Direction:  "inbound",
+				Body:       message.Text,
+				Timestamp:  message.Timestamp,
+				Status:     "received",
+				Source:     "ims-ussd",
+				PartsTotal: 1,
+				Read:       false,
+				Extra:      extra,
+			})
+			return saveErr
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("device %q IMS provider: %w", deviceConfig.ID, err)
