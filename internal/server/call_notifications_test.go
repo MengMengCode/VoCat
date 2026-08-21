@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"vocat/internal/modem"
 )
 
 func TestIncomingCallNotificationTextFormatting(t *testing.T) {
@@ -58,6 +60,56 @@ func TestIncomingCallDeduplication(t *testing.T) {
 	// Call after window should be allowed
 	if shouldSuppressDuplicateCall(key, now.Add(70*time.Second), time.Minute) {
 		t.Fatal("call after window was suppressed")
+	}
+}
+
+func TestIncomingVoiceCLCCIgnoresDataSessions(t *testing.T) {
+	tests := []struct {
+		name string
+		call map[string]any
+		want bool
+	}{
+		{
+			name: "incoming voice ringing",
+			call: map[string]any{"direction": 1, "state": 4, "mode": 0},
+			want: true,
+		},
+		{
+			name: "incoming voice active",
+			call: map[string]any{"direction": 1, "state": 0, "mode": 0},
+			want: true,
+		},
+		{
+			name: "incoming packet data active",
+			call: map[string]any{"direction": 1, "state": 0, "mode": 1},
+			want: false,
+		},
+		{
+			name: "outgoing voice alerting",
+			call: map[string]any{"direction": 0, "state": 3, "mode": 0},
+			want: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isIncomingVoiceCLCC(test.call); got != test.want {
+				t.Fatalf("isIncomingVoiceCLCC() = %v, want %v", got, test.want)
+			}
+		})
+	}
+
+	// EC20/EC25 firmware may expose an active packet-data session in CLCC.
+	// It must not be treated as an incoming voice call.
+	dataCalls := parseCLCC(modem.Response{
+		Lines: []string{`+CLCC: 1,1,0,1,0,"",128`},
+		Final: "OK",
+	})
+	if len(dataCalls) != 1 {
+		t.Fatalf("parseCLCC() returned %d data calls, want 1", len(dataCalls))
+	}
+	if isIncomingVoiceCLCC(dataCalls[0]) {
+		t.Fatal("active packet-data CLCC record was treated as an incoming voice call")
 	}
 }
 
