@@ -684,7 +684,18 @@ func configureVoWiFiRuntime(
 					)
 				}
 			}
-			if _, err := manager.RequestEnabled(deviceConfig.ID, true); err != nil {
+			requestEnable := func() error {
+				_, requestErr := manager.RequestEnabled(deviceConfig.ID, true)
+				return requestErr
+			}
+			if err := requestVoWiFiStartup(
+				ctx,
+				logger,
+				deviceConfig.DeviceType,
+				deviceConfig.ID,
+				wifi410VoWiFiStartupDelay,
+				requestEnable,
+			); err != nil {
 				_ = manager.Close(context.Background())
 				return nil, fmt.Errorf("start device %q VoWiFi policy: %w", deviceConfig.ID, err)
 			}
@@ -696,7 +707,54 @@ func configureVoWiFiRuntime(
 const (
 	vowifiStartupRadioAttempts = 3
 	vowifiStartupRadioDelay    = time.Second
+	wifi410VoWiFiStartupDelay  = 80 * time.Second
 )
+
+// requestVoWiFiStartup delays only the persisted startup policy for OpenStick
+// 410 devices. Their Qualcomm UIM and Vodafone ePDG path need a short quiet
+// period after a cold boot; user-triggered reconnects and every other device
+// type continue to execute immediately.
+func requestVoWiFiStartup(
+	ctx context.Context,
+	logger *slog.Logger,
+	deviceType string,
+	deviceID string,
+	delay time.Duration,
+	request func() error,
+) error {
+	if deviceType != store.DeviceTypeWiFi410 || delay <= 0 {
+		return request()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Info(
+		"OpenStick 410 VoWiFi startup delayed",
+		"device_id", deviceID,
+		"delay", delay,
+	)
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if err := request(); err != nil {
+			logger.Warn(
+				"OpenStick 410 delayed VoWiFi startup failed",
+				"device_id", deviceID,
+				"error", err,
+			)
+		}
+	}()
+	return nil
+}
+
+func shouldDelayWiFi410VoWiFi(deviceType string, now, notBefore time.Time) bool {
+	return deviceType == store.DeviceTypeWiFi410 && now.Before(notBefore)
+}
 
 type flightModeSetter interface {
 	SetFlight(context.Context, string, bool) (device.FlightResult, error)
@@ -1136,6 +1194,7 @@ func reconcileCardPolicies(
 	vowifiManager *vowifiruntime.Manager,
 ) {
 	observedCards := make(map[string]string)
+	wifi410StartupNotBefore := time.Now().Add(wifi410VoWiFiStartupDelay)
 	reconcile := func() {
 		policies, policyListErr := database.ListCardPolicies(ctx)
 		if policyListErr == nil {
@@ -1217,6 +1276,9 @@ func reconcileCardPolicies(
 				}
 				switch {
 				case stateErr != nil || !state.Enabled:
+					if shouldDelayWiFi410VoWiFi(config.DeviceType, time.Now(), wifi410StartupNotBefore) {
+						continue
+					}
 					_, _ = vowifiManager.RequestEnabled(config.ID, true)
 				case state.ICCID != "" && !strings.EqualFold(strings.TrimSpace(state.ICCID), iccid):
 					_, _ = vowifiManager.RequestReconnect(config.ID)

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 )
 
 func (manager *Manager) withNativeQMIVoWiFiSession(ctx context.Context, id string, fn func(nativeQMIVoWiFiSession) error) error {
@@ -70,7 +72,7 @@ func (manager *Manager) ProbeNativeQMIApplication(ctx context.Context, id, prefe
 
 func (manager *Manager) AuthenticateNativeQMI(ctx context.Context, id string, aid, apdu []byte) (response []byte, err error) {
 	err = manager.withNativeQMIVoWiFiSession(ctx, id, func(session nativeQMIVoWiFiSession) error {
-		channel, openErr := session.OpenLogicalChannel(ctx, 1, aid)
+		channel, openErr := openNativeQMIChannelWithRecovery(ctx, session, 1, aid)
 		if openErr != nil {
 			return fmt.Errorf("open QMI UIM logical channel: %w", openErr)
 		}
@@ -100,6 +102,60 @@ func (manager *Manager) AuthenticateNativeQMI(ctx context.Context, id string, ai
 		return errors.Join(err, closeErr)
 	})
 	return
+}
+
+type nativeQMIChannelRecoverySession interface {
+	OpenLogicalChannel(context.Context, uint8, []byte) (byte, error)
+	PowerOffSIM(context.Context, uint8) error
+	PowerOnSIM(context.Context, uint8) error
+}
+
+// OpenStick 410 can leave the physical UICC powered but unable to allocate a
+// logical channel after a SIM hot-swap. A UIM service reset alone does not
+// clear that state; cycling the affected physical slot does. Recover only the
+// precise QMI InsufficientResources response, then retry the original AID once.
+func openNativeQMIChannelWithRecovery(
+	ctx context.Context,
+	session nativeQMIChannelRecoverySession,
+	slot uint8,
+	aid []byte,
+) (byte, error) {
+	channel, err := session.OpenLogicalChannel(ctx, slot, aid)
+	if err == nil || !isQMIInsufficientResources(err) {
+		return channel, err
+	}
+	if resetter, ok := session.(nativeQMIUIMResetSession); ok {
+		_ = resetter.ResetUIM(ctx)
+	}
+	if powerErr := session.PowerOffSIM(ctx, slot); powerErr != nil {
+		return 0, errors.Join(err, fmt.Errorf("power off QMI UIM slot %d: %w", slot, powerErr))
+	}
+	if waitErr := waitNativeQMIRecovery(ctx, 3*time.Second); waitErr != nil {
+		return 0, errors.Join(err, waitErr)
+	}
+	if powerErr := session.PowerOnSIM(ctx, slot); powerErr != nil {
+		return 0, errors.Join(err, fmt.Errorf("power on QMI UIM slot %d: %w", slot, powerErr))
+	}
+	if waitErr := waitNativeQMIRecovery(ctx, 5*time.Second); waitErr != nil {
+		return 0, errors.Join(err, waitErr)
+	}
+	return session.OpenLogicalChannel(ctx, slot, aid)
+}
+
+func isQMIInsufficientResources(err error) bool {
+	qmiErr := qmi.GetQMIError(err)
+	return qmiErr != nil && qmiErr.Service == qmi.ServiceUIM && qmiErr.ErrorCode == 0x0044
+}
+
+var waitNativeQMIRecovery = func(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (manager *Manager) NativeQMIRadioSnapshot(ctx context.Context, id string) (mode int, psAttached bool, err error) {

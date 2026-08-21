@@ -144,7 +144,7 @@ func (adapter *NativeQMIAdapter) AuthenticateWithPreference(ctx context.Context,
 	}
 	raw, err := adapter.controller.AuthenticateNativeQMI(ctx, binding.deviceID, binding.aid, buildUSIMAuthenticateAPDU(challenge))
 	if err != nil {
-		return AKAResult{}, ErrEC20AKACommand
+		return AKAResult{}, fmt.Errorf("%w: %v", ErrEC20AKACommand, err)
 	}
 	return parseUSIMAuthenticateResponse(raw)
 }

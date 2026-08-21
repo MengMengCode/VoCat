@@ -36,8 +36,12 @@ func resolveEPDG(ctx context.Context, resolver *net.Resolver, host string) ([]ne
 
 	var systemErr error
 	for _, targetHost := range hostsToTry {
-		addresses, err := resolver.LookupIPAddr(ctx, targetHost)
+		ips, err := resolver.LookupIP(ctx, "ip4", targetHost)
 		if err == nil {
+			addresses := make([]net.IPAddr, 0, len(ips))
+			for _, ip := range ips {
+				addresses = append(addresses, net.IPAddr{IP: ip})
+			}
 			valid := filterValidPublicEPDGAddresses(addresses)
 			if len(valid) > 0 {
 				return valid, nil
