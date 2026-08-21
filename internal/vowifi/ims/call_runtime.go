@@ -115,7 +115,9 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 		"P-Preferred-Identity: <"+preferredIdentity+">",
 		"P-Preferred-Service: "+mmtelServiceURN,
 		`Accept-Contact: *;+g.3gpp.icsi-ref="`+mmtelFeatureTag+`"`,
-		"P-Access-Network-Info: "+session.pAccessNetworkInfo(),
+	)
+	lines = session.appendPAccessNetworkInfoHeader(lines)
+	lines = append(lines,
 		"User-Agent: "+session.imsUserAgent(),
 		"Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, PRACK, UPDATE, INFO",
 		"Supported: 100rel, timer, replaces",
@@ -499,7 +501,9 @@ func (session *Session) sendRejectedInviteACK(call *imsCall, response *sipRespon
 		"To: "+to,
 		"Call-ID: "+call.callID,
 		fmt.Sprintf("CSeq: %d ACK", call.cseq),
-		"P-Access-Network-Info: "+session.pAccessNetworkInfo(),
+	)
+	lines = session.appendPAccessNetworkInfoHeader(lines)
+	lines = append(lines,
 		"User-Agent: "+session.imsUserAgent(),
 		"Content-Length: 0", "", "",
 	)
@@ -577,7 +581,9 @@ func (session *Session) sendPRACK(call *imsCall, response *sipResponse) {
 	lines = append(lines,
 		"From: "+from, "To: "+to, "Call-ID: "+call.callID,
 		fmt.Sprintf("CSeq: %d PRACK", cseq), "RAck: "+rseq+" "+inviteCSeq,
-		"P-Access-Network-Info: "+session.pAccessNetworkInfo(),
+	)
+	lines = session.appendPAccessNetworkInfoHeader(lines)
+	lines = append(lines,
 		"User-Agent: "+session.imsUserAgent(),
 		"Content-Length: 0", "", "",
 	)
@@ -712,7 +718,7 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 		"User-Agent: "+session.imsUserAgent(),
 	)
 	if method != "CANCEL" {
-		lines = append(lines, "P-Access-Network-Info: "+session.pAccessNetworkInfo())
+		lines = session.appendPAccessNetworkInfoHeader(lines)
 	}
 	if method == "UPDATE" {
 		lines = append(lines, session.dialogContactHeader())
@@ -825,6 +831,13 @@ func (session *Session) pAccessNetworkInfo() string {
 		return session.pani
 	}
 	return resolveSessionPAccessNetworkInfo(session.request.Identity, session.imsLogger())
+}
+
+func (session *Session) appendPAccessNetworkInfoHeader(lines []string) []string {
+	if pani := session.pAccessNetworkInfo(); pani != "" {
+		return append(lines, "P-Access-Network-Info: "+pani)
+	}
+	return lines
 }
 
 func callResponseDiagnostic(response *sipResponse) string {

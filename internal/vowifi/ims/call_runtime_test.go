@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -236,6 +238,50 @@ func TestOutgoingLocalNumberUsesIMSPhoneContextAndMMTelHeaders(t *testing.T) {
 		if !strings.Contains(wire, expected) {
 			t.Fatalf("INVITE omitted %q:\n%s", expected, wire)
 		}
+	}
+}
+
+func TestDialogRequestOmitsPAccessNetworkInfoWhenProfileDisablesPANI(t *testing.T) {
+	profileDir := t.TempDir()
+	profile := `{"version":1,"profiles":[{"id":"test-pani-disabled","match":{"home_plmns":["00101"]},"ims":{"pani_enabled":false}}]}`
+	if err := os.WriteFile(filepath.Join(profileDir, "pani-disabled.json"), []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	emptyProfileDir := t.TempDir()
+	t.Cleanup(func() {
+		if err := vowifi.LoadCarrierProfileDirectory(emptyProfileDir); err != nil {
+			t.Errorf("clear external carrier profiles: %v", err)
+		}
+	})
+	if err := vowifi.LoadCarrierProfileDirectory(profileDir); err != nil {
+		t.Fatal(err)
+	}
+
+	identity := vowifi.SIMIdentity{HomeMCC: "001", HomeMNC: "01", IMSI: "001010123456789"}
+	pani := resolveSessionPAccessNetworkInfo(identity, nil)
+	if pani != "" {
+		t.Fatalf("disabled profile PANI = %q, want empty", pani)
+	}
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	session := &Session{
+		request:      vowifi.IMSRequest{Identity: identity},
+		transport:    "tcp",
+		conn:         client,
+		pani:         pani,
+		paniResolved: true,
+	}
+	call := &imsCall{
+		target: "sip:callee@example.test",
+		from:   "<sip:caller@example.test>;tag=local",
+		to:     "<sip:callee@example.test>;tag=remote",
+		callID: "pani-disabled-call",
+	}
+
+	request := string(session.buildDialogRequest(call, "BYE", 2))
+	if strings.Contains(request, "\r\nP-Access-Network-Info:") {
+		t.Fatalf("BYE contains disabled P-Access-Network-Info header:\n%s", request)
 	}
 }
 
