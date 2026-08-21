@@ -28,6 +28,25 @@ export interface CardPolicyUpdate {
   apn?: string;
   ipVersion?: "IP" | "IPV6" | "IPV4V6";
   customPhoneNumber?: string;
+  cellularImsEnabled?: boolean;
+}
+
+export interface CellularIMSStatus {
+  iccid: string;
+  desiredEnabled: boolean;
+  supported: boolean;
+  configured: boolean;
+  registered: boolean;
+  csKnown: boolean;
+  csRegistered: boolean;
+  changed: boolean;
+  rebooting: boolean;
+}
+export function getCellularIMS(deviceId: string) {
+  return api<CellularIMSStatus>(`/devices/${deviceId}/cellular-ims`);
+}
+export function setCellularIMS(deviceId: string, enabled: boolean) {
+  return api<CellularIMSStatus>(`/devices/${deviceId}/cellular-ims`, { method: "PATCH", body: { enabled } });
 }
 export function updateCardPolicy(iccid: string, body: CardPolicyUpdate) {
   return api<CardPolicy>(`/cards/${iccid}/policy`, { method: "PUT", body });

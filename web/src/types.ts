@@ -273,6 +273,8 @@ export interface CardPolicy {
   apn?: string;
   ipVersion?: string;
   customPhoneNumber?: string;
+  cellularImsEnabled: boolean;
+  cellularImsManaged: boolean;
   source?: string;
   createdAt?: string;
   updatedAt?: string;

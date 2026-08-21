@@ -496,26 +496,7 @@ func restoreConfiguredCellularData(
 		if err != nil {
 			continue
 		}
-		networkRequest := device.NetworkRequest{
-			Enabled: true, APN: config.APN, IPVersion: "IPV4V6", Backend: config.DeviceBackend,
-		}
-		if entry.Snapshot != nil {
-			iccid := strings.TrimSpace(entry.Snapshot.ICCID)
-			if policy, policyErr := database.CardPolicy(ctx, iccid); policyErr == nil {
-				networkRequest.APN = policy.APN
-				if policy.IPVersion != "" {
-					networkRequest.IPVersion = policy.IPVersion
-				}
-				if profile, profileErr := database.CardAPNProfileByAPN(ctx, iccid, policy.APN, policy.IPVersion); profileErr == nil {
-					networkRequest.Username = profile.Username
-					networkRequest.Password = profile.Password
-					networkRequest.Authentication = profile.AuthType
-					if entry.Snapshot.RegistrationStatus == 5 && profile.RoamingIPVersion != "" {
-						networkRequest.IPVersion = profile.RoamingIPVersion
-					}
-				}
-			}
-		}
+		networkRequest := configuredCellularNetworkRequest(ctx, database, config, entry.Snapshot)
 		dataContext, cancel := context.WithTimeout(ctx, 60*time.Second)
 		_, err = manager.SetNetwork(dataContext, entry.ID, networkRequest)
 		cancel()
@@ -525,6 +506,40 @@ func restoreConfiguredCellularData(
 		}
 		logger.Info("restored protected cellular data route", "device_id", config.ID, "interface", config.Interface)
 	}
+}
+
+func configuredCellularNetworkRequest(
+	ctx context.Context,
+	database *store.Store,
+	config store.Device,
+	snapshot *device.Snapshot,
+) device.NetworkRequest {
+	request := device.NetworkRequest{
+		Enabled: true, APN: config.APN, IPVersion: "IPV4V6", Backend: config.DeviceBackend,
+	}
+	if snapshot == nil {
+		return request
+	}
+	iccid := strings.TrimSpace(snapshot.ICCID)
+	policy, err := database.CardPolicy(ctx, iccid)
+	if err != nil {
+		return request
+	}
+	request.APN = policy.APN
+	if policy.IPVersion != "" {
+		request.IPVersion = policy.IPVersion
+	}
+	profile, err := database.CardAPNProfileByAPN(ctx, iccid, policy.APN, policy.IPVersion)
+	if err != nil {
+		return request
+	}
+	request.Username = profile.Username
+	request.Password = profile.Password
+	request.Authentication = profile.AuthType
+	if snapshot.RegistrationStatus == 5 && profile.RoamingIPVersion != "" {
+		request.IPVersion = profile.RoamingIPVersion
+	}
+	return request
 }
 
 func disableAllDeveloperCellularData(
@@ -1161,7 +1176,7 @@ func enforceDefaultSafeCardPolicy(
 	}
 	if err := database.UpsertCardPolicy(ctx, store.CardPolicy{
 		ICCID: iccid, VoWiFiEnabled: true, AirplaneEnabled: true,
-		IPVersion: "IPV4V6", Source: "default",
+		IPVersion: "IPV4V6", Source: "default", CellularIMSManaged: true,
 	}); err != nil {
 		logger.Warn("default card policy: persist policy", "iccid", iccid, "error", err)
 		return
@@ -1195,6 +1210,9 @@ func reconcileCardPolicies(
 ) {
 	observedCards := make(map[string]string)
 	wifi410StartupNotBefore := time.Now().Add(wifi410VoWiFiStartupDelay)
+	imsApplied := make(map[string]string)
+	imsRetryAfter := make(map[string]time.Time)
+	imsDataRestorePending := make(map[string]bool)
 	reconcile := func() {
 		policies, policyListErr := database.ListCardPolicies(ctx)
 		if policyListErr == nil {
@@ -1240,6 +1258,38 @@ func reconcileCardPolicies(
 			policy, policyErr := database.CardPolicy(ctx, iccid)
 			if policyErr != nil {
 				continue
+			}
+			imsKey := fmt.Sprintf("%s:%t", iccid, policy.CellularIMSEnabled)
+			if policy.CellularIMSManaged && imsApplied[config.ID] != imsKey && !time.Now().Before(imsRetryAfter[config.ID]) {
+				imsContext, cancelIMS := context.WithTimeout(ctx, 45*time.Second)
+				status, imsErr := manager.SetCellularIMS(imsContext, entry.ID, policy.CellularIMSEnabled)
+				cancelIMS()
+				if imsErr != nil {
+					imsRetryAfter[config.ID] = time.Now().Add(time.Minute)
+					logger.Warn("reconcile cellular IMS policy failed", "device_id", config.ID, "iccid", iccid, "error", imsErr)
+				} else {
+					imsApplied[config.ID] = imsKey
+					delete(imsRetryAfter, config.ID)
+					logger.Info("reconciled cellular IMS policy", "device_id", config.ID, "iccid", iccid,
+						"enabled", policy.CellularIMSEnabled, "registered", status.Registered,
+						"changed", status.Changed, "rebooting", status.Rebooting)
+					if status.Rebooting {
+						imsDataRestorePending[config.ID] = config.NetworkEnabled && !config.VoWiFiEnabled
+						continue
+					}
+				}
+			}
+			if imsDataRestorePending[config.ID] && config.NetworkEnabled && !policy.VoWiFiEnabled && entry.Snapshot.PSAttached {
+				request := configuredCellularNetworkRequest(ctx, database, config, entry.Snapshot)
+				restoreContext, cancelRestore := context.WithTimeout(ctx, 60*time.Second)
+				_, restoreErr := manager.SetNetwork(restoreContext, entry.ID, request)
+				cancelRestore()
+				if restoreErr != nil {
+					logger.Warn("reconcile cellular data after IMS reboot failed", "device_id", config.ID, "error", restoreErr)
+					continue
+				}
+				delete(imsDataRestorePending, config.ID)
+				logger.Info("restored cellular data after reconciled IMS reboot", "device_id", config.ID, "interface", config.Interface)
 			}
 			if policy.VoWiFiEnabled && (!policy.AirplaneEnabled || policy.NetworkEnabled) {
 				policy.AirplaneEnabled = true

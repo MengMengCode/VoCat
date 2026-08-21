@@ -37,12 +37,28 @@ export function useCardPolicyToggles(source: PolicyFlags | null, impl: PolicyTog
   const localRef = useRef(local);
   localRef.current = local;
 
+  // CardPolicyPanel derives `source` inline, so its object identity changes on
+  // every render. Depend on the primitive fields instead; otherwise this
+  // effect updates local state forever and prevents route transitions from
+  // committing after the card-policy tab has mounted.
+  const sourceVoWiFiEnabled = source?.vowifiEnabled;
+  const sourceAirplaneEnabled = source?.airplaneEnabled;
+
   useEffect(() => {
-    if (!source) return;
-    setLocal({ vowifiEnabled: source.vowifiEnabled, airplaneEnabled: source.airplaneEnabled });
+    if (sourceVoWiFiEnabled === undefined || sourceAirplaneEnabled === undefined) return;
+    setLocal((current) => {
+      if (
+        current.vowifiEnabled === sourceVoWiFiEnabled &&
+        current.airplaneEnabled === sourceAirplaneEnabled
+      ) return current;
+      return {
+        vowifiEnabled: sourceVoWiFiEnabled,
+        airplaneEnabled: sourceAirplaneEnabled,
+      };
+    });
     setVowifiFailed(false);
     setAirplaneFailed(false);
-  }, [source]);
+  }, [sourceVoWiFiEnabled, sourceAirplaneEnabled]);
 
   async function toggle(
     field: Field,

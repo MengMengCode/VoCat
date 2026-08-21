@@ -73,6 +73,51 @@ func TestParseModemAPNProfiles(t *testing.T) {
 	}
 }
 
+type fakeCellularIMSController struct {
+	fakeDeviceController
+	status device.CellularIMSStatus
+	setTo  *bool
+	setErr error
+}
+
+func (controller *fakeCellularIMSController) CellularIMS(context.Context, string) (device.CellularIMSStatus, error) {
+	return controller.status, controller.setErr
+}
+
+func (controller *fakeCellularIMSController) SetCellularIMS(_ context.Context, _ string, enabled bool) (device.CellularIMSStatus, error) {
+	controller.setTo = &enabled
+	return controller.status, controller.setErr
+}
+
+func TestCellularIMSPatchPersistsCurrentICCIDsPolicy(t *testing.T) {
+	test := newSettingsAPITest(t)
+	const iccid = "898520313000000590"
+	controller := &fakeCellularIMSController{
+		fakeDeviceController: fakeDeviceController{entry: device.Device{
+			ID: "physical-1", Discovered: true,
+			Snapshot: &device.Snapshot{DeviceID: "physical-1", SIMReady: true, ICCID: iccid},
+		}},
+		status: device.CellularIMSStatus{Supported: true, Configured: true, Changed: true, Rebooting: true},
+	}
+	test.server.devices = controller
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPatch, "/api/devices/configured-1/cellular-ims", strings.NewReader(`{"enabled":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	if !test.server.handleCellularIMS(recorder, request, store.Device{ID: "configured-1"}, "physical-1") {
+		t.Fatal("handleCellularIMS returned false")
+	}
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	if controller.setTo == nil || !*controller.setTo {
+		t.Fatalf("SetCellularIMS captured %v", controller.setTo)
+	}
+	policy, err := test.database.CardPolicy(context.Background(), iccid)
+	if err != nil || !policy.CellularIMSManaged || !policy.CellularIMSEnabled {
+		t.Fatalf("stored policy = %+v, %v", policy, err)
+	}
+}
+
 type esimAIDCaptureController struct {
 	fakeDeviceController
 	switchAID  string

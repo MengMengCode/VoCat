@@ -381,6 +381,15 @@ func migrationStatements(version int) []string {
 			`ALTER TABLE devices ADD COLUMN vowifi_allow_sha1 INTEGER NOT NULL DEFAULT 0 CHECK (vowifi_allow_sha1 IN (0, 1))`,
 			`ALTER TABLE devices ADD COLUMN vowifi_use_modp1024 INTEGER NOT NULL DEFAULT 0 CHECK (vowifi_use_modp1024 IN (0, 1))`,
 		}
+	case 20:
+		return []string{
+			`ALTER TABLE card_policies
+				ADD COLUMN cellular_ims_enabled INTEGER NOT NULL DEFAULT 0
+				CHECK (cellular_ims_enabled IN (0, 1))`,
+			`ALTER TABLE card_policies
+				ADD COLUMN cellular_ims_managed INTEGER NOT NULL DEFAULT 0
+				CHECK (cellular_ims_managed IN (0, 1))`,
+		}
 	default:
 		return nil
 	}

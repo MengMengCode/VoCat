@@ -279,8 +279,8 @@ func TestMigration19AcceptsDevelopmentDatabaseAndPreservesCardData(t *testing.T)
 	if err := database.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 19 {
-		t.Fatalf("schema version = %d, want 19", version)
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 	}
 	for _, column := range []string{
 		"ims_apn", "ims_private_identity", "ims_public_identity", "ims_sms_center",
@@ -333,8 +333,8 @@ func TestMigration19AcceptsDevelopmentColumnsAlreadyPresent(t *testing.T) {
 	if err := database.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 19 {
-		t.Fatalf("schema version = %d, want 19", version)
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 	}
 }
 

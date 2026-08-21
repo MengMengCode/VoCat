@@ -3,6 +3,7 @@ import { CardUiRegular } from "@fluentui/react-icons";
 import { Button, Input, Tag, message } from "../ui";
 import { PolicySwitchCard } from "./PolicySwitchCard";
 import { CardPolicyAPN } from "./CardPolicyAPN";
+import { CellularIMSPolicyCard } from "./CellularIMSPolicyCard";
 import { useCardPolicyToggles } from "./useCardPolicyToggles";
 import { enableVoWiFi, disableVoWiFi, setFlightMode, updateCardPolicy } from "./deviceActions";
 import type { CardPolicy } from "../../types";
@@ -140,6 +141,17 @@ export function CardPolicyPanel({ deviceId, iccid, policy, deviceOnline, onPolic
               pending={toggles.airplanePending}
               failed={toggles.airplaneFailed}
               onToggle={toggles.onAirplaneToggle}
+			/> : null}
+			{!wifiCallingOnly ? <CellularIMSPolicyCard
+			  deviceId={deviceId}
+			  iccid={iccid}
+			  enabled={currentPolicy?.cellularImsEnabled ?? false}
+			  managed={currentPolicy?.cellularImsManaged ?? false}
+			  live={operable}
+			  deviceOnline={deviceOnline}
+			  vowifiEnabled={local.vowifiEnabled}
+			  airplaneEnabled={local.airplaneEnabled}
+			  onChanged={onPolicyChanged}
 			/> : null}
           </div>
 		  {!wifiCallingOnly ? <CardPolicyAPN

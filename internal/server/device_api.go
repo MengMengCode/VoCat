@@ -56,6 +56,11 @@ type DeviceController interface {
 	ESIMChipInfo(context.Context, string) (*device.EsimChipInfo, error)
 }
 
+type cellularIMSController interface {
+	CellularIMS(context.Context, string) (device.CellularIMSStatus, error)
+	SetCellularIMS(context.Context, string, bool) (device.CellularIMSStatus, error)
+}
+
 type deviceConfigPayload struct {
 	ID                 string `json:"id"`
 	Name               string `json:"name"`
@@ -282,7 +287,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) bool {
 				if errors.Is(policyErr, store.ErrNotFound) {
 					policyErr = s.store.UpsertCardPolicy(r.Context(), store.CardPolicy{
 						ICCID: iccid, VoWiFiEnabled: true, AirplaneEnabled: true,
-						IPVersion: "IPV4V6", Source: "default",
+						IPVersion: "IPV4V6", Source: "default", CellularIMSManaged: true,
 					})
 				}
 				if policyErr != nil {
@@ -614,6 +619,11 @@ func (s *Server) handleDevicePath(
 			return true
 		}
 		return s.handleAPNProfiles(w, r, physicalID)
+	case "cellular-ims":
+		if !s.requirePhysicalDevice(w, physicalPresent) {
+			return true
+		}
+		return s.handleCellularIMS(w, r, config, physicalID)
 	case "network/public-ip":
 		if !s.requirePhysicalDevice(w, physicalPresent) {
 			return true
@@ -1387,6 +1397,164 @@ func (s *Server) handleAPNProfiles(w http.ResponseWriter, r *http.Request, physi
 		"items": parseModemAPNProfiles(response.Lines),
 	}})
 	return true
+}
+
+func (s *Server) handleCellularIMS(
+	w http.ResponseWriter,
+	r *http.Request,
+	config store.Device,
+	physicalID string,
+) bool {
+	controller, ok := s.devices.(cellularIMSController)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "cellular_ims_unsupported", "cellular IMS control is unavailable")
+		return true
+	}
+	entry, err := s.devices.Get(physicalID)
+	if err != nil || entry.Snapshot == nil || !entry.Snapshot.SIMReady {
+		writeError(w, http.StatusConflict, "sim_not_ready", "a ready SIM is required to configure cellular IMS")
+		return true
+	}
+	iccid := strings.TrimSpace(entry.Snapshot.ICCID)
+	if !validICCID(iccid) {
+		writeError(w, http.StatusConflict, "iccid_unavailable", "the active SIM ICCID is unavailable")
+		return true
+	}
+	policy, policyErr := s.store.CardPolicy(r.Context(), iccid)
+	if errors.Is(policyErr, store.ErrNotFound) {
+		policy = defaultCardPolicy(iccid)
+	} else if policyErr != nil {
+		s.writeStoreError(w, policyErr)
+		return true
+	}
+	switch r.Method {
+	case http.MethodGet:
+		status, statusErr := controller.CellularIMS(r.Context(), physicalID)
+		if statusErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, "cellular_ims_unsupported", statusErr.Error())
+			return true
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": cellularIMSResponse(iccid, policy.CellularIMSEnabled, status)})
+	case http.MethodPatch:
+		var request struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return true
+		}
+		if request.Enabled == nil {
+			writeError(w, http.StatusBadRequest, "invalid_cellular_ims", "enabled is required")
+			return true
+		}
+		policy.CellularIMSEnabled = *request.Enabled
+		policy.CellularIMSManaged = true
+		policy.Source = "manual"
+		if policy.IPVersion == "" {
+			policy.IPVersion = "IPV4V6"
+		}
+		if err := s.store.UpsertCardPolicy(r.Context(), policy); err != nil {
+			s.writeStoreError(w, err)
+			return true
+		}
+		status, applyErr := controller.SetCellularIMS(r.Context(), physicalID, *request.Enabled)
+		if applyErr != nil {
+			writeError(w, http.StatusBadGateway, "cellular_ims_apply_failed", "IMS policy was saved but could not be applied: "+applyErr.Error())
+			return true
+		}
+		if status.Rebooting && config.NetworkEnabled && !config.VoWiFiEnabled {
+			s.restoreCellularDataAfterIMSReboot(config.ID, physicalID, iccid)
+		}
+		statusCode := http.StatusOK
+		if status.Rebooting {
+			statusCode = http.StatusAccepted
+		}
+		writeJSON(w, statusCode, map[string]any{"data": cellularIMSResponse(iccid, *request.Enabled, status)})
+	default:
+		w.Header().Set("Allow", "GET, PATCH")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
+	return true
+}
+
+// restoreCellularDataAfterIMSReboot rebuilds the QMI/AT data session destroyed
+// by AT+CFUN=1,1. The desired data state already lives in the device/card
+// policy; this only waits for the same SIM to register again before replaying it.
+func (s *Server) restoreCellularDataAfterIMSReboot(configID, physicalID, iccid string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		var lastErr error
+		for {
+			select {
+			case <-ctx.Done():
+				s.logger.Warn("restore cellular data after IMS reboot timed out", "device_id", configID, "error", lastErr)
+				return
+			case <-ticker.C:
+			}
+			config, err := s.store.Device(ctx, configID)
+			if err != nil || !config.NetworkEnabled || config.VoWiFiEnabled {
+				return
+			}
+			entry, err := s.devices.Get(physicalID)
+			if err != nil || entry.Snapshot == nil || !entry.Snapshot.SIMReady ||
+				!strings.EqualFold(strings.TrimSpace(entry.Snapshot.ICCID), iccid) ||
+				!entry.Snapshot.PSAttached {
+				lastErr = err
+				continue
+			}
+			request := s.cellularNetworkRequest(ctx, config, entry.Snapshot)
+			restoreCtx, cancelRestore := context.WithTimeout(ctx, 60*time.Second)
+			_, err = s.devices.SetNetwork(restoreCtx, physicalID, request)
+			cancelRestore()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			s.logger.Info("restored cellular data after IMS reboot", "device_id", configID, "interface", config.Interface)
+			return
+		}
+	}()
+}
+
+func (s *Server) cellularNetworkRequest(ctx context.Context, config store.Device, snapshot *device.Snapshot) device.NetworkRequest {
+	request := device.NetworkRequest{
+		Enabled: true, APN: strings.TrimSpace(config.APN), IPVersion: "IPV4V6", Backend: config.DeviceBackend,
+	}
+	if snapshot == nil {
+		return request
+	}
+	iccid := strings.TrimSpace(snapshot.ICCID)
+	policy, err := s.store.CardPolicy(ctx, iccid)
+	if err != nil {
+		return request
+	}
+	request.APN = strings.TrimSpace(policy.APN)
+	if policy.IPVersion != "" {
+		request.IPVersion = policy.IPVersion
+	}
+	profile, err := s.store.CardAPNProfileByAPN(ctx, iccid, policy.APN, policy.IPVersion)
+	if err != nil {
+		return request
+	}
+	request.Username = profile.Username
+	request.Password = profile.Password
+	request.Authentication = profile.AuthType
+	if snapshot.RegistrationStatus == 5 && profile.RoamingIPVersion != "" {
+		request.IPVersion = profile.RoamingIPVersion
+	}
+	return request
+}
+
+func cellularIMSResponse(iccid string, desired bool, status device.CellularIMSStatus) map[string]any {
+	return map[string]any{
+		"iccid": iccid, "desired_enabled": desired, "supported": status.Supported,
+		"configured": status.Configured, "registered": status.Registered,
+		"cs_known": status.CSKnown, "cs_registered": status.CSRegistered,
+		"changed": status.Changed, "rebooting": status.Rebooting,
+	}
 }
 
 func (s *Server) handleCellularData(

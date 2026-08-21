@@ -668,7 +668,8 @@ func TestCardPolicyDefaultValidationAndPersistence(t *testing.T) {
 	policy := response["data"].(map[string]any)
 	if policy["iccid"] != iccid || policy["source"] != "default" ||
 		policy["ip_version"] != "IPV4V6" || policy["vowifi_enabled"] != true ||
-		policy["airplane_enabled"] != true || policy["custom_phone_number"] != "" {
+		policy["airplane_enabled"] != true || policy["custom_phone_number"] != "" ||
+		policy["cellular_ims_enabled"] != false || policy["cellular_ims_managed"] != true {
 		t.Fatalf("default policy = %#v", policy)
 	}
 
@@ -680,6 +681,14 @@ func TestCardPolicyDefaultValidationAndPersistence(t *testing.T) {
 	)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("custom phone policy status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	recorder = test.request(t, http.MethodPut, "/api/cards/"+iccid+"/policy", `{"cellular_ims_enabled":true}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("cellular IMS policy status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	storedIMS, err := test.database.CardPolicy(context.Background(), iccid)
+	if err != nil || !storedIMS.CellularIMSEnabled || !storedIMS.CellularIMSManaged {
+		t.Fatalf("stored cellular IMS policy = %+v, %v", storedIMS, err)
 	}
 	response = decodeSettingsResponse(t, recorder)
 	policy = response["data"].(map[string]any)

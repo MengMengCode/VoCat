@@ -476,16 +476,18 @@ type LogFilter struct {
 }
 
 type CardPolicy struct {
-	ICCID             string
-	NetworkEnabled    bool
-	VoWiFiEnabled     bool
-	AirplaneEnabled   bool
-	APN               string
-	IPVersion         string
-	CustomPhoneNumber string
-	Source            string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ICCID              string
+	NetworkEnabled     bool
+	VoWiFiEnabled      bool
+	AirplaneEnabled    bool
+	APN                string
+	IPVersion          string
+	CustomPhoneNumber  string
+	CellularIMSEnabled bool
+	CellularIMSManaged bool
+	Source             string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 type CardAPNProfile struct {
