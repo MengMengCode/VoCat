@@ -263,14 +263,20 @@ func TestDialogRequestOmitsPAccessNetworkInfoWhenProfileDisablesPANI(t *testing.
 		t.Fatalf("disabled profile PANI = %q, want empty", pani)
 	}
 	client, peer := net.Pipe()
-	defer client.Close()
-	defer peer.Close()
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close client connection: %v", err)
+		}
+	})
+	t.Cleanup(func() {
+		if err := peer.Close(); err != nil {
+			t.Errorf("close peer connection: %v", err)
+		}
+	})
 	session := &Session{
-		request:      vowifi.IMSRequest{Identity: identity},
-		transport:    "tcp",
-		conn:         client,
-		pani:         pani,
-		paniResolved: true,
+		request:   vowifi.IMSRequest{Identity: identity},
+		transport: "tcp",
+		conn:      client,
 	}
 	call := &imsCall{
 		target: "sip:callee@example.test",
