@@ -229,7 +229,7 @@ func TestOutgoingLocalNumberUsesIMSPhoneContextAndMMTelHeaders(t *testing.T) {
 		"P-Preferred-Identity: <tel:+447700900123>\r\n",
 		"P-Preferred-Service: " + mmtelServiceURN + "\r\n",
 		`Accept-Contact: *;+g.3gpp.icsi-ref="` + mmtelFeatureTag + `"` + "\r\n",
-		"P-Access-Network-Info: " + sessionPAccessNetworkInfo(session.instanceID) + "\r\n",
+		"P-Access-Network-Info: IEEE-802.11;i-wlan-node-id=" + defaultPANIWLANNode + "\r\n",
 		"User-Agent: VoCat Test\r\n",
 		"Accept: application/sdp\r\n",
 	} {

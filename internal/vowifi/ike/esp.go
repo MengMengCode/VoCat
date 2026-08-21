@@ -393,9 +393,11 @@ func parseInnerIPv6(packet []byte) (innerPacketMetadata, error) {
 		return innerPacketMetadata{}, errors.New("ike: inner IPv6 packet is truncated")
 	}
 	payloadLength := int(binary.BigEndian.Uint16(packet[4:6]))
-	if payloadLength+40 != len(packet) {
+	declaredLength := payloadLength + 40
+	if declaredLength > len(packet) {
 		return innerPacketMetadata{}, errors.New("ike: inner IPv6 payload length is invalid")
 	}
+	packet = packet[:declaredLength]
 	metadata := innerPacketMetadata{
 		source:      append(net.IP(nil), packet[8:24]...),
 		destination: append(net.IP(nil), packet[24:40]...),

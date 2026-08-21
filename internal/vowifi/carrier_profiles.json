@@ -5786,7 +5786,18 @@
         "proposal": "modern"
       },
       "ims": {
-        "ipsec_encryption": "aes-cbc"
+        "transport": "tcp",
+        "ipsec_encryption": "aes-cbc",
+        "pani_enabled": true,
+        "pani_country": "AUTO",
+        "user_agent": "iOS/18.6.2 iPhone",
+        "register_options": {
+          "contact_format": "gsma",
+          "contact_extra_tags": [
+            "+g.3gpp.mid-call",
+            "+g.3gpp.smsip"
+          ]
+        }
       }
     },
     {

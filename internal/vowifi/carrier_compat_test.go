@@ -46,6 +46,31 @@ func TestResolveCarrierProfileUsesAppleGID1Selector(t *testing.T) {
 	}
 }
 
+func TestResolveCarrierProfileGiffgaffIMSHeaders(t *testing.T) {
+	profile := ResolveCarrierProfile(SIMIdentity{
+		IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10", GID1: "508FFFFF",
+	})
+	options := profile.IMSRegisterOptions
+	if profile.IMSTransport != "tcp" || options.ContactFormat != IMSContactFormatGSMA {
+		t.Fatalf("giffgaff IMS transport/contact profile = %#v", profile)
+	}
+	if profile.IMSUserAgent != "iOS/18.6.2 iPhone" {
+		t.Fatalf("giffgaff User-Agent = %q", profile.IMSUserAgent)
+	}
+	if options.SupportedHeader != nil || options.AllowHeader != nil {
+		t.Fatalf("giffgaff REGISTER header overrides = supported=%v allow=%v", options.SupportedHeader, options.AllowHeader)
+	}
+	if options.PAccessNetworkInfo != nil {
+		t.Fatalf("giffgaff unexpectedly defines a carrier PANI override = %v", *options.PAccessNetworkInfo)
+	}
+	if profile.PANIEnabled == nil || !*profile.PANIEnabled || profile.PANICountry != "AUTO" {
+		t.Fatalf("giffgaff PANI behavior = enabled=%v country=%q", profile.PANIEnabled, profile.PANICountry)
+	}
+	if len(options.ContactExtraTags) != 2 || options.ContactExtraTags[0] != "+g.3gpp.mid-call" || options.ContactExtraTags[1] != "+g.3gpp.smsip" {
+		t.Fatalf("giffgaff Contact tags = %#v", options.ContactExtraTags)
+	}
+}
+
 func TestResolveCarrierProfileATT(t *testing.T) {
 	profile := ResolveCarrierProfile(SIMIdentity{
 		ICCID: "8901410000000000001", IMSI: "310410000000001", HomeMCC: "310", HomeMNC: "410",
@@ -78,6 +103,9 @@ func TestResolveCarrierProfileStandardHasNoRegisterOverrides(t *testing.T) {
 	}
 	if profile.IMSRegisterOptions.SupportedHeader != nil {
 		t.Fatalf("standard supported header = %v", *profile.IMSRegisterOptions.SupportedHeader)
+	}
+	if profile.PANIEnabled != nil || profile.PANICountry != "" {
+		t.Fatalf("standard PANI behavior = enabled=%v country=%q", profile.PANIEnabled, profile.PANICountry)
 	}
 	if profile.AllowSMSWithoutContactConfirmation {
 		t.Fatal("standard profile should require SMS contact confirmation")

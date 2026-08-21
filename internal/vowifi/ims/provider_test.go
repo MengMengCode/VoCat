@@ -506,13 +506,8 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 }
 
 func TestSessionPAccessNetworkInfoIsStableAndUEProvided(t *testing.T) {
-	instanceID := "urn:uuid:00000000-0000-4000-8000-000000000001"
-	first := sessionPAccessNetworkInfo(instanceID)
-	second := sessionPAccessNetworkInfo(instanceID)
-	if first != second {
-		t.Fatalf("PANI changed for one SIP instance: %q != %q", first, second)
-	}
-	if err := validateTestPANI(first); err != nil {
+	defaultPANI := "IEEE-802.11;i-wlan-node-id=" + defaultPANIWLANNode
+	if err := validateTestPANI(defaultPANI); err != nil {
 		t.Fatal(err)
 	}
 	if got := ueProvidedPANI(" IEEE-802.11;i-wlan-node-id=aabbccddeeff;network-provided "); got != "IEEE-802.11;i-wlan-node-id=aabbccddeeff" {
@@ -521,22 +516,148 @@ func TestSessionPAccessNetworkInfoIsStableAndUEProvided(t *testing.T) {
 	if got := ueProvidedPANI("network-provided"); got != "" {
 		t.Fatalf("marker-only PANI = %q, want empty", got)
 	}
-	if got := (&Session{paniResolved: true}).pAccessNetworkInfo(); got != "" {
-		t.Fatalf("explicitly omitted session PANI = %q, want empty", got)
+	if got := (&Session{pani: "IEEE-802.11;i-wlan-node-id=" + defaultPANIWLANNode, paniResolved: true}).pAccessNetworkInfo(); got != "IEEE-802.11;i-wlan-node-id="+defaultPANIWLANNode {
+		t.Fatalf("session PANI = %q, want default WLAN node", got)
+	}
+}
+
+func TestPAccessNetworkInfoUsesDefaultNodeAndConditionalCountry(t *testing.T) {
+	cases := []struct {
+		name     string
+		identity vowifi.SIMIdentity
+		want     string
+	}{
+		{
+			name:     "standard without PANI country format",
+			identity: vowifi.SIMIdentity{IMSI: "001010123456789", HomeMCC: "001", HomeMNC: "01"},
+			want:     "IEEE-802.11;i-wlan-node-id=" + defaultPANIWLANNode,
+		},
+		{
+			name:     "giffgaff with IPCC PANI country format",
+			identity: vowifi.SIMIdentity{IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10", GID1: "508FFFFF"},
+			want:     "IEEE-802.11;country=GB;i-wlan-node-id=" + defaultPANIWLANNode,
+		},
+		{
+			name:     "AT&T without PANI country format",
+			identity: vowifi.SIMIdentity{IMSI: "310410000000001", HomeMCC: "310", HomeMNC: "410"},
+			want:     "IEEE-802.11;i-wlan-node-id=" + defaultPANIWLANNode,
+		},
+		{
+			name:     "VOXI without PANI country format",
+			identity: vowifi.SIMIdentity{IMSI: "234150000000001", HomeMCC: "234", HomeMNC: "15", SPN: "VOXI"},
+			want:     "IEEE-802.11;i-wlan-node-id=" + defaultPANIWLANNode,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got := resolveSessionPAccessNetworkInfo(test.identity, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if got != test.want {
+				t.Fatalf("PANI = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAppendPaniCountryModes(t *testing.T) {
+	base := "IEEE-802.11;i-wlan-node-id=" + defaultPANIWLANNode
+	identity := vowifi.SIMIdentity{HomeMCC: "234"}
+
+	if got := appendPaniCountry(base, identity, vowifi.CarrierProfile{}, slog.Default()); got != base {
+		t.Fatalf("empty PANI country = %q, want %q", got, base)
+	}
+	if got := appendPaniCountry(base, identity, vowifi.CarrierProfile{PANICountry: "GB"}, slog.Default()); got != "IEEE-802.11;country=GB;i-wlan-node-id="+defaultPANIWLANNode {
+		t.Fatalf("fixed PANI country = %q", got)
+	}
+	if got := appendPaniCountry(base, identity, vowifi.CarrierProfile{PANICountry: "AUTO"}, slog.Default()); got != "IEEE-802.11;country=GB;i-wlan-node-id="+defaultPANIWLANNode {
+		t.Fatalf("automatic PANI country = %q", got)
+	}
+
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	got := appendPaniCountry(base, vowifi.SIMIdentity{}, vowifi.CarrierProfile{ID: "test-auto", PANICountry: "AUTO"}, logger)
+	if got != base || !strings.Contains(logs.String(), "IMS PANI country code could not be derived") {
+		t.Fatalf("failed automatic PANI country = %q, logs = %q", got, logs.String())
+	}
+}
+
+func TestIMSProfileUserAgentUsesUnifiedHeaderValue(t *testing.T) {
+	giffgaff := &Session{request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
+		IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10", GID1: "508FFFFF",
+	}}}
+	if got := giffgaff.imsUserAgent(); got != "iOS/18.6.2 iPhone" {
+		t.Fatalf("giffgaff IMS User-Agent = %q", got)
+	}
+	if options := giffgaff.imsRegisterOptions(); options.AllowHeader != nil || options.SupportedHeader != nil {
+		t.Fatalf("giffgaff REGISTER capability overrides leaked from business headers: %#v", options)
+	}
+
+	standard := &Session{request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
+		IMSI: "999010000000001", HomeMCC: "999", HomeMNC: "01",
+	}}}
+	if got := standard.imsUserAgent(); got != "vocat/1" {
+		t.Fatalf("standard IMS User-Agent fallback = %q", got)
+	}
+}
+
+func TestSipInstanceIDUsesGSMAFormWhenIMEIIsAvailable(t *testing.T) {
+	identity := vowifi.SIMIdentity{IMEI: "353024112557010"}
+	if got := sipInstanceID(identity, "00000000-0000-4000-8000-000000000001"); got != "urn:gsma:imei:353024112557010-0" {
+		t.Fatalf("sipInstanceID() = %q", got)
+	}
+	if got := sipInstanceID(vowifi.SIMIdentity{IMEI: "not-an-imei"}, "00000000-0000-4000-8000-000000000001"); got != "urn:uuid:00000000-0000-4000-8000-000000000001" {
+		t.Fatalf("sipInstanceID() fallback = %q", got)
+	}
+}
+
+func TestGSMAContactFormatUsesAddressAndDeviceInstance(t *testing.T) {
+	session := &Session{
+		identity:   identitySet{user: "234105776448519"},
+		transport:  "tcp",
+		instanceID: "urn:gsma:imei:353024112557010-0",
+	}
+	got := session.buildContact("[2001:db8::1]:49686", vowifi.IMSRegisterOptions{
+		ContactFormat:    vowifi.IMSContactFormatGSMA,
+		ContactExtraTags: []string{"+g.3gpp.mid-call", "+g.3gpp.smsip"},
+	})
+	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:353024112557010-0>"`
+	if got != want {
+		t.Fatalf("GSMA Contact = %q, want %q", got, want)
 	}
 }
 
 func validateTestPANI(value string) error {
-	const prefix = "IEEE-802.11;i-wlan-node-id="
-	if !strings.HasPrefix(value, prefix) {
-		return fmt.Errorf("value %q does not start with %q", value, prefix)
+	const accessType = "IEEE-802.11"
+	if !strings.HasPrefix(value, accessType+";") {
+		return fmt.Errorf("value %q does not start with %q", value, accessType+";")
 	}
 	if strings.Contains(strings.ToLower(value), "network-provided") {
 		return fmt.Errorf("UE PANI incorrectly claims network-provided provenance: %q", value)
 	}
-	node, err := hex.DecodeString(strings.TrimPrefix(value, prefix))
+	var nodeValue, country string
+	for _, parameter := range strings.Split(strings.TrimPrefix(value, accessType+";"), ";") {
+		key, parameterValue, ok := strings.Cut(parameter, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "i-wlan-node-id":
+			nodeValue = strings.TrimSpace(parameterValue)
+		case "country":
+			country = strings.TrimSpace(parameterValue)
+		}
+	}
+	if nodeValue == "" {
+		return fmt.Errorf("i-wlan-node-id is missing: %q", value)
+	}
+	node, err := hex.DecodeString(nodeValue)
 	if err != nil || len(node) != 6 {
 		return fmt.Errorf("i-wlan-node-id must be 12 hexadecimal digits: %q", value)
+	}
+	if strings.EqualFold(nodeValue, defaultPANIWLANNode) {
+		if country != "" && len(country) != 2 {
+			return fmt.Errorf("country must be an ISO alpha-2 code: %q", value)
+		}
+		return nil
 	}
 	if node[0]&0x03 != 0x02 {
 		return fmt.Errorf("i-wlan-node-id must be a locally administered unicast identifier: %q", value)

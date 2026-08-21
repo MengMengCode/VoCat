@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -24,6 +23,7 @@ const (
 	defaultRegistrationExpiry   = 3600 * time.Second
 	defaultTransactionTimeout   = 12 * time.Second
 	maxAuthenticationChallenges = 3
+	defaultPANIWLANNode         = "ffffffffffff"
 )
 
 var (
@@ -649,6 +649,11 @@ func newSession(
 	if err != nil {
 		return nil, err
 	}
+	instanceURI := "urn:uuid:" + instanceID
+	profile := vowifi.ResolveCarrierProfile(request.Identity)
+	if profile.IMSRegisterOptions.ContactFormat == vowifi.IMSContactFormatGSMA {
+		instanceURI = sipInstanceID(request.Identity, instanceID)
+	}
 	refreshContext, refreshCancel := context.WithCancel(context.Background())
 	session := &Session{
 		provider:           provider,
@@ -660,8 +665,8 @@ func newSession(
 		conn:               connection,
 		callID:             callToken + "@" + addressHost(connection.LocalAddr()),
 		fromTag:            fromTag,
-		instanceID:         "urn:uuid:" + instanceID,
-		pani:               resolveSessionPAccessNetworkInfo(request.Identity, "urn:uuid:"+instanceID),
+		instanceID:         instanceURI,
+		pani:               resolveSessionPAccessNetworkInfo(request.Identity, provider.config.Logger),
 		paniResolved:       true,
 		cseq:               1,
 		refreshContext:     refreshContext,
@@ -970,11 +975,7 @@ func (session *Session) buildRegister(
 		allow = *registerOptions.AllowHeader
 	}
 
-	userAgent := strings.TrimSpace(session.provider.config.UserAgent)
-	if override := strings.TrimSpace(registerOptions.UserAgent); override != "" &&
-		(userAgent == "" || userAgent == "vocat/1") {
-		userAgent = override
-	}
+	userAgent := session.imsUserAgent()
 
 	lines := []string{
 		"REGISTER " + requestURI + " SIP/2.0",
@@ -1064,6 +1065,15 @@ func (session *Session) buildContact(contactAddress string, registerOptions vowi
 			`%s%s;audio;+g.3gpp.smsip;+g.3gpp.icsi-ref="%s";+sip.instance="<%s>"`,
 			base, extra, icsiRef, instanceID,
 		)
+	case vowifi.IMSContactFormatGSMA:
+		extra := ""
+		for _, tag := range registerOptions.ContactExtraTags {
+			extra += ";" + tag
+		}
+		return fmt.Sprintf(
+			`<sip:%s>;+g.3gpp.icsi-ref="%s"%s;+sip.instance="<%s>"`,
+			contactAddress, icsiRef, extra, instanceID,
+		)
 	default:
 		extra := ""
 		for _, tag := range registerOptions.ContactExtraTags {
@@ -1076,41 +1086,127 @@ func (session *Session) buildContact(contactAddress string, registerOptions vowi
 	}
 }
 
-// sessionPAccessNetworkInfo creates a syntactically valid, locally
-// administered unicast WLAN node identifier from the already-random SIP
-// instance ID. It discloses neither a real BSSID nor subscriber identity, but
-// remains stable for every transaction belonging to this IMS registration.
-func sessionPAccessNetworkInfo(instanceID string) string {
-	instanceID = strings.TrimSpace(instanceID)
-	if instanceID == "" {
-		return ""
+// sipInstanceID uses the standardized GSMA device-instance URI when a valid
+// modem identity is available and keeps the generated UUID as the fallback.
+func sipInstanceID(identity vowifi.SIMIdentity, fallback string) string {
+	imei := strings.TrimSpace(identity.IMEI)
+	if len(imei) == 15 {
+		valid := true
+		for _, digit := range imei {
+			if digit < '0' || digit > '9' {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			return "urn:gsma:imei:" + imei + "-0"
+		}
 	}
-	digest := sha256.Sum256([]byte(instanceID))
-	digest[0] = (digest[0] | 0x02) & 0xfe // locally administered, unicast
-	return "IEEE-802.11;i-wlan-node-id=" + hex.EncodeToString(digest[:6])
+	return "urn:uuid:" + strings.TrimSpace(fallback)
+}
+
+func (session *Session) imsRegisterOptions() vowifi.IMSRegisterOptions {
+	if session == nil {
+		return vowifi.IMSRegisterOptions{}
+	}
+	return vowifi.ResolveCarrierProfile(session.request.Identity).IMSRegisterOptions
+}
+
+func (session *Session) imsUserAgent() string {
+	if session != nil && session.provider != nil {
+		if value := strings.TrimSpace(session.provider.config.UserAgent); value != "" {
+			if value != "vocat/1" {
+				return value
+			}
+		}
+	}
+	if session != nil {
+		profile := vowifi.ResolveCarrierProfile(session.request.Identity)
+		if value := strings.TrimSpace(profile.IMSUserAgent); value != "" {
+			return value
+		}
+	}
+	if session != nil && session.provider != nil {
+		if value := strings.TrimSpace(session.provider.config.UserAgent); value != "" {
+			return value
+		}
+	}
+	return "vocat/1"
+}
+
+func (session *Session) imsLogger() *slog.Logger {
+	if session != nil && session.provider != nil && session.provider.config.Logger != nil {
+		return session.provider.config.Logger
+	}
+	return slog.Default()
 }
 
 // resolveSessionPAccessNetworkInfo freezes the selected value when the IMS
 // session is created. This prevents a carrier-profile reload from changing
 // access identity between REGISTER, SMS MESSAGE and its RP-ACK.
-func resolveSessionPAccessNetworkInfo(identity vowifi.SIMIdentity, instanceID string) string {
+func resolveSessionPAccessNetworkInfo(identity vowifi.SIMIdentity, logger *slog.Logger) string {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	profile := vowifi.ResolveCarrierProfile(identity)
+	if profile.PANIEnabled != nil && !*profile.PANIEnabled {
+		return ""
+	}
 	if configured := profile.IMSRegisterOptions.PAccessNetworkInfo; configured != nil {
-		return ueProvidedPANI(*configured)
+		return appendPaniCountry(ueProvidedPANI(*configured), identity, profile, logger)
 	}
 
 	node := strings.ToLower(strings.TrimSpace(profile.PANINode))
 	if decoded, err := hex.DecodeString(node); err != nil || len(decoded) != 6 {
-		node = strings.TrimPrefix(sessionPAccessNetworkInfo(instanceID), "IEEE-802.11;i-wlan-node-id=")
+		node = defaultPANIWLANNode
 	}
 	if node == "" {
 		return ""
 	}
 	value := "IEEE-802.11;i-wlan-node-id=" + node
-	if country := strings.ToUpper(strings.TrimSpace(profile.PANICountry)); country != "" {
-		value += ";country=" + country
+	return appendPaniCountry(value, identity, profile, logger)
+}
+
+func appendPaniCountry(value string, identity vowifi.SIMIdentity, profile vowifi.CarrierProfile, logger *slog.Logger) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return value
 	}
-	return value
+	parts := strings.Split(value, ";")
+	for _, parameter := range parts {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(parameter)), "country=") {
+			return value
+		}
+	}
+
+	countryMode := strings.ToUpper(strings.TrimSpace(profile.PANICountry))
+	country := countryMode
+	if countryMode == "AUTO" {
+		mcc := strings.TrimSpace(identity.HomeMCC)
+		if mcc == "" {
+			mcc = strings.TrimSpace(profile.RouteMCC)
+		}
+		country = vowifi.CountryCodeForMCC(mcc)
+		if country == "" {
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Error("IMS PANI country code could not be derived",
+				"category", "ims",
+				"stage", "pani_country",
+				"carrier_profile", profile.ID,
+				"mcc", mcc,
+			)
+			return value
+		}
+	}
+	if country == "" {
+		return value
+	}
+	parts = append(parts, "")
+	copy(parts[2:], parts[1:])
+	parts[1] = "country=" + country
+	return strings.Join(parts, ";")
 }
 
 // ueProvidedPANI removes the network-provided marker from a profile override.
@@ -1263,6 +1359,7 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 	serviceRoutes := splitHeaderValues(response.values("Service-Route"))
 	registeredContact := ""
 	smsConfirmed := false
+	profile := vowifi.ResolveCarrierProfile(session.request.Identity)
 	instanceLower := strings.ToLower(session.instanceID)
 	contactURILower := strings.ToLower(fmt.Sprintf(
 		"sip:%s@%s;transport=%s",
@@ -1270,10 +1367,15 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 		session.contactAddress(),
 		session.transport,
 	))
+	contactAddressLower := ""
+	if profile.IMSRegisterOptions.ContactFormat == vowifi.IMSContactFormatGSMA {
+		contactAddressLower = strings.ToLower("sip:" + session.contactAddress())
+	}
 	for _, contact := range contacts {
 		lower := strings.ToLower(contact)
 		matchesThisSession := strings.Contains(lower, instanceLower) ||
-			strings.Contains(lower, contactURILower)
+			strings.Contains(lower, contactURILower) ||
+			(contactAddressLower != "" && strings.Contains(lower, contactAddressLower))
 		if matchesThisSession {
 			registeredContact = contact
 			smsConfirmed = strings.Contains(lower, "+g.3gpp.smsip")

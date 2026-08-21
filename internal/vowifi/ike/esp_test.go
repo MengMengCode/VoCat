@@ -318,6 +318,26 @@ func TestParseInnerIPv6ESP(t *testing.T) {
 	}
 }
 
+func TestParseInnerIPv6ESPTrimsTrailingAlignmentBytes(t *testing.T) {
+	t.Parallel()
+	packet := make([]byte, 40+20+4)
+	packet[0] = 0x60
+	binary.BigEndian.PutUint16(packet[4:6], 20)
+	packet[6] = 6
+	packet[7] = 64
+	copy(packet[8:24], net.ParseIP("2001:db8::1").To16())
+	copy(packet[24:40], net.ParseIP("2001:db8::2").To16())
+	binary.BigEndian.PutUint16(packet[40:42], 49686)
+	binary.BigEndian.PutUint16(packet[42:44], 5060)
+	metadata, err := parseInnerPacket(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.protocol != 6 || metadata.sourcePort != 49686 || metadata.destinationPort != 5060 {
+		t.Fatalf("metadata = %+v", metadata)
+	}
+}
+
 func mustDefaultESPTunnel(t *testing.T) *espTunnel {
 	t.Helper()
 	return mustTestESPTunnel(

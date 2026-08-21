@@ -1177,6 +1177,7 @@ func (session *Session) sendSIPMessageWith(
 	lines = append(lines,
 		"Request-Disposition: no-fork",
 		"Allow: MESSAGE",
+		"User-Agent: "+session.imsUserAgent(),
 	)
 	if inReplyTo != "" {
 		lines = append(lines, "In-Reply-To: "+inReplyTo)

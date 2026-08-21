@@ -76,6 +76,9 @@ func TestImportCarrierIPCCConvertsBinaryAndXMLPlistsSafely(t *testing.T) {
 	if rule.IMS.IPSecEncryption != "aes-cbc" {
 		t.Fatalf("converted IMS profile = %#v", rule.IMS)
 	}
+	if rule.IMS.PANIEnabled == nil || !*rule.IMS.PANIEnabled || rule.IMS.PANICountry != "AUTO" {
+		t.Fatalf("converted PANI behavior = enabled=%v country=%q", rule.IMS.PANIEnabled, rule.IMS.PANICountry)
+	}
 	for _, code := range []string{
 		"remote_certificate_bypass_ignored",
 		"disabled_dpd_ignored",
