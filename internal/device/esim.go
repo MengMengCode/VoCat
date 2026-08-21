@@ -439,6 +439,9 @@ func (manager *Manager) openQMIEuiccOnceAID(ctx context.Context, id string, cand
 	}
 	const slot uint8 = 1
 	logicalChannel, err := session.OpenLogicalChannel(openContext, slot, aid)
+	if recoverySession, recoveryOK := session.(nativeQMIChannelRecoverySession); recoveryOK && isQMIInsufficientResources(err) {
+		logicalChannel, err = openNativeQMIChannelWithRecovery(openContext, recoverySession, slot, aid)
+	}
 	if err != nil {
 		_ = session.Close()
 		return nil, fmt.Errorf("%w: %v", errNoEUICC, err)
