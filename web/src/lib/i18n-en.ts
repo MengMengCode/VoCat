@@ -1208,6 +1208,15 @@ export const EN_DICT: Record<string, string> = {
   // Additional missing system strings
   "端口": "Port",
   "错误详情": "Error Details",
+  "短信通道": "SMS channel",
+  "刷新短信通道状态": "Refresh SMS channel status",
+  "刷新短信通道状态失败": "Failed to refresh SMS channel status",
+  "已注册(CS)": "Registered (CS)",
+  "已注册(IMS)": "Registered (IMS)",
+  "已注册(CS, IMS)": "Registered (CS, IMS)",
+  "已就绪(VoWiFi)": "Ready (VoWiFi)",
+  "未注册短信域": "No SMS domain registered",
+  "状态未知": "Unknown",
   "正在搜索网络": "Searching network",
   "SM-DP+ 的公开 Profile 库存已耗尽，请稍后重试或更换服务。":
     "The public profile inventory on the SM-DP+ is exhausted. Please try again later or use a different service.",
@@ -1218,4 +1227,3 @@ export const EN_DICT: Record<string, string> = {
   "已发现该模组，但未找到 AT 串口：通常是 option 驱动未认该 PID 或模组处于 MBIM/RNDIS 组态。可 ":
     "Modem detected, but no AT serial port found: option driver may not recognize this PID or modem is in MBIM/RNDIS mode. You can ",
 };
-

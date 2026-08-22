@@ -19,7 +19,7 @@ export interface DeviceOverviewTabProps {
   trafficMinuteTx: string;
   e911Starting: boolean;
   onSetupE911: () => void;
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
 }
 
 export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
@@ -45,6 +45,7 @@ export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
           customPhoneNumber={props.customPhoneNumber}
           e911Starting={props.e911Starting}
           onSetupE911={props.onSetupE911}
+          onRefreshOverview={props.onRefresh}
         />
 		{showNetworkDetails ? <OverviewNetworkPanel
           device={device}
