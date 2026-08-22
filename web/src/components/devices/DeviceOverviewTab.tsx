@@ -45,7 +45,6 @@ export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
           customPhoneNumber={props.customPhoneNumber}
           e911Starting={props.e911Starting}
           onSetupE911={props.onSetupE911}
-          onRefreshOverview={props.onRefresh}
         />
 		{showNetworkDetails ? <OverviewNetworkPanel
           device={device}

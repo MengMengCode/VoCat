@@ -690,7 +690,7 @@ func native410UnsupportedOperation(tail []string) bool {
 		return false
 	}
 	operation := strings.Join(tail, "/")
-	return tail[0] == "calls" || operation == "actions/reboot"
+	return tail[0] == "calls" || operation == "actions/reboot" || operation == "cellular-ims"
 }
 
 func (s *Server) handleUSBNetMode(w http.ResponseWriter, r *http.Request, physicalID string) bool {

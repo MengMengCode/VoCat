@@ -1208,9 +1208,6 @@ export const EN_DICT: Record<string, string> = {
   // Additional missing system strings
   "端口": "Port",
   "错误详情": "Error Details",
-  "短信通道": "SMS channel",
-  "刷新短信通道状态": "Refresh SMS channel status",
-  "刷新短信通道状态失败": "Failed to refresh SMS channel status",
   "已注册(CS)": "Registered (CS)",
   "已注册(IMS)": "Registered (IMS)",
   "已注册(CS, IMS)": "Registered (CS, IMS)",
