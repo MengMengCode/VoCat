@@ -6,6 +6,7 @@ import type { DeviceDetail } from "./types";
 import { useI18n } from "../../lib/i18n";
 import { carrierIso } from "../../lib/carrier";
 import { CountryFlag } from "../CountryFlag";
+import { SMSChannelStatusRow } from "./SMSChannelStatusRow";
 
 export interface OverviewSimPanelProps {
   device: DeviceDetail;
@@ -13,9 +14,10 @@ export interface OverviewSimPanelProps {
   customPhoneNumber?: string;
   e911Starting: boolean;
   onSetupE911: () => void;
+  onRefreshOverview: () => void | Promise<void>;
 }
 
-export function OverviewSimPanel({ device, simOperatorDisplay, customPhoneNumber, e911Starting, onSetupE911 }: OverviewSimPanelProps) {
+export function OverviewSimPanel({ device, simOperatorDisplay, customPhoneNumber, e911Starting, onSetupE911, onRefreshOverview }: OverviewSimPanelProps) {
   const { t } = useI18n();
   const [showSensitive, toggleSensitive] = useShowSensitive();
   const modem = device.modem;
@@ -43,6 +45,7 @@ export function OverviewSimPanel({ device, simOperatorDisplay, customPhoneNumber
         <FieldRow label="ICCID" value={modem?.iccid} sensitive={sensitive} monospace copyable />
         <FieldRow label="IMSI" value={modem?.imsi} sensitive={sensitive} monospace copyable />
         <FieldRow label={t("本机号码")} value={displayedPhoneNumber} sensitive={sensitive} monospace copyable />
+        <SMSChannelStatusRow device={device} onRefreshOverview={onRefreshOverview} />
         {device?.e911SetupAvailable ? (
           <div className="flex justify-between gap-3">
             <span className="text-gray-500">{t("E911地址")}</span>
