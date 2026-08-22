@@ -35,6 +35,10 @@ func (mapper nativeQMIControllerMapper) ReadSIMMetadata(ctx context.Context, id 
 	return mapper.Mapper.ReadSIMMetadata(ctx, id)
 }
 
+func (mapper nativeQMIControllerMapper) ReadSMSCenter(ctx context.Context, id string) (string, error) {
+	return mapper.Mapper.ReadSMSCenter(ctx, id)
+}
+
 func (mapper nativeQMIControllerMapper) ProbeNativeQMIApplication(ctx context.Context, id, preference string) ([]byte, string, error) {
 	physical, err := mapper.physical(id)
 	if err != nil {

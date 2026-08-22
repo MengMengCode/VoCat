@@ -60,12 +60,10 @@ function showSmsSendOutcome(result: SmsSendResult) {
       message.success("短信已确认送达");
       return;
     case "accepted_unconfirmed":
-      message.info(
-        result.transport === "ims"
-          ? "IMS 已接受短信提交，但尚未收到收件人送达确认"
-          : "模块已接受短信提交，但尚未收到运营商送达确认",
-        5000,
-      );
+      // Keep the user-facing result identical across cellular AT (EC20) and
+      // VoWiFi IMS (410). The transport remains available in the API response
+      // for diagnostics, but it must not change the meaning shown to users.
+      message.info("模块已接受短信提交，但尚未收到运营商送达确认", 5000);
       return;
     case "partial":
       message.warning(`短信仅有 ${accepted}/${total} 段被接受，不能判定为发送成功`, 5000);

@@ -37,6 +37,7 @@ type nativeQMIBinding struct {
 
 var _ SIMIdentityReader = (*NativeQMIAdapter)(nil)
 var _ PreferredAKAProvider = (*NativeQMIAdapter)(nil)
+var _ SMSCenterReader = (*NativeQMIAdapter)(nil)
 var _ RadioController = (*NativeQMIAdapter)(nil)
 
 func NewNativeQMIAdapter(controller NativeQMIController, purePolicy func(string) bool) (*NativeQMIAdapter, error) {
@@ -71,6 +72,14 @@ func (adapter *NativeQMIAdapter) ReadIdentity(ctx context.Context, deviceID stri
 	adapter.bindings[identity.ICCID] = nativeQMIBinding{deviceID: deviceID, iccid: identity.ICCID, imsi: identity.IMSI}
 	adapter.mu.Unlock()
 	return identity, nil
+}
+
+func (adapter *NativeQMIAdapter) ReadSMSCenter(ctx context.Context, deviceID string) (string, error) {
+	reader, ok := adapter.controller.(SMSCenterReader)
+	if !ok {
+		return "", errors.New("vocat: native QMI controller does not expose an SMS service-centre reader")
+	}
+	return reader.ReadSMSCenter(ctx, deviceID)
 }
 
 func (adapter *NativeQMIAdapter) binding(identity SIMIdentity) (nativeQMIBinding, error) {

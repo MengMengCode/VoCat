@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"vocat/internal/device"
@@ -72,6 +73,43 @@ func (mapper ATMapper) ExecuteSensitiveAT(
 		return modem.Response{}, err
 	}
 	return mapper.Devices.ExecuteSensitiveAT(ctx, physicalID, command)
+}
+
+// ReadSMSCenter reads the SIM-provisioned service-centre address through the
+// modem's read-only AT interface. Native QMI devices still expose a companion
+// AT port, and SMS-over-IMS needs this value to address RP-DATA submissions.
+func (mapper ATMapper) ReadSMSCenter(ctx context.Context, configuredID string) (string, error) {
+	response, err := mapper.ExecuteAT(ctx, configuredID, "AT+CSCA?")
+	if err != nil {
+		return "", fmt.Errorf("read SMS service centre: %w", err)
+	}
+	for _, line := range response.Lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "+CSCA:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, "+CSCA:"))
+		if comma := strings.IndexByte(value, ','); comma >= 0 {
+			value = value[:comma]
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"`)
+		digits := strings.TrimPrefix(value, "+")
+		if len(digits) < 3 || len(digits) > 20 {
+			break
+		}
+		valid := true
+		for _, digit := range digits {
+			if digit < '0' || digit > '9' {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			return value, nil
+		}
+		break
+	}
+	return "", errors.New("modem returned no valid SMS service-centre address")
 }
 
 // ReadSIMMetadata reuses the device manager's per-ICCID EF cache. VoWiFi
