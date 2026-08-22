@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowSyncRegular } from "@fluentui/react-icons";
+import { apiMessage } from "../../api";
 import { Tag, type TagType } from "../ui/Tag";
+import { message } from "../ui";
 import { cx } from "../../lib/utils";
 import { useI18n } from "../../lib/i18n";
 import { getCellularIMS, type CellularIMSStatus } from "./deviceActions";
@@ -59,6 +61,8 @@ export function SMSChannelStatusRow({ device, onRefreshOverview }: SMSChannelSta
       setLoading(true);
       try {
         await onRefreshOverview();
+      } catch (error) {
+        message.error(apiMessage(error) || t("刷新短信通道状态失败"));
       } finally {
         setLoading(false);
       }
