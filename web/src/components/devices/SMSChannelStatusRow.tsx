@@ -58,13 +58,16 @@ export function SMSChannelStatusRow({ device, onRefreshOverview }: SMSChannelSta
   const refresh = async () => {
     if (loading) return;
     if (usesVoWiFi) {
+      const sequence = ++requestSequence.current;
       setLoading(true);
       try {
         await onRefreshOverview();
       } catch (error) {
-        message.error(apiMessage(error) || t("刷新短信通道状态失败"));
+        if (sequence === requestSequence.current) {
+          message.error(apiMessage(error) || t("刷新短信通道状态失败"));
+        }
       } finally {
-        setLoading(false);
+        if (sequence === requestSequence.current) setLoading(false);
       }
       return;
     }
