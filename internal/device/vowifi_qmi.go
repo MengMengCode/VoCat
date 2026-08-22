@@ -130,10 +130,22 @@ func openNativeQMIChannelWithRecovery(
 	if powerErr := session.PowerOffSIM(ctx, slot); powerErr != nil {
 		return 0, errors.Join(err, fmt.Errorf("power off QMI UIM slot %d: %w", slot, powerErr))
 	}
+	restorePower := func() error {
+		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		return session.PowerOnSIM(cleanupContext, slot)
+	}
 	if waitErr := waitNativeQMIRecovery(ctx, 3*time.Second); waitErr != nil {
+		// Power-off succeeded, so cancellation of the caller must not strand the
+		// physical SIM in power-down. Restore power with a bounded cleanup context
+		// that survives an HTTP/UI request being canceled.
+		powerErr := restorePower()
+		if powerErr != nil {
+			return 0, errors.Join(err, waitErr, fmt.Errorf("restore power to QMI UIM slot %d: %w", slot, powerErr))
+		}
 		return 0, errors.Join(err, waitErr)
 	}
-	if powerErr := session.PowerOnSIM(ctx, slot); powerErr != nil {
+	if powerErr := restorePower(); powerErr != nil {
 		return 0, errors.Join(err, fmt.Errorf("power on QMI UIM slot %d: %w", slot, powerErr))
 	}
 	if waitErr := waitNativeQMIRecovery(ctx, 5*time.Second); waitErr != nil {
