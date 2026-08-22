@@ -53,7 +53,7 @@ export function SMSChannelStatusRow({ device, onRefreshOverview }: SMSChannelSta
     return () => {
       requestSequence.current += 1;
     };
-  }, [canProbeCellular, device.id, iccid, device.activeEsimProfileName, probeCellular]);
+  }, [canProbeCellular, device.id, iccid, device.activeEsimProfileName, usesVoWiFi, probeCellular]);
 
   const refresh = async () => {
     if (loading) return;
