@@ -6,7 +6,7 @@ import { message } from "../ui";
 import { cx } from "../../lib/utils";
 import { useI18n } from "../../lib/i18n";
 import { getCellularIMS, type CellularIMSStatus } from "./deviceActions";
-import { isDeviceOnline } from "./shared";
+import { isDeviceOnline, isVoWiFiInUse } from "./shared";
 import type { DeviceDetail } from "./types";
 
 interface SMSChannelStatusRowProps {
@@ -26,7 +26,7 @@ export function SMSChannelStatusRow({ device, onRefreshOverview }: SMSChannelSta
   const requestSequence = useRef(0);
 
   const iccid = (device.modem?.iccid || "").trim();
-  const usesVoWiFi = device.deviceType === "usb_sim_reader" || !!device.vowifiEnabled;
+  const usesVoWiFi = isVoWiFiInUse(device) && !(device.modem?.imei && device.modem?.simInserted === false);
   const canProbeCellular = !usesVoWiFi && isDeviceOnline(device) && !!iccid && device.modem?.simInserted !== false;
 
   const probeCellular = useCallback(async () => {
