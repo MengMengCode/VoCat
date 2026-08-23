@@ -406,6 +406,40 @@ func TestCellularDataRuntimeInvalidateStopsSupersededWorkerWithoutReplay(t *test
 	}
 }
 
+func TestCellularDataRuntimeInvalidateDuringRetryBackoffDoesNotReplay(t *testing.T) {
+	setter := &runtimeNetworkSetter{started: make(chan bool, 4)}
+	returned := make(chan struct{}, 1)
+	setter.apply = func(context.Context, device.NetworkRequest) (device.NetworkResult, error) {
+		returned <- struct{}{}
+		return device.NetworkResult{}, errors.New("temporary QMI failure")
+	}
+	runtime := newCellularDataRuntime(setter, nil)
+	runtime.start(context.Background())
+	runtime.request("dev1", "physical1", device.NetworkRequest{Enabled: true})
+	select {
+	case <-setter.started:
+	case <-time.After(time.Second):
+		t.Fatal("enable operation did not start")
+	}
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("first attempt did not return")
+	}
+	// The worker is now in its first retry backoff. Invalidate the generation
+	// while it is waiting and ensure it cannot replay the superseded request.
+	time.Sleep(50 * time.Millisecond)
+	invalidated := runtime.invalidate("dev1", true, "recovering", "")
+	time.Sleep(100 * time.Millisecond)
+	if calls := setter.recordedCalls(); len(calls) != 1 {
+		t.Fatalf("superseded retry replayed during backoff: calls=%v", calls)
+	}
+	status := runtime.status("dev1", true)
+	if status.Revision != invalidated.Revision || status.Phase != "recovering" || status.Connected {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
 func TestCellularDataRuntimeLiveObservationInvalidatesStaleConnectedState(t *testing.T) {
 	runtime := newCellularDataRuntime(&runtimeNetworkSetter{}, nil)
 	runtime.mu.Lock()

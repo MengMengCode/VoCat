@@ -64,7 +64,7 @@ func qmiProxyExecutable() string {
 	if path, err := exec.LookPath("qmi-proxy"); err == nil {
 		return path
 	}
-	for _, path := range []string{"/usr/libexec/qmi-proxy", "/usr/lib/libqmi-glib/qmi-proxy"} {
+	for _, path := range []string{"/usr/libexec/qmi-proxy", "/usr/lib/qmi-proxy", "/usr/lib/libqmi-glib/qmi-proxy"} {
 		if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
 			return path
 		}
@@ -122,6 +122,14 @@ func (manager *Manager) enableQMIDataEvents(ctx context.Context, state *managedD
 			}
 		}
 	}()
+}
+
+func disableQMIDataEvents(state *managedDevice) {
+	if state == nil || state.dataEventCancel == nil {
+		return
+	}
+	state.dataEventCancel()
+	state.dataEventCancel = nil
 }
 
 func (session *productionQMIDataSession) Start(ctx context.Context, apn, username, password string, authType, ipFamily uint8) (uint32, error) {
@@ -385,14 +393,20 @@ func prepareQMIDataFormat(
 		}
 	}
 	supported, kernelRaw, err = readKernelRawIP(rawIPPath)
-	if err != nil || !supported || !kernelRaw {
-		return fmt.Errorf("kernel QMI Raw-IP verification failed: supported=%t enabled=%t: %w", supported, kernelRaw, err)
+	if err != nil {
+		return fmt.Errorf("kernel QMI Raw-IP verification failed: %w", err)
+	}
+	if !supported || !kernelRaw {
+		return fmt.Errorf("kernel QMI Raw-IP verification failed: supported=%t enabled=%t", supported, kernelRaw)
 	}
 	verifyContext, cancelVerify := context.WithTimeout(ctx, qmiDataStatusTimeout)
 	modemRaw, err = session.RawIP(verifyContext)
 	cancelVerify()
-	if err != nil || !modemRaw {
+	if err != nil {
 		return fmt.Errorf("modem QMI Raw-IP verification failed: enabled=%t: %w", modemRaw, err)
+	}
+	if !modemRaw {
+		return fmt.Errorf("modem QMI Raw-IP verification failed: enabled=%t", modemRaw)
 	}
 	return nil
 }
@@ -454,10 +468,7 @@ func invalidateQMINetworkSession(state *managedDevice, candidate modem.Candidate
 	if state == nil {
 		return
 	}
-	if state.dataEventCancel != nil {
-		state.dataEventCancel()
-		state.dataEventCancel = nil
-	}
+	disableQMIDataEvents(state)
 	if state.dataSession == nil {
 		return
 	}
@@ -497,10 +508,7 @@ func qmiDataIPFamily(ipVersion string) uint8 {
 }
 
 func closeQMIDataSession(state *managedDevice) {
-	if state.dataEventCancel != nil {
-		state.dataEventCancel()
-		state.dataEventCancel = nil
-	}
+	disableQMIDataEvents(state)
 	if state.dataSession != nil {
 		_ = state.dataSession.Close()
 	}
@@ -619,15 +627,18 @@ func (manager *Manager) setQMINetwork(
 	stopErr := session.StopAny(stopContext, true)
 	cancelStop()
 	if !stoppedQMIDataError(stopErr) {
+		disableQMIDataEvents(state)
 		_ = session.Close()
 		return NetworkResult{}, fmt.Errorf("reclaim stale QMI data session: %w", stopErr)
 	}
 	rawIPPath, pathErr := qmiRawIPSysfsPath(candidate.NetworkInterface)
 	if pathErr != nil {
+		disableQMIDataEvents(state)
 		_ = session.Close()
 		return NetworkResult{}, pathErr
 	}
 	if formatErr := prepareQMIDataFormat(ctx, session, ipCommand, candidate.NetworkInterface, rawIPPath); formatErr != nil {
+		disableQMIDataEvents(state)
 		_ = session.Close()
 		return NetworkResult{}, fmt.Errorf("prepare QMI data format: %w", formatErr)
 	}
@@ -636,6 +647,7 @@ func (manager *Manager) setQMINetwork(
 	handle, err := session.Start(startContext, apn, username, password, authType, qmiDataIPFamily(ipVersion))
 	cancelStart()
 	if err != nil {
+		disableQMIDataEvents(state)
 		_ = session.Close()
 		return NetworkResult{}, fmt.Errorf("start QMI data session: %w", err)
 	}

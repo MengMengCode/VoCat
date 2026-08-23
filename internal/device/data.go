@@ -279,7 +279,11 @@ func (manager *Manager) SetNetwork(
 		result, err := manager.setQMINetwork(ctx, state, candidate, request.Enabled, apn, ipVersion, request.Username, request.Password, authentication)
 		if err != nil && (request.Username != "" || request.Password != "") {
 			// Keep credential-bearing request failures generic. Lower layers may
-			// include request fields in diagnostic errors.
+			// include request fields in diagnostic errors. Preserve the sentinel
+			// class so callers can still classify an unavailable backend.
+			if errors.Is(err, ErrDataBackendUnavailable) {
+				return NetworkResult{}, fmt.Errorf("%w: authenticated QMI cellular data operation failed", ErrDataBackendUnavailable)
+			}
 			return NetworkResult{}, errors.New("authenticated QMI cellular data operation failed")
 		}
 		return result, err

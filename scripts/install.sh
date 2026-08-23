@@ -200,6 +200,7 @@ install_qmi_support() {
     qmi_proxy_available() {
         command -v qmi-proxy >/dev/null 2>&1 || \
             [ -x /usr/libexec/qmi-proxy ] || \
+            [ -x /usr/lib/qmi-proxy ] || \
             [ -x /usr/lib/libqmi-glib/qmi-proxy ]
     }
     if command -v qmicli >/dev/null 2>&1 && qmi_proxy_available; then

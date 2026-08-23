@@ -41,6 +41,7 @@ func TestInstallerProvidesRequiredQMIUtilities(t *testing.T) {
 		"command -v qmicli",
 		"command -v qmi-proxy",
 		"/usr/libexec/qmi-proxy",
+		"/usr/lib/qmi-proxy",
 		"apt-get install -y libqmi-utils",
 		"dnf install -y libqmi-utils",
 		"pacman -Sy --noconfirm libqmi",

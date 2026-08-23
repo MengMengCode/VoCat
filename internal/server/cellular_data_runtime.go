@@ -985,7 +985,7 @@ func (runtime *cellularDataRuntime) run(configID string, entry *cellularDataRunt
 				attempt = 3
 			case <-time.After(delay):
 				runtime.mu.Lock()
-				if entry.status.Revision == revision {
+				if runtime.entries[configID] == entry && entry.status.Revision == revision {
 					entry.status.Phase = "recovering"
 					entry.status.UpdatedAt = time.Now().UTC()
 					runtime.signalLocked(entry)

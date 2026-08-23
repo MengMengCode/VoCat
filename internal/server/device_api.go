@@ -1379,11 +1379,19 @@ func (s *Server) handleFlightMode(w http.ResponseWriter, r *http.Request, config
 	}
 	if !request.Enabled {
 		if desiredData {
+			// Prefer the live ICCID/profile request when the modem snapshot is
+			// available. After leaving flight mode the snapshot may still be
+			// temporarily unavailable, so queue a config-based fallback instead
+			// of leaving the runtime parked in the maintenance phase.
+			networkRequest := s.cellularNetworkRequest(r.Context(), config, nil)
+			networkRequest.Enabled = true
+			identity := ""
 			if entry, getErr := s.devices.Get(physicalID); getErr == nil && entry.Snapshot != nil {
-				request := s.cellularNetworkRequest(r.Context(), config, entry.Snapshot)
-				request.Enabled = true
-				dataRuntime.requestWithIdentity(config.ID, physicalID, request, strings.TrimSpace(entry.Snapshot.ICCID))
+				networkRequest = s.cellularNetworkRequest(r.Context(), config, entry.Snapshot)
+				networkRequest.Enabled = true
+				identity = strings.TrimSpace(entry.Snapshot.ICCID)
 			}
+			dataRuntime.requestWithIdentity(config.ID, physicalID, networkRequest, identity)
 		} else {
 			dataRuntime.invalidate(config.ID, false, "disabled", "")
 		}
