@@ -1391,15 +1391,37 @@ func (bot *telegramBot) executeSMS(ctx context.Context, action telegramPendingAc
 }
 
 func (bot *telegramBot) executeESIMSwitch(ctx context.Context, action telegramPendingAction) (string, error) {
-	_, _, physicalID, err := bot.device(action.DeviceID)
+	stored, _, physicalID, err := bot.device(action.DeviceID)
 	if err != nil {
 		return "", err
 	}
 	operationContext, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	desiredData := stored.NetworkEnabled && !stored.VoWiFiEnabled
+	dataRuntime := bot.server.cellularDataRuntime()
+	bot.server.clearPublicIP(stored.ID)
+	dataRuntime.invalidateWithMaintenancePhase(stored.ID, desiredData, "recovering", "", "profile_switching")
+	switchCompleted := false
+	defer func() {
+		if !switchCompleted {
+			dataRuntime.invalidate(stored.ID, desiredData, "failed", "Telegram eSIM profile switch did not complete")
+		}
+	}()
 	if err := bot.server.devices.ESIMSwitchProfile(operationContext, physicalID, action.TargetICCID, action.TargetAID); err != nil {
 		return "", err
 	}
+	if desiredData {
+		snapshot, refreshErr := bot.server.devices.Refresh(operationContext, physicalID)
+		if refreshErr != nil {
+			return "", fmt.Errorf("refresh modem after profile switch: %w", refreshErr)
+		}
+		request := bot.server.cellularNetworkRequest(operationContext, stored, &snapshot)
+		request.Enabled = true
+		dataRuntime.requestWithIdentity(stored.ID, physicalID, request, strings.TrimSpace(snapshot.ICCID))
+	} else {
+		dataRuntime.invalidate(stored.ID, false, "disabled", "")
+	}
+	switchCompleted = true
 	return "Profile 切换成功，模块恢复后已校验当前 ICCID：" + action.TargetICCID, nil
 }
 
@@ -2139,6 +2161,14 @@ func (bot *telegramBot) handleVoWiFi(ctx context.Context, config telegramRuntime
 			}
 		}
 		previous := stored.VoWiFiEnabled
+		dataRuntime := bot.server.cellularDataRuntime()
+		desiredData := stored.NetworkEnabled && !stored.VoWiFiEnabled
+		maintenancePhase := "disabled"
+		bot.server.clearPublicIP(stored.ID)
+		if desiredData {
+			maintenancePhase = "recovering"
+		}
+		dataRuntime.invalidateWithMaintenancePhase(stored.ID, desiredData, maintenancePhase, "", "vowifi")
 		// Telegram follows the same fail-closed transaction as the web API:
 		// RF is disabled before either starting or stopping VoWiFi. Stopping it
 		// never implicitly permits cellular registration.
@@ -2170,7 +2200,9 @@ func (bot *telegramBot) handleVoWiFi(ctx context.Context, config telegramRuntime
 			}
 		}
 		stored.VoWiFiEnabled = enabled
+		stored.NetworkEnabled = false
 		if err = bot.server.store.UpsertDevice(ctx, stored); err == nil {
+			dataRuntime.invalidate(stored.ID, false, "disabled", "")
 			state, err = bot.server.vowifi.RequestEnabled(deviceID, enabled)
 		}
 		if err != nil {

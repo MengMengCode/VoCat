@@ -8,20 +8,21 @@ import (
 )
 
 var (
-	ErrNotStarted             = errors.New("device manager is not started")
-	ErrNotFound               = errors.New("device not found")
-	ErrNoATPort               = errors.New("device has no usable AT port")
-	ErrUnsupportedCapability  = errors.New("device does not support this capability")
-	ErrSMSPromptUnsupported   = errors.New("device AT client does not support SMS prompt mode")
-	ErrSMSInvalidRecipient    = errors.New("invalid SMS recipient")
-	ErrSMSEmpty               = errors.New("SMS text is empty")
-	ErrSMSTooLong             = errors.New("SMS exceeds one-message encoding limit")
-	ErrSMSReferenceMissing    = errors.New("modem completed SMS command without a message reference")
-	ErrSMSInvalidMessageIndex = errors.New("invalid SMS message index")
-	ErrDataBackendUnavailable = errors.New("cellular data backend is unavailable")
-	ErrInvalidNetworkAPN      = errors.New("invalid cellular APN")
-	ErrRegionBlocked          = errors.New("sim card home region is not served")
-	ErrUSSDSessionNotFound    = errors.New("ussd session not found or already closed")
+	ErrNotStarted              = errors.New("device manager is not started")
+	ErrNotFound                = errors.New("device not found")
+	ErrNoATPort                = errors.New("device has no usable AT port")
+	ErrUnsupportedCapability   = errors.New("device does not support this capability")
+	ErrSMSPromptUnsupported    = errors.New("device AT client does not support SMS prompt mode")
+	ErrSMSInvalidRecipient     = errors.New("invalid SMS recipient")
+	ErrSMSEmpty                = errors.New("SMS text is empty")
+	ErrSMSTooLong              = errors.New("SMS exceeds one-message encoding limit")
+	ErrSMSReferenceMissing     = errors.New("modem completed SMS command without a message reference")
+	ErrSMSInvalidMessageIndex  = errors.New("invalid SMS message index")
+	ErrDataBackendUnavailable  = errors.New("cellular data backend is unavailable")
+	ErrDataOperationInProgress = errors.New("cellular data operation is in progress")
+	ErrInvalidNetworkAPN       = errors.New("invalid cellular APN")
+	ErrRegionBlocked           = errors.New("sim card home region is not served")
+	ErrUSSDSessionNotFound     = errors.New("ussd session not found or already closed")
 )
 
 type NetworkRequest struct {
@@ -42,6 +43,17 @@ type NetworkResult struct {
 	APN           string `json:"apn,omitempty"`
 	IPVersion     string `json:"ipVersion,omitempty"`
 	Detail        string `json:"detail,omitempty"`
+}
+
+// NetworkStatus is a live observation of the modem-side packet call and the
+// host-side interface required to use it. It is intentionally separate from
+// NetworkResult: the latter describes a completed control operation, while
+// this value can detect a session which disappeared afterwards.
+type NetworkStatus struct {
+	Connected bool   `json:"connected"`
+	Backend   string `json:"backend"`
+	Interface string `json:"interface,omitempty"`
+	Detail    string `json:"detail,omitempty"`
 }
 
 type USBNetMode struct {

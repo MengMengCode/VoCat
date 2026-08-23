@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"vocat/internal/modem"
 	"vocat/internal/pcsc"
@@ -65,6 +66,46 @@ func TestManagerDiscoverReturnsOnlyCurrentlyPresentDevices(t *testing.T) {
 	retained := manager.List()
 	if len(retained) != 1 || retained[0].ID != id || retained[0].Discovered {
 		t.Fatalf("retained devices after unplug = %#v", retained)
+	}
+}
+
+func TestManagerPublishesDeviceLifecycleEvents(t *testing.T) {
+	manager, id := newStartedTestManager(t, nil)
+	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, err := manager.SubscribeDeviceLifecycleEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	manager.discoverer = staticDiscoverer{}
+	if _, err := manager.Discover(ctx); err != nil {
+		t.Fatalf("Discover after removal: %v", err)
+	}
+	select {
+	case event := <-events:
+		if event.ID != id || event.Present {
+			t.Fatalf("removal event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for removal event")
+	}
+
+	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{{
+		ID:     id,
+		ATPort: modem.Port{Path: "/dev/ttyUSB2", Role: modem.PortRoleAT},
+	}}}
+	if _, err := manager.Discover(ctx); err != nil {
+		t.Fatalf("Discover after insertion: %v", err)
+	}
+	select {
+	case event := <-events:
+		if event.ID != id || !event.Present {
+			t.Fatalf("insertion event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for insertion event")
 	}
 }
 

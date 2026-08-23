@@ -39,12 +39,13 @@ func TestInstallerProvidesRequiredQMIUtilities(t *testing.T) {
 	for _, required := range []string{
 		"install_qmi_support()",
 		"command -v qmicli",
-		"command -v qmi-network",
+		"command -v qmi-proxy",
+		"/usr/libexec/qmi-proxy",
 		"apt-get install -y libqmi-utils",
 		"dnf install -y libqmi-utils",
 		"pacman -Sy --noconfirm libqmi",
 		"apk add --no-cache qmi-utils",
-		"Could not install or find qmicli/qmi-network",
+		"Could not install or find qmicli/qmi-proxy",
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("installer is missing required QMI handling %q", required)

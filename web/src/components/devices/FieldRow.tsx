@@ -11,14 +11,15 @@ export interface FieldRowProps {
   monospace?: boolean;
   placeholder?: string;
   sensitive?: boolean;
+	valueTitle?: string;
 }
 
 // Label/value row used across the overview tab. Click to copy when copyable.
-export function FieldRow({ label, value, prefix, copyable, monospace, placeholder, sensitive }: FieldRowProps) {
+export function FieldRow({ label, value, prefix, copyable, monospace, placeholder, sensitive, valueTitle }: FieldRowProps) {
   const { t } = useI18n();
   const display = (value == null ? "" : String(value)).trim() || placeholder || "--";
   const canCopy = !!copyable && !!display && display !== "--" && display !== "---";
-  const title = sensitive ? "" : display === "--" || display === "---" ? "" : display;
+	const title = sensitive ? "" : valueTitle || (display === "--" || display === "---" ? "" : display);
 
   async function handleCopy() {
     if (canCopy) await copyText(display, t("已复制"));

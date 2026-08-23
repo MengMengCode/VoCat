@@ -189,8 +189,9 @@ VoCat 会继续在添加设备窗口显示该硬件，并明确提示缺少服�
 
 ### QMI 命令行工具
 
-VoCat 使用 `qmicli` 验证 QMI 控制通道是否就绪，并使用 `qmi-network` 管理
-分组数据会话。一键安装脚本会自动安装并验证对应工具。手动部署时，
+VoCat 使用 `qmicli` 验证 QMI 控制通道是否就绪，并通过 `qmi-proxy` 复用控制
+通道；分组数据会话由内置的 QMI WDS 客户端管理，不再依赖 `qmi-network` 的
+临时 CID/PDH 状态文件。一键安装脚本会自动安装并验证对应工具。手动部署时，
 Debian/Ubuntu 使用 `apt install libqmi-utils`；Arch Linux 使用
 `pacman -S libqmi`，Alpine 使用 `apk add qmi-utils`，OpenWrt 使用 `opkg install qmi-utils`。
 

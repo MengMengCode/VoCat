@@ -21,6 +21,18 @@ import type { AddDeviceForm, DeviceDetail, LoadError } from "../components/devic
 import { tf, useI18n } from "../lib/i18n";
 
 const VALID_TABS = new Set(["overview", "esim", "at", "ussd", "config", "card"]);
+const CELLULAR_DATA_POLL_MS = 1000;
+const CELLULAR_DATA_DISABLE_UI_TIMEOUT_MS = 35000;
+const CELLULAR_DATA_ENABLE_UI_TIMEOUT_MS = 80000;
+
+interface CellularDataStatus {
+  enabled: boolean;
+  connected: boolean;
+  phase: "unknown" | "starting" | "connected" | "stopping" | "recovering" | "disabled" | "failed";
+  modemPhase?: "rebooting" | "";
+  maintenancePhase?: string;
+  lastError?: string;
+}
 const EMPTY_ADD: AddDeviceForm = {
   id: "",
   name: "",
@@ -52,6 +64,7 @@ export default function DevicesPage() {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
 	const [dataToggling, setDataToggling] = useState(false);
+	const [dataToggleTarget, setDataToggleTarget] = useState<boolean | null>(null);
   const [rebooting, setRebooting] = useState(false);
   const [reconnectingVoWiFi, setReconnectingVoWiFi] = useState(false);
   const [rescanning, setRescanning] = useState(false);
@@ -235,21 +248,64 @@ export default function DevicesPage() {
     },
     [setSearchParams],
   );
+
   const handleToggleRoamingData = useCallback(async (enabled: boolean) => {
     const id = selectedIdRef.current.trim();
-    if (!id) return;
+	if (!id || dataToggling) return;
 	setDataToggling(true);
+	setDataToggleTarget(enabled);
+	message.info(enabled ? t("正在开启漫游数据，请稍候") : t("正在关闭漫游数据，请稍候"));
     try {
-	  await api(`/devices/${id}/network`, { method: "PATCH", body: { enabled } });
+	  const accepted = await api<CellularDataStatus>(`/devices/${id}/network`, { method: "PATCH", body: { enabled } });
+	  setDetail((current) => current?.id === id ? {
+		...current,
+		networkEnabled: accepted.enabled,
+		 networkConnected: accepted.connected,
+		 networkPhase: accepted.phase,
+		 modemPhase: accepted.modemPhase || "",
+		 networkError: accepted.lastError || "",
+	  } : current);
+
+	  const deadline = Date.now() + (enabled ? CELLULAR_DATA_ENABLE_UI_TIMEOUT_MS : CELLULAR_DATA_DISABLE_UI_TIMEOUT_MS);
+	  let terminal: CellularDataStatus | null = null;
+	  let lastPollError: unknown = null;
+	  while (Date.now() < deadline) {
+		await new Promise((resolve) => window.setTimeout(resolve, CELLULAR_DATA_POLL_MS));
+		try {
+		  const status = await api<CellularDataStatus>(`/devices/${id}/network`);
+		  lastPollError = null;
+		  setDetail((current) => current?.id === id ? {
+			...current,
+			networkEnabled: status.enabled,
+			 networkConnected: status.connected,
+			 networkPhase: status.phase,
+			 modemPhase: status.modemPhase || "",
+			 networkError: status.lastError || "",
+		  } : current);
+		  if (status.phase === "failed" || (enabled && status.phase === "connected") || (!enabled && status.phase === "disabled")) {
+			terminal = status;
+			break;
+		  }
+		} catch (pollError) {
+		  lastPollError = pollError;
+		}
+	  }
+
+	  if (!terminal) {
+		throw new Error(apiMessage(lastPollError) || t("操作超时，请检查当前数据会话状态"));
+	  }
+	  if (terminal.phase === "failed") {
+		throw new Error(terminal.lastError || (enabled ? t("开启漫游数据失败") : t("关闭漫游数据失败")));
+	  }
 	  message.success(enabled ? t("漫游数据已开启，仅供 Export Proxy 使用") : t("漫游数据已关闭"));
-      await refreshAll();
-      refreshSoon(1500);
     } catch (e) {
 	  message.error(apiMessage(e) || (enabled ? t("开启漫游数据失败") : t("关闭漫游数据失败")));
     } finally {
+	  await refreshAll();
 	  setDataToggling(false);
+	  setDataToggleTarget(null);
     }
-  }, [refreshAll, refreshSoon]);
+	}, [dataToggling, refreshAll, t]);
 
   const handleReconnectVoWiFi = useCallback(async () => {
     const id = selectedIdRef.current.trim();
@@ -690,9 +746,11 @@ export default function DevicesPage() {
           ) : null}
           {detail ? (
             <>
-              <DeviceDetailHeader
-                device={detail}
-				dataToggling={dataToggling}
+			<DeviceDetailHeader
+				device={detail}
+				dataToggling={dataToggling || detail.modemPhase === "rebooting" || ["starting", "stopping"].includes(detail.networkPhase || "")}
+				dataToggleTarget={detail.modemPhase === "rebooting" ? null : dataToggling ? dataToggleTarget : detail.networkPhase === "starting" ? true : detail.networkPhase === "stopping" ? false : null}
+				modemRebooting={detail.modemPhase === "rebooting"}
                 rebooting={rebooting}
                 reconnectingVoWiFi={reconnectingVoWiFi}
                 onCopyText={handleCopyText}

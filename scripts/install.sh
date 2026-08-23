@@ -197,7 +197,12 @@ install_linux_ip_tool() {
 
 install_qmi_support() {
     msg "正在检查 QMI 命令行工具..." "Checking QMI command-line utilities..."
-    if command -v qmicli >/dev/null 2>&1 && command -v qmi-network >/dev/null 2>&1; then
+    qmi_proxy_available() {
+        command -v qmi-proxy >/dev/null 2>&1 || \
+            [ -x /usr/libexec/qmi-proxy ] || \
+            [ -x /usr/lib/libqmi-glib/qmi-proxy ]
+    }
+    if command -v qmicli >/dev/null 2>&1 && qmi_proxy_available; then
         return 0
     fi
 
@@ -224,13 +229,13 @@ install_qmi_support() {
         apk add --no-cache qmi-utils || true
     fi
 
-    if command -v qmicli >/dev/null 2>&1 && command -v qmi-network >/dev/null 2>&1; then
+    if command -v qmicli >/dev/null 2>&1 && qmi_proxy_available; then
         msg "QMI 命令行工具已就绪。" "QMI command-line utilities are ready."
         return 0
     fi
     die \
-        "无法安装或找到 qmicli/qmi-network。请安装系统提供的 libqmi/qmi-utils 软件包后重试。" \
-        "Could not install or find qmicli/qmi-network. Install your distribution's libqmi/qmi-utils package and retry."
+        "无法安装或找到 qmicli/qmi-proxy。请安装系统提供的 libqmi/qmi-utils 软件包后重试。" \
+        "Could not install or find qmicli/qmi-proxy. Install your distribution's libqmi/qmi-utils package and retry."
 }
 
 install_pcsc_support() {

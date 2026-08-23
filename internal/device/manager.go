@@ -42,7 +42,13 @@ type Manager struct {
 	cardReaders    *pcsc.Service
 	logger         *slog.Logger
 
+	networkEventsMu         sync.Mutex
+	networkEventSubscribers map[chan string]struct{}
+	deviceEventsMu          sync.Mutex
+	deviceEventSubscribers  map[chan DeviceLifecycleEvent]struct{}
+
 	qmiRadioOpener                qmiRadioSessionOpener
+	qmiDataOpener                 qmiDataSessionOpener
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
 
@@ -77,18 +83,23 @@ type ussdSession struct {
 }
 
 type managedDevice struct {
-	opMu              sync.Mutex
-	candidate         modem.Candidate
-	backend           string
-	lastICCID         string
-	client            modem.Client
-	snapshot          *Snapshot
-	lastError         string
-	lastUpdated       time.Time
-	discovered        bool
-	preFlightMode     *int
-	resetClientOnLock bool
-	simPIN            string
+	opMu               sync.Mutex
+	dataMu             sync.Mutex
+	dataSession        qmiDataSession
+	dataSessionHandle  uint32
+	dataSessionControl string
+	dataEventCancel    context.CancelFunc
+	candidate          modem.Candidate
+	backend            string
+	lastICCID          string
+	client             modem.Client
+	snapshot           *Snapshot
+	lastError          string
+	lastUpdated        time.Time
+	discovered         bool
+	preFlightMode      *int
+	resetClientOnLock  bool
+	simPIN             string
 }
 
 func NewManager(options Options) (*Manager, error) {
@@ -126,7 +137,10 @@ func NewManager(options Options) (*Manager, error) {
 		logger:         options.Logger,
 
 		qmiRadioOpener:                openQMIRadioSession,
+		qmiDataOpener:                 openQMIDataSession,
 		nativeQMIRegistrationInFlight: make(map[string]struct{}),
+		networkEventSubscribers:       make(map[chan string]struct{}),
+		deviceEventSubscribers:        make(map[chan DeviceLifecycleEvent]struct{}),
 
 		devices:        make(map[string]*managedDevice),
 		ussdSessions:   make(map[string]ussdSession),
@@ -177,6 +191,9 @@ func (manager *Manager) Stop(ctx context.Context) error {
 			state.client = nil
 		}
 		state.opMu.Unlock()
+		state.dataMu.Lock()
+		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		state.dataMu.Unlock()
 	}
 	return errors.Join(closeErrors...)
 }
@@ -229,7 +246,8 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		if !state.discovered {
 			events = append(events, discoveryEvent{connected: true, candidate: candidate})
 		}
-		if state.candidate.ATPort.OpenPath() != candidate.ATPort.OpenPath() {
+		if state.candidate.ATPort.OpenPath() != candidate.ATPort.OpenPath() ||
+			state.candidate.QMIControl != candidate.QMIControl {
 			state.resetClientOnLock = true
 		}
 		state.candidate = candidate
@@ -262,6 +280,12 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 			)
 		}
 	}
+	for _, event := range events {
+		manager.publishDeviceLifecycleEvent(DeviceLifecycleEvent{
+			ID:      event.candidate.ID,
+			Present: event.connected,
+		})
+	}
 
 	for _, state := range stale {
 		state.opMu.Lock()
@@ -270,6 +294,9 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 			state.client = nil
 		}
 		state.opMu.Unlock()
+		state.dataMu.Lock()
+		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		state.dataMu.Unlock()
 	}
 	manager.resetChangedClients()
 
@@ -305,6 +332,9 @@ func (manager *Manager) resetChangedClients() {
 			state.client = nil
 		}
 		state.opMu.Unlock()
+		state.dataMu.Lock()
+		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		state.dataMu.Unlock()
 	}
 }
 
@@ -672,6 +702,9 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 		manager.setResult(id, state, nil, err)
 		return err
 	}
+	state.dataMu.Lock()
+	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	state.dataMu.Unlock()
 	commandCtx, cancel := manager.withTimeout(ctx, manager.longTimeout)
 	defer cancel()
 	_, err = client.Execute(commandCtx, "AT+CFUN=1,1")
@@ -704,6 +737,9 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 		manager.setResult(id, state, nil, err)
 		return err
 	}
+	state.dataMu.Lock()
+	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	state.dataMu.Unlock()
 	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 

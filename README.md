@@ -213,8 +213,9 @@ service or driver instead of silently hiding it.
 ### QMI command-line utilities
 
 VoCat uses `qmicli` to verify that a QMI control channel is ready and
-`qmi-network` to manage packet-data sessions. The one-click installer installs
-and verifies the corresponding utilities automatically. For manual deployment,
+`qmi-proxy` to multiplex access to it. Packet-data sessions are managed by the
+built-in QMI WDS client instead of `qmi-network` CID/PDH state files. The
+one-click installer installs and verifies the corresponding utilities. For manual deployment,
 Debian/Ubuntu uses `apt install libqmi-utils`; Arch Linux uses
 `pacman -S libqmi`, Alpine uses `apk add qmi-utils`, and OpenWrt uses
 `opkg install qmi-utils`.

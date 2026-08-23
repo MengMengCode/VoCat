@@ -1,5 +1,5 @@
 import { ArrowSyncRegular, PowerRegular, ChatRegular } from "@fluentui/react-icons";
-import { Button, Switch } from "../ui";
+import { Button, Spinner, Switch } from "../ui";
 import type { DeviceDetail } from "./types";
 import { useI18n } from "../../lib/i18n";
 import { deviceTypeImage } from "../../lib/deviceTypes";
@@ -8,6 +8,8 @@ import { isVoWiFiInUse } from "./shared";
 export interface DeviceDetailHeaderProps {
   device: DeviceDetail;
 	dataToggling: boolean;
+	dataToggleTarget: boolean | null;
+	modemRebooting: boolean;
   rebooting: boolean;
   reconnectingVoWiFi: boolean;
   onCopyText: (text: string) => void;
@@ -58,6 +60,17 @@ export function DeviceDetailHeader(props: DeviceDetailHeaderProps) {
 				size="small"
 				ariaLabel={t("漫游数据")}
 			  />
+			  {props.modemRebooting ? (
+				<span className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400" aria-live="polite">
+				  <Spinner className="h-3.5 w-3.5" />
+				  {t("模组重启中...")}
+				</span>
+			  ) : props.dataToggling && props.dataToggleTarget !== null ? (
+				<span className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400" aria-live="polite">
+				  <Spinner className="h-3.5 w-3.5" />
+				  {props.dataToggleTarget ? t("正在开启...") : t("正在关闭...")}
+				</span>
+			  ) : null}
 			</div>
 		  ) : null}
 		  {!props.wifiCallingOnly && !props.modemControlOnly ? <Button loading={props.rebooting} onClick={props.onRebootModem} className="ui-glass-border !border-0 hover:!text-red-600" icon={<PowerRegular />}>

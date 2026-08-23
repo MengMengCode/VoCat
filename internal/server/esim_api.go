@@ -401,6 +401,19 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 		writeError(w, http.StatusBadRequest, "invalid_request", "iccid is required")
 		return
 	}
+	dataRuntime := s.cellularDataRuntime()
+	s.clearPublicIP(configuredID)
+	desiredData := true
+	if storedConfig, configErr := s.store.Device(r.Context(), configuredID); configErr == nil {
+		desiredData = storedConfig.NetworkEnabled && !storedConfig.VoWiFiEnabled
+	}
+	dataRuntime.invalidateWithMaintenancePhase(configuredID, desiredData, "recovering", "", "profile_switching")
+	switchCompleted := false
+	defer func() {
+		if !switchCompleted {
+			dataRuntime.invalidate(configuredID, desiredData, "failed", "eSIM profile switch did not complete")
+		}
+	}()
 	endMaintenance := func() {}
 	if maintenance, ok := s.vowifi.(VoWiFiMaintenanceController); ok {
 		if err := maintenance.BeginMaintenance(configuredID); err != nil {
@@ -481,6 +494,8 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 		s.writeStoreError(w, err)
 		return
 	}
+	dataRuntime.invalidate(configuredID, false, "disabled", "")
+	switchCompleted = true
 	// The target profile is now active and its persisted policy has replaced the
 	// old runtime configuration. Allow reconciliation again before requesting
 	// the target profile's desired VoWiFi state.

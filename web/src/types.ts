@@ -93,6 +93,15 @@ export interface ModemSummary {
   phoneNumberSource?: string;
 }
 
+export interface PublicIPInfo {
+  detected?: boolean;
+  ip: string;
+  countryCode: string;
+  region?: string;
+  city?: string;
+  organization?: string;
+}
+
 export interface DeviceListItem {
   id: string;
   name: string;
@@ -117,6 +126,10 @@ export interface DeviceListItem {
   vowifiRuntime: VoWiFiRuntime;
   modem: ModemSummary;
   networkConnected: boolean;
+	  networkPhase?: "unknown" | "starting" | "connected" | "stopping" | "recovering" | "disabled" | "failed";
+	  networkError?: string;
+	  modemPhase?: "rebooting" | "";
+	  publicIpInfo?: PublicIPInfo;
   registrationStateLabel: "registered" | "searching" | "denied" | "unknown";
   flightMode?: boolean;
 }

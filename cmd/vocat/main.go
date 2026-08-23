@@ -229,7 +229,6 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	pollContext, cancelPolling := context.WithCancel(context.Background())
 	defer cancelPolling()
 	go pollDeviceSnapshots(pollContext, deviceLogger, database, deviceManager)
-	go restoreConfiguredCellularData(pollContext, logger, database, deviceManager)
 	go collectCellularTraffic(pollContext, logger, database)
 	go persistLogsToStore(pollContext, logger, logs, database)
 	if !developerEnabled {
@@ -300,6 +299,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	}
 	go handler.StartLogRetentionLoop(pollContext, time.Minute)
 	go handler.StartSMSSyncLoop(pollContext, 15*time.Second)
+	handler.StartCellularDataReconciler(pollContext)
 	handler.StartTelegramBot(pollContext)
 	handler.StartSMSNotificationDispatchers(pollContext)
 	go handler.StartCellularCallMonitor(pollContext)
@@ -470,41 +470,6 @@ func restoreDefaultCellularRadios(
 			continue
 		}
 		logger.Info("restored cellular radio after disabled VoWiFi", "device_id", config.ID, "iccid", iccid)
-	}
-}
-
-func restoreConfiguredCellularData(
-	ctx context.Context,
-	logger *slog.Logger,
-	database *store.Store,
-	manager *device.Manager,
-) {
-	configs, err := database.ListDevices(ctx)
-	if err != nil {
-		logger.Warn("startup cellular data recovery: list devices", "error", err)
-		return
-	}
-	mapper := integration.ATMapper{Store: database, Devices: manager}
-	for _, config := range configs {
-		if config.DeviceType == store.DeviceTypeUSBSIMReader {
-			continue
-		}
-		if !config.NetworkEnabled || config.VoWiFiEnabled {
-			continue
-		}
-		entry, err := mapper.Get(config.ID)
-		if err != nil {
-			continue
-		}
-		networkRequest := configuredCellularNetworkRequest(ctx, database, config, entry.Snapshot)
-		dataContext, cancel := context.WithTimeout(ctx, 60*time.Second)
-		_, err = manager.SetNetwork(dataContext, entry.ID, networkRequest)
-		cancel()
-		if err != nil {
-			logger.Warn("startup cellular data recovery failed", "device_id", config.ID)
-			continue
-		}
-		logger.Info("restored protected cellular data route", "device_id", config.ID, "interface", config.Interface)
 	}
 }
 
