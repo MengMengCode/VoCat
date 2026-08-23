@@ -38,6 +38,15 @@ func ConcatSMSReadyToNotify(messageID string, extra json.RawMessage) bool {
 	return complete
 }
 
+func concatSMSKeepsDurableID(extra json.RawMessage) bool {
+	document, err := decodeJSONObject(extra)
+	if err != nil {
+		return false
+	}
+	keep, _ := document["keep_durable_id_on_rescan"].(bool)
+	return keep
+}
+
 // StableConcatMessageID builds the message id shared by every segment of one
 // concatenated SMS. The UDH concat reference is only unique per sender, so the
 // hardware identity and peer scope it; total is folded in to further separate the
@@ -126,7 +135,7 @@ func mergeConcatSegment(
 		"concat_complete": complete,
 	}
 	// Preserve non-concat metadata from the latest segment for context.
-	for _, key := range []string{"encoding", "storage", "transport", "source"} {
+	for _, key := range []string{"encoding", "storage", "transport", "source", "keep_durable_id_on_rescan"} {
 		if value, ok := segment[key]; ok {
 			merged[key] = value
 		}

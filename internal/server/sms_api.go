@@ -622,6 +622,17 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 		if !present {
 			continue
 		}
+		// OpenStick 410 controls cellular registration through QMI but receives
+		// stored SMS through its AT port. Its firmware can reset CNMI after a
+		// profile switch, leaving newly delivered SMS invisible to VoCat.
+		if store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeWiFi410 {
+			setupContext, cancelSetup := context.WithTimeout(ctx, 5*time.Second)
+			_, setupErr := s.devices.ExecuteAT(setupContext, physicalID, `AT+CNMI=2,1,0,0,0`)
+			cancelSetup()
+			if setupErr != nil {
+				s.logger.Debug("OpenStick 410 cellular SMS notification setup skipped", "device_id", config.ID, "error", setupErr)
+			}
+		}
 		listContext, cancelList := context.WithTimeout(ctx, 30*time.Second)
 		messages, err := s.devices.ListSMS(listContext, physicalID)
 		cancelList()
@@ -696,6 +707,9 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 				"message_reference":  message.MessageReference,
 				"delivery_status":    message.DeliveryStatus,
 				"data_coding_scheme": message.DataCodingScheme,
+				// Mark 410 rows so completed multipart messages retain their durable
+				// id when its modem storage is decoded again on the next poll.
+				"keep_durable_id_on_rescan": store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeWiFi410,
 			})
 			saved, saveErr := s.store.SaveSMSMessage(ctx, store.SMSMessage{
 				MessageID:     messageID,
@@ -729,7 +743,13 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 
 func supportsModemSMSStorage(config store.Device) bool {
 	deviceType := store.NormalizeDeviceType(config.DeviceType)
-	return deviceType != store.DeviceTypeUSBSIMReader && deviceType != store.DeviceTypeWiFi410
+	if deviceType == store.DeviceTypeUSBSIMReader {
+		return false
+	}
+	if deviceType == store.DeviceTypeWiFi410 {
+		return strings.TrimSpace(config.ATPort) != ""
+	}
+	return true
 }
 
 func shouldDeferModemSMSSync(state vowifi.State, stateErr error) bool {

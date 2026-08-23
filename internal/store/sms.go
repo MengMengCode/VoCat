@@ -102,19 +102,38 @@ func saveSMSMessage(
 				}
 				return existing, nil
 			}
-			// A new segment advanced the message. Replace the stale partial row so
-			// the merged row receives a fresh durable id; the Telegram id-cursor
-			// then surfaces the now-more-complete message exactly once. Carry
-			// forward identity and history fields.
-			if _, delErr := executor.ExecContext(ctx, `DELETE FROM sms_messages WHERE id = ?`, existing.ID); delErr != nil {
-				return SMSMessage{}, fmt.Errorf("replace concatenated SMS: %w", delErr)
-			}
-			value.ID = 0
-			value.CreatedAt = existing.CreatedAt
-			value.Read = value.Read || existing.Read
-			if !existing.Timestamp.IsZero() &&
-				(value.Timestamp.IsZero() || existing.Timestamp.Before(value.Timestamp)) {
-				value.Timestamp = existing.Timestamp
+			// Once a concatenated message is complete, keep its durable row id
+			// stable even if a later modem rescan presents one segment in a
+			// slightly different decoded form. Notification consumers use this id
+			// as their cursor; deleting and reinserting a completed row would make
+			// an old stored SMS look new and repeatedly notify it on every scan.
+			// Partial rows still receive a fresh id when they become complete so a
+			// consumer that already skipped the partial row can surface it once.
+			if ConcatSMSReadyToNotify(existing.MessageID, existing.Extra) && concatSMSKeepsDurableID(extra) {
+				value.ID = existing.ID
+				value.CreatedAt = existing.CreatedAt
+				value.Read = value.Read || existing.Read
+				if !existing.Timestamp.IsZero() &&
+					(value.Timestamp.IsZero() || existing.Timestamp.Before(value.Timestamp)) {
+					value.Timestamp = existing.Timestamp
+				}
+				value.Body = mergedBody
+				extra = mergedExtra
+			} else {
+				// A new segment advanced the message. Replace the stale partial row so
+				// the merged row receives a fresh durable id; the Telegram id-cursor
+				// then surfaces the now-more-complete message exactly once. Carry
+				// forward identity and history fields.
+				if _, delErr := executor.ExecContext(ctx, `DELETE FROM sms_messages WHERE id = ?`, existing.ID); delErr != nil {
+					return SMSMessage{}, fmt.Errorf("replace concatenated SMS: %w", delErr)
+				}
+				value.ID = 0
+				value.CreatedAt = existing.CreatedAt
+				value.Read = value.Read || existing.Read
+				if !existing.Timestamp.IsZero() &&
+					(value.Timestamp.IsZero() || existing.Timestamp.Before(value.Timestamp)) {
+					value.Timestamp = existing.Timestamp
+				}
 			}
 		}
 		value.Body = mergedBody
