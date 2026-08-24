@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +70,57 @@ func TestTelegramPollingAcceptsFakeIPWithoutWebAccessAllowlist(t *testing.T) {
 	}
 }
 
+func TestTelegramHTTPClientReusesKeepAliveTransportUntilProxyChanges(t *testing.T) {
+	bot := &telegramBot{}
+	first, err := bot.httpClient(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := bot.httpClient(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatal("Telegram HTTP client was recreated for unchanged configuration")
+	}
+	transport, ok := first.Transport.(*http.Transport)
+	if !ok || transport.DisableKeepAlives || transport.MaxIdleConnsPerHost < 1 {
+		t.Fatalf("Telegram transport does not retain connections: %#v", first.Transport)
+	}
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer proxy.Close()
+	third, err := bot.httpClient(context.Background(), proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third == first {
+		t.Fatal("Telegram HTTP client was reused after proxy configuration changed")
+	}
+}
+
+func TestTelegramTextRequestUsesEditForCallbackMenus(t *testing.T) {
+	keyboard := telegramKeyboard([]map[string]string{telegramButton("返回", "menu:home")})
+	method, payload := telegramTextRequest("editMessageText", "-1000", -2000, 42, "菜单", keyboard)
+	if method != "editMessageText" {
+		t.Fatalf("method = %q", method)
+	}
+	if payload["chat_id"] != "-2000" || payload["message_id"] != int64(42) || payload["text"] != "菜单" {
+		t.Fatalf("edit payload = %#v", payload)
+	}
+	if payload["reply_markup"] == nil {
+		t.Fatal("edit payload omitted keyboard")
+	}
+
+	method, payload = telegramTextRequest("sendMessage", "-1000", 0, 0, "新消息", nil)
+	if method != "sendMessage" || payload["chat_id"] != "-1000" {
+		t.Fatalf("send payload = %q %#v", method, payload)
+	}
+	if _, exists := payload["message_id"]; exists {
+		t.Fatalf("send payload unexpectedly contains message_id: %#v", payload)
+	}
+}
+
 func TestParseTelegramCommand(t *testing.T) {
 	command, remainder := parseTelegramCommand("  /sms@vocat_bot EC20 +447700900123 hello world  ")
 	if command != "sms" || remainder != "EC20 +447700900123 hello world" {
@@ -107,10 +160,13 @@ func TestResolveTelegramPhoneNumberPrefersCurrentSIMAssociation(t *testing.T) {
 		ICCID:       snapshot.ICCID,
 		PhoneNumber: "+447386125520",
 	}
-	if got := resolveTelegramPhoneNumber("+447700900123", state, snapshot); got != "+447700900123" {
+	if got := resolveTelegramPhoneNumber("+8613800138000", "+447700900123", state, snapshot); got != "+8613800138000" {
+		t.Fatalf("resolved custom number = %q", got)
+	}
+	if got := resolveTelegramPhoneNumber("", "+447700900123", state, snapshot); got != "+447700900123" {
 		t.Fatalf("resolved association number = %q", got)
 	}
-	if got := resolveTelegramPhoneNumber("", state, snapshot); got != "+447386125520" {
+	if got := resolveTelegramPhoneNumber("", "", state, snapshot); got != "+447386125520" {
 		t.Fatalf("resolved IMS number = %q", got)
 	}
 }
@@ -124,7 +180,7 @@ func TestResolveTelegramPhoneNumberRejectsPlaceholderAndStaleRuntime(t *testing.
 		ICCID:       "previous-card",
 		PhoneNumber: "+447700900123",
 	}
-	if got := resolveTelegramPhoneNumber("", state, snapshot); got != "--" {
+	if got := resolveTelegramPhoneNumber("", "", state, snapshot); got != "--" {
 		t.Fatalf("stale or placeholder number leaked as %q", got)
 	}
 	for _, placeholder := range []string{"00000000000", "1111111111", "+0000000000", "not-a-number"} {

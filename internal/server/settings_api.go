@@ -927,19 +927,40 @@ func restrictedHTTPClient(
 	timeout time.Duration,
 	proxy string,
 ) (*http.Client, error) {
+	return newRestrictedHTTPClient(ctx, timeout, proxy, false)
+}
+
+func persistentRestrictedHTTPClient(
+	ctx context.Context,
+	timeout time.Duration,
+	proxy string,
+) (*http.Client, error) {
+	return newRestrictedHTTPClient(ctx, timeout, proxy, true)
+}
+
+func newRestrictedHTTPClient(
+	ctx context.Context,
+	timeout time.Duration,
+	proxy string,
+	keepAlives bool,
+) (*http.Client, error) {
 	timeout = clampNotificationTimeout(timeout)
 	transport := &http.Transport{
 		Proxy:                 nil,
 		DialContext:           restrictedDialer(timeout),
 		ForceAttemptHTTP2:     true,
-		DisableKeepAlives:     true,
-		MaxIdleConns:          0,
+		DisableKeepAlives:     !keepAlives,
+		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   timeout,
 		ResponseHeaderTimeout: timeout,
 		ExpectContinueTimeout: time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
+	}
+	if keepAlives {
+		transport.MaxIdleConns = 8
+		transport.MaxIdleConnsPerHost = 4
 	}
 	if strings.TrimSpace(proxy) != "" {
 		parsed, err := validateNotificationProxyURL(ctx, proxy)

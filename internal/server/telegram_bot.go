@@ -46,6 +46,10 @@ type telegramRuntimeConfig struct {
 type telegramBot struct {
 	server *Server
 
+	clientMu    sync.Mutex
+	clientProxy string
+	client      *http.Client
+
 	pendingMu sync.Mutex
 	pending   map[string]telegramPendingAction
 
@@ -115,6 +119,8 @@ type telegramCallbackQuery struct {
 	Message *telegramMessage `json:"message"`
 	Data    string           `json:"data"`
 }
+
+type telegramMenuMessageContextKey struct{}
 
 // StartTelegramBot starts both the Telegram command poller and durable inbound
 // SMS notifier. Configuration is reloaded between polls, so saving Settings
@@ -409,6 +415,7 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 func (bot *telegramBot) handleCallback(ctx context.Context, config telegramRuntimeConfig, callback *telegramCallbackQuery) {
 	data := strings.TrimSpace(callback.Data)
 	chatID, adminID := callback.Message.Chat.ID, callback.From.ID
+	ctx = context.WithValue(ctx, telegramMenuMessageContextKey{}, callback.Message.MessageID)
 	if data == "menu:home" || data == "menu:devices" {
 		if data == "menu:home" {
 			bot.sendMainMenu(ctx, config, chatID)
@@ -556,7 +563,7 @@ func (bot *telegramBot) homeKeyboard() map[string]any {
 
 func (bot *telegramBot) sendMainMenu(ctx context.Context, config telegramRuntimeConfig, chatID int64) {
 	bot.clearInput(chatID, config.AdminID)
-	bot.sendText(ctx, config, chatID,
+	bot.sendMenuText(ctx, config, chatID,
 		"Vocat 控制中心\n\n请选择设备或直接查看全部设备状态。发送 /menu 可随时返回这里。",
 		telegramKeyboard(
 			[]map[string]string{telegramButton("📱 设备操作", "menu:devices")},
@@ -601,14 +608,14 @@ func (bot *telegramBot) sendDevicePicker(
 	}
 	rows = append(rows, []map[string]string{telegramButton("🏠 主菜单", "menu:home")})
 	if len(configs) == 0 {
-		bot.sendText(ctx, config, chatID, "当前没有已配置设备。", telegramKeyboard(rows...))
+		bot.sendMenuText(ctx, config, chatID, "当前没有已配置设备。", telegramKeyboard(rows...))
 		return
 	}
 	title := "请选择要操作的设备"
 	if next != "" {
 		title += "："
 	}
-	bot.sendText(ctx, config, chatID, title, telegramKeyboard(rows...))
+	bot.sendMenuText(ctx, config, chatID, title, telegramKeyboard(rows...))
 }
 
 func truncateTelegramButton(value string) string {
@@ -643,7 +650,7 @@ func (bot *telegramBot) sendDeviceMenu(
 	if present {
 		status = "🟢 在线"
 	}
-	bot.sendText(ctx, config, chatID,
+	bot.sendMenuText(ctx, config, chatID,
 		fmt.Sprintf("📡 %s\n设备 ID：%s\n状态：%s\n\n请选择功能：", firstNonEmpty(stored.Name, deviceID), deviceID, status),
 		telegramKeyboard(
 			[]map[string]string{
@@ -718,7 +725,7 @@ func (bot *telegramBot) sendVoWiFiMenu(ctx context.Context, config telegramRunti
 	if err != nil {
 		return
 	}
-	bot.sendText(ctx, config, chatID,
+	bot.sendMenuText(ctx, config, chatID,
 		fmt.Sprintf("📶 %s · VoWiFi\n策略：%s\n阶段：%s\nTunnel：%t · IMS：%t · SMS：%t", deviceID, map[bool]string{true: "已启用", false: "已关闭"}[stored.VoWiFiEnabled], firstNonEmpty(string(state.Phase), "idle"), state.TunnelReady, state.IMSReady, state.SMSReady),
 		telegramKeyboard(
 			[]map[string]string{
@@ -743,7 +750,7 @@ func (bot *telegramBot) sendCallMenu(ctx context.Context, config telegramRuntime
 	if err != nil {
 		return
 	}
-	bot.sendText(ctx, config, chatID, "📞 "+deviceID+" · 通话\n请选择操作：",
+	bot.sendMenuText(ctx, config, chatID, "📞 "+deviceID+" · 通话\n请选择操作：",
 		telegramKeyboard(
 			[]map[string]string{telegramButton("📱 拨打电话", "call:"+token+":dial")},
 			[]map[string]string{
@@ -772,7 +779,7 @@ func (bot *telegramBot) sendToolsMenu(ctx context.Context, config telegramRuntim
 	if err != nil {
 		return
 	}
-	bot.sendText(ctx, config, chatID, "🛠 "+deviceID+" · 调试与运营商指令\n请选择输入类型：",
+	bot.sendMenuText(ctx, config, chatID, "🛠 "+deviceID+" · 高级工具\n请选择操作：",
 		telegramKeyboard(
 			[]map[string]string{
 				telegramButton("⌨️ AT 指令", "d:"+token+":at"),
@@ -784,7 +791,7 @@ func (bot *telegramBot) sendToolsMenu(ctx context.Context, config telegramRuntim
 }
 
 func (bot *telegramBot) sendExpiredMenu(ctx context.Context, config telegramRuntimeConfig, chatID int64) {
-	bot.sendText(ctx, config, chatID, "该菜单已过期，请重新选择。", bot.homeKeyboard())
+	bot.sendMenuText(ctx, config, chatID, "该菜单已过期，请重新选择。", bot.homeKeyboard())
 }
 
 func (bot *telegramBot) sendHelp(ctx context.Context, config telegramRuntimeConfig, chatID int64) {
@@ -811,7 +818,7 @@ func (bot *telegramBot) sendHelp(ctx context.Context, config telegramRuntimeConf
 		[]map[string]string{telegramButton("📱 使用操作菜单", "menu:devices")},
 		[]map[string]string{telegramButton("🏠 主菜单", "menu:home")},
 	)
-	bot.sendText(ctx, config, chatID, text, keyboard)
+	bot.sendMenuText(ctx, config, chatID, text, keyboard)
 }
 
 func (bot *telegramBot) sendDeviceStatus(ctx context.Context, config telegramRuntimeConfig, chatID int64, onlyID string) {
@@ -838,8 +845,12 @@ func (bot *telegramBot) sendDeviceStatus(ctx context.Context, config telegramRun
 		} else {
 			lines = append(lines, "设备：在线 · "+strings.ToUpper(firstNonEmpty(stored.DeviceBackend, "AT")))
 			if snapshot := entry.Snapshot; snapshot != nil {
+				customNumber := ""
 				associationNumber := ""
 				if snapshot.ICCID != "" {
+					if policy, policyErr := bot.server.store.CardPolicy(ctx, snapshot.ICCID); policyErr == nil {
+						customNumber = policy.CustomPhoneNumber
+					}
 					if association, associationErr := bot.server.store.PhoneAssociation(ctx, snapshot.ICCID); associationErr == nil {
 						associationNumber = association.Number
 					}
@@ -849,7 +860,7 @@ func (bot *telegramBot) sendDeviceStatus(ctx context.Context, config telegramRun
 					"IMEI："+firstNonEmpty(snapshot.IMEI, stored.ModemIMEI, "--"),
 					"ICCID："+firstNonEmpty(snapshot.ICCID, "--"),
 					"IMSI："+firstNonEmpty(snapshot.IMSI, "--"),
-					"号码："+resolveTelegramPhoneNumber(associationNumber, wfcState, snapshot),
+					"号码："+resolveTelegramPhoneNumber(customNumber, associationNumber, wfcState, snapshot),
 					"原运营商："+telegramSnapshotHomeCarrier(snapshot),
 					"当前网络："+telegramCurrentNetwork(snapshot),
 					"蜂窝模式："+map[bool]string{true: "飞行模式", false: "开启"}[snapshot.FlightMode],
@@ -876,10 +887,13 @@ func (bot *telegramBot) sendDeviceStatus(ctx context.Context, config telegramRun
 		bot.sendText(ctx, config, chatID, "未找到设备 "+onlyID, nil)
 		return
 	}
-	bot.sendText(ctx, config, chatID, strings.Join(blocks, "\n\n"), bot.homeKeyboard())
+	bot.sendMenuText(ctx, config, chatID, strings.Join(blocks, "\n\n"), bot.homeKeyboard())
 }
 
-func resolveTelegramPhoneNumber(associationNumber string, state *vowifi.State, snapshot *device.Snapshot) string {
+func resolveTelegramPhoneNumber(customNumber, associationNumber string, state *vowifi.State, snapshot *device.Snapshot) string {
+	if usableTelegramPhoneNumber(customNumber) {
+		return strings.TrimSpace(customNumber)
+	}
 	if usableTelegramPhoneNumber(associationNumber) {
 		return strings.TrimSpace(associationNumber)
 	}
@@ -1095,7 +1109,7 @@ func (bot *telegramBot) sendESIMProfiles(ctx context.Context, config telegramRun
 		telegramButton("⬅️ 设备列表", "menu:devices"),
 		telegramButton("🏠 主菜单", "menu:home"),
 	})
-	bot.sendText(ctx, config, chatID, strings.Join(lines, "\n"), telegramKeyboard(rows...))
+	bot.sendMenuText(ctx, config, chatID, strings.Join(lines, "\n"), telegramKeyboard(rows...))
 }
 
 func (bot *telegramBot) confirmESIMSwitch(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID, iccid string) {
@@ -2138,12 +2152,7 @@ func (bot *telegramBot) handleVoWiFi(ctx context.Context, config telegramRuntime
 	}
 	operation = strings.ToLower(strings.TrimSpace(operation))
 	if operation == "status" {
-		state, stateErr := bot.server.vowifi.State(deviceID)
-		if stateErr != nil {
-			bot.sendText(ctx, config, chatID, "读取 VoWiFi 状态失败："+stateErr.Error(), nil)
-			return
-		}
-		bot.sendText(ctx, config, chatID, formatTelegramVoWiFiState(state), nil)
+		bot.sendVoWiFiMenu(ctx, config, chatID, adminID, deviceID)
 		return
 	}
 	var state vowifi.State
@@ -2373,7 +2382,7 @@ func (bot *telegramBot) call(ctx context.Context, config telegramRuntimeConfig, 
 	if err != nil {
 		return err
 	}
-	client, err := restrictedHTTPClient(ctx, 10*time.Second, config.Proxy)
+	client, err := bot.httpClient(ctx, config.Proxy)
 	if err != nil {
 		return err
 	}
@@ -2407,6 +2416,25 @@ func (bot *telegramBot) call(ctx context.Context, config telegramRuntimeConfig, 
 	return nil
 }
 
+func (bot *telegramBot) httpClient(ctx context.Context, proxy string) (*http.Client, error) {
+	proxy = strings.TrimSpace(proxy)
+	bot.clientMu.Lock()
+	defer bot.clientMu.Unlock()
+	if bot.client != nil && bot.clientProxy == proxy {
+		return bot.client, nil
+	}
+	client, err := persistentRestrictedHTTPClient(ctx, 10*time.Second, proxy)
+	if err != nil {
+		return nil, err
+	}
+	if bot.client != nil {
+		bot.client.CloseIdleConnections()
+	}
+	bot.clientProxy = proxy
+	bot.client = client
+	return client, nil
+}
+
 func (bot *telegramBot) notificationDestinationContext(ctx context.Context) context.Context {
 	if bot.server == nil {
 		return ctx
@@ -2415,7 +2443,30 @@ func (bot *telegramBot) notificationDestinationContext(ctx context.Context) cont
 }
 
 func (bot *telegramBot) sendText(ctx context.Context, config telegramRuntimeConfig, chatID int64, text string, replyMarkup any) error {
-	target := config.ChatID
+	method, payload := telegramTextRequest("sendMessage", config.ChatID, chatID, 0, text, replyMarkup)
+	requestContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return bot.call(requestContext, config, method, payload, nil)
+}
+
+func (bot *telegramBot) sendMenuText(ctx context.Context, config telegramRuntimeConfig, chatID int64, text string, replyMarkup any) error {
+	messageID, _ := ctx.Value(telegramMenuMessageContextKey{}).(int64)
+	if messageID == 0 {
+		return bot.sendText(ctx, config, chatID, text, replyMarkup)
+	}
+	method, payload := telegramTextRequest("editMessageText", config.ChatID, chatID, messageID, text, replyMarkup)
+	requestContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	err := bot.call(requestContext, config, method, payload, nil)
+	cancel()
+	if err == nil || strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
+		return nil
+	}
+	bot.warn("edit Telegram menu message", err)
+	return bot.sendText(ctx, config, chatID, text, replyMarkup)
+}
+
+func telegramTextRequest(method, configuredChatID string, chatID, messageID int64, text string, replyMarkup any) (string, map[string]any) {
+	target := configuredChatID
 	if chatID != 0 {
 		target = strconv.FormatInt(chatID, 10)
 	}
@@ -2423,12 +2474,13 @@ func (bot *telegramBot) sendText(ctx context.Context, config telegramRuntimeConf
 		"chat_id": target,
 		"text":    truncateTelegramText(text, 3900),
 	}
+	if method == "editMessageText" && messageID != 0 {
+		payload["message_id"] = messageID
+	}
 	if replyMarkup != nil {
 		payload["reply_markup"] = replyMarkup
 	}
-	requestContext, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	return bot.call(requestContext, config, "sendMessage", payload, nil)
+	return method, payload
 }
 
 func (bot *telegramBot) answerCallback(ctx context.Context, config telegramRuntimeConfig, callbackID, text string) error {
