@@ -16,6 +16,7 @@ import (
 	"vocat/internal/device"
 	"vocat/internal/i18n"
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 	vowifiruntime "vocat/internal/vowifi/runtime"
@@ -1924,6 +1925,11 @@ func physicalMatchesConfig(entry device.Device, config store.Device) bool {
 		// subsequent discovery returns the resolved device path. Keep checking
 		// the selected AT/QMI nodes instead of rejecting a modem whose physical
 		// path spelling changed but whose control plane is unchanged.
+	}
+	if candidate.HardwareKind == pcsc.HardwareKind && config.ControlDevice != "" && candidate.ReaderName != "" {
+		if config.ControlDevice == candidate.ReaderName {
+			return true
+		}
 	}
 	// Control and serial device nodes are allocation-order dependent. They are
 	// only legacy fallbacks when no physical USB path or readable IMEI exists.
