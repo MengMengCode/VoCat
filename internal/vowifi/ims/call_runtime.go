@@ -75,7 +75,11 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	if err != nil {
 		return vowifi.Call{}, err
 	}
-	callID := callToken + "@" + addressHost(session.conn.LocalAddr())
+	connection, _, err := session.waitForMainConnection(ctx)
+	if err != nil {
+		return vowifi.Call{}, err
+	}
+	callID := callToken + "@" + addressHost(connection.LocalAddr())
 	carrierProfile := vowifi.ResolveCarrierProfile(session.request.Identity)
 	target := callTargetURI(number, session.identity.domain, carrierProfile)
 	session.mu.Lock()
@@ -95,7 +99,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	to := "<" + target + ">"
 	lines := []string{
 		"INVITE " + target + " SIP/2.0",
-		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportUpper, session.conn.LocalAddr().String(), branch),
+		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportUpper, connection.LocalAddr().String(), branch),
 		"Max-Forwards: 70",
 	}
 	lines = append(lines, securityHeaders...)
@@ -117,10 +121,14 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 		`Accept-Contact: *;+g.3gpp.icsi-ref="`+mmtelFeatureTag+`"`,
 	)
 	lines = session.appendPAccessNetworkInfoHeader(lines)
+	// Keep the existing Replaces capability declaration for compatibility. The
+	// runtime does not currently consume an incoming Replaces header or replace
+	// an existing dialog; such an INVITE is handled as a normal INVITE.
+	supported := session.appendSupportedOptions("100rel, timer, replaces")
 	lines = append(lines,
 		"User-Agent: "+session.imsUserAgent(),
 		"Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, PRACK, UPDATE, INFO",
-		"Supported: 100rel, timer, replaces",
+		"Supported: "+supported,
 		"Session-Expires: 1800;refresher=uac",
 		"Min-SE: 90",
 		"Accept: application/sdp",
@@ -156,9 +164,10 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 		)
 	}
 	session.writeMu.Lock()
-	_, err = session.conn.Write(request)
+	_, err = connection.Write(request)
 	session.writeMu.Unlock()
 	if err != nil {
+		session.detachMainConnection(connection)
 		_ = media.Close()
 		session.transactionsMu.Lock()
 		delete(session.transactions, key)
@@ -459,9 +468,16 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 
 func (session *Session) sendACK(call *imsCall) error {
 	request := session.buildDialogRequest(call, "ACK", call.cseq)
+	connection, _, _, err := session.currentConnection()
+	if err != nil {
+		return err
+	}
 	session.writeMu.Lock()
-	_, err := session.conn.Write(request)
+	_, err = connection.Write(request)
 	session.writeMu.Unlock()
+	if err != nil {
+		session.detachMainConnection(connection)
+	}
 	return err
 }
 
@@ -473,7 +489,8 @@ func (session *Session) sendRejectedInviteACK(call *imsCall, response *sipRespon
 	if call == nil || response == nil || response.StatusCode < 300 {
 		return nil
 	}
-	if session == nil || session.conn == nil {
+	connection, _, _, err := session.currentConnection()
+	if err != nil {
 		return errors.New("ims: SIP connection unavailable for rejected INVITE ACK")
 	}
 	target := call.inviteTarget
@@ -486,7 +503,7 @@ func (session *Session) sendRejectedInviteACK(call *imsCall, response *sipRespon
 	}
 	lines := []string{
 		"ACK " + target + " SIP/2.0",
-		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(session.transport), session.conn.LocalAddr().String(), call.branch),
+		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(session.transport), connection.LocalAddr().String(), call.branch),
 		"Max-Forwards: 70",
 	}
 	session.mu.Lock()
@@ -504,12 +521,16 @@ func (session *Session) sendRejectedInviteACK(call *imsCall, response *sipRespon
 	)
 	lines = session.appendPAccessNetworkInfoHeader(lines)
 	lines = append(lines,
+		"Supported: "+session.appendSupportedOptions(""),
 		"User-Agent: "+session.imsUserAgent(),
 		"Content-Length: 0", "", "",
 	)
 	session.writeMu.Lock()
-	_, err := session.conn.Write([]byte(strings.Join(lines, "\r\n")))
+	_, err = connection.Write([]byte(strings.Join(lines, "\r\n")))
 	session.writeMu.Unlock()
+	if err != nil {
+		session.detachMainConnection(connection)
+	}
 	return err
 }
 
@@ -568,7 +589,7 @@ func (session *Session) sendPRACK(call *imsCall, response *sipResponse) {
 	branch, _ := randomHex(12)
 	lines := []string{
 		"PRACK " + target + " SIP/2.0",
-		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(session.transport), session.conn.LocalAddr().String(), branch),
+		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(session.transport), session.localSIPAddress(), branch),
 		"Max-Forwards: 70",
 	}
 	session.mu.Lock()
@@ -660,6 +681,9 @@ func (session *Session) startSessionTimer(call *imsCall, header string) {
 }
 
 func (session *Session) sendDialogRequest(ctx context.Context, call *imsCall, method string) error {
+	if _, _, err := session.waitForMainConnection(ctx); err != nil {
+		return err
+	}
 	cseq := call.cseq
 	if method == "BYE" || method == "UPDATE" {
 		session.mu.Lock()
@@ -669,9 +693,16 @@ func (session *Session) sendDialogRequest(ctx context.Context, call *imsCall, me
 	}
 	request := session.buildDialogRequest(call, method, cseq)
 	if method == "ACK" {
+		connection, _, _, err := session.currentConnection()
+		if err != nil {
+			return err
+		}
 		session.writeMu.Lock()
-		_, err := session.conn.Write(request)
+		_, err = connection.Write(request)
 		session.writeMu.Unlock()
+		if err != nil {
+			session.detachMainConnection(connection)
+		}
 		return err
 	}
 	response, err := session.exchangeRuntime(ctx, request, sipTransactionKey{callID: call.callID, cseq: cseq, method: method})
@@ -699,7 +730,7 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 	}
 	lines := []string{
 		method + " " + target + " SIP/2.0",
-		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(session.transport), session.conn.LocalAddr().String(), branch),
+		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", strings.ToUpper(session.transport), session.localSIPAddress(), branch),
 		"Max-Forwards: 70",
 	}
 	session.mu.Lock()
@@ -709,12 +740,13 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 	for _, route := range call.routes {
 		lines = append(lines, "Route: "+route)
 	}
+	supported := session.appendSupportedOptions("100rel, timer")
 	lines = append(lines,
 		"From: "+call.from,
 		"To: "+to,
 		"Call-ID: "+call.callID,
 		fmt.Sprintf("CSeq: %d %s", cseq, method),
-		"Supported: 100rel, timer",
+		"Supported: "+supported,
 		"User-Agent: "+session.imsUserAgent(),
 	)
 	if method != "CANCEL" {
@@ -731,11 +763,19 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 }
 
 func (session *Session) localMediaIP() net.IP {
-	var localAddress net.Addr
-	if session.conn != nil {
-		localAddress = session.conn.LocalAddr()
+	connection, _, _, err := session.currentConnection()
+	if err != nil {
+		return nil
 	}
-	return addressIP(localAddress)
+	return addressIP(connection.LocalAddr())
+}
+
+func (session *Session) localSIPAddress() string {
+	connection, _, _, err := session.currentConnection()
+	if err != nil {
+		return ""
+	}
+	return connection.LocalAddr().String()
 }
 
 func buildSIPResponseWithBody(request *sipRequest, status int, tag string, body []byte, extraHeaders ...string) ([]byte, error) {
@@ -764,7 +804,7 @@ func buildSIPResponseWithBody(request *sipRequest, status int, tag string, body 
 		}
 	}
 	if value := strings.TrimSpace(request.value("Session-Expires")); value != "" && status >= 200 && status < 300 && (request.Method == "INVITE" || request.Method == "UPDATE") {
-		lines = append(lines, "Supported: timer", "Session-Expires: "+value)
+		lines = append(lines, "Supported: "+appendSIPOptionTag("timer", "path"), "Session-Expires: "+value)
 	}
 	if len(body) > 0 {
 		lines = append(lines, "Content-Type: application/sdp")
@@ -774,7 +814,10 @@ func buildSIPResponseWithBody(request *sipRequest, status int, tag string, body 
 }
 
 func (session *Session) dialogContactHeader() string {
-	if session == nil || session.conn == nil || strings.TrimSpace(session.identity.user) == "" {
+	if session == nil || strings.TrimSpace(session.identity.user) == "" {
+		return ""
+	}
+	if _, _, _, err := session.currentConnection(); err != nil {
 		return ""
 	}
 	if session.imsRegisterOptions().ContactFormat == vowifi.IMSContactFormatGSMA {
@@ -862,7 +905,7 @@ func (session *Session) logCallResponse(response *sipResponse, diagnostic string
 	if session == nil || session.provider == nil || session.provider.config.Logger == nil || response == nil {
 		return
 	}
-	session.provider.config.Logger.Info("IMS call response",
+	session.provider.config.Logger.Debug("IMS call response",
 		"category", "call",
 		"device_id", session.request.DeviceID,
 		"carrier_profile", vowifi.ResolveCarrierProfile(session.request.Identity).ID,
@@ -922,8 +965,11 @@ func (session *Session) CallMedia(_ context.Context, id string) (vowifi.CallMedi
 func (session *Session) finishCall(id, state string, code int, reason string) {
 	now := time.Now().UTC()
 	var media *rtpMedia
+	var completed vowifi.Call
+	shouldLog := false
 	session.callMu.Lock()
 	if call := session.calls[id]; call != nil {
+		wasEnded := call.public.EndedAt != nil
 		media = call.media
 		call.public.State = state
 		if code != 0 {
@@ -937,10 +983,31 @@ func (session *Session) finishCall(id, state string, code int, reason string) {
 			call.sessionCancel()
 			call.sessionCancel = nil
 		}
+		if !wasEnded {
+			completed = call.public
+			shouldLog = true
+		}
 	}
 	session.callMu.Unlock()
 	if media != nil {
 		_ = media.Close()
+	}
+	if shouldLog && session.provider != nil && session.provider.config.Logger != nil {
+		attributes := []any{
+			"category", "call",
+			"device_id", session.request.DeviceID,
+			"call_id", completed.ID,
+			"direction", completed.Direction,
+			"state", completed.State,
+			"sip_status", completed.SIPCode,
+			"reason", completed.Reason,
+			"media_ready", completed.MediaReady,
+			"codec", completed.Codec,
+		}
+		if !completed.StartedAt.IsZero() {
+			attributes = append(attributes, "duration_ms", time.Since(completed.StartedAt).Milliseconds())
+		}
+		session.provider.config.Logger.Info("IMS call ended", attributes...)
 	}
 }
 

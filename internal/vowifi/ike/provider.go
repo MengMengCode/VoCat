@@ -836,7 +836,15 @@ func sendAndReceiveIKEPayloads(
 	if err != nil {
 		return ikeHeader{}, nil, err
 	}
-	return decryptAndValidateFragments(inboundPackets, header.InitiatorSPI, header.ResponderSPI, header.Exchange, header.MessageID, suite, keys)
+	return decryptAndValidateFragments(
+		inboundPackets,
+		header.InitiatorSPI,
+		header.ResponderSPI,
+		header.Exchange,
+		header.MessageID,
+		suite,
+		keys,
+	)
 }
 
 func hasNotifyType(payloads []payload, notifyType uint16) bool {
@@ -1073,6 +1081,9 @@ func (session *Session) Failures() <-chan error {
 	defer session.mu.Unlock()
 	if notifier, ok := session.child.(DataplaneFailureNotifier); ok {
 		return notifier.Failures()
+	}
+	if session.relay != nil {
+		return session.relay.Failures()
 	}
 	return nil
 }

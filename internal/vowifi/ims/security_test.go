@@ -241,14 +241,51 @@ func TestNewSecurityProposalUsesAndroidDefaultsForEveryCarrier(t *testing.T) {
 	}
 }
 
+func TestRotatedSecurityProposalChangesClientPortAndPreservesServerPort(t *testing.T) {
+	previous := securityProposal{
+		spiClient:                1001,
+		spiServer:                1002,
+		portClient:               45062,
+		portServer:               45063,
+		encryption:               "null",
+		fallbackEncryption:       "aes-cbc",
+		integrityAlgorithms:      []string{"hmac-sha-1-96"},
+		encryptionAlgorithmsList: []string{"null", "aes-cbc"},
+	}
+	rotated, err := rotatedSecurityProposal(net.ParseIP("127.0.0.1"), previous)
+	if err != nil {
+		t.Fatalf("rotatedSecurityProposal() error = %v", err)
+	}
+	if rotated.portClient == previous.portClient {
+		t.Fatalf("rotated port-c = %d, want a new port", rotated.portClient)
+	}
+	if rotated.portServer != previous.portServer {
+		t.Fatalf("rotated port-s = %d, want %d", rotated.portServer, previous.portServer)
+	}
+	if rotated.spiClient == previous.spiClient || rotated.spiServer == previous.spiServer {
+		t.Fatalf("rotated SPIs = %d/%d, want fresh SPIs", rotated.spiClient, rotated.spiServer)
+	}
+	if rotated.encryption != previous.encryption ||
+		rotated.fallbackEncryption != previous.fallbackEncryption ||
+		!reflect.DeepEqual(rotated.integrityAlgorithms, previous.integrityAlgorithms) ||
+		!reflect.DeepEqual(rotated.encryptionAlgorithmsList, previous.encryptionAlgorithmsList) {
+		t.Fatalf("rotated proposal changed negotiated preferences: %#v", rotated)
+	}
+	rotated.integrityAlgorithms[0] = "changed"
+	rotated.encryptionAlgorithmsList[0] = "changed"
+	if previous.integrityAlgorithms[0] == "changed" || previous.encryptionAlgorithmsList[0] == "changed" {
+		t.Fatal("rotated proposal aliases the previous algorithm lists")
+	}
+}
+
 func TestXFRMPlanContainsFourStatesAndProtocolSpecificPolicies(t *testing.T) {
 	config := testIPSecSAConfig()
 	install, err := buildXFRMInstallPlan(config)
 	if err != nil {
 		t.Fatalf("buildXFRMInstallPlan() error = %v", err)
 	}
-	if len(install) != 10 {
-		t.Fatalf("install operation count = %d, want 10", len(install))
+	if len(install) != 12 {
+		t.Fatalf("install operation count = %d, want 12", len(install))
 	}
 	for index, operation := range install[:4] {
 		if !containsArguments(operation.arguments, "xfrm", "state", "add") {
@@ -277,9 +314,11 @@ func TestXFRMPlanContainsFourStatesAndProtocolSpecificPolicies(t *testing.T) {
 		"tcp 40666 50600 out": false,
 		"udp 40666 50600 out": false,
 		"tcp 50600 40666 in":  false,
+		"udp 50600 40666 in":  false,
 		"tcp * 55610 in":      false,
 		"udp * 55610 in":      false,
 		"tcp 55610 50601 out": false,
+		"udp 55610 50601 out": false,
 	}
 	for _, operation := range install[4:] {
 		sourcePort := "*"
@@ -304,8 +343,8 @@ func TestXFRMPlanContainsFourStatesAndProtocolSpecificPolicies(t *testing.T) {
 	}
 
 	cleanup := buildXFRMCleanupPlan(config)
-	if len(cleanup) != 10 {
-		t.Fatalf("cleanup operation count = %d, want 10", len(cleanup))
+	if len(cleanup) != 12 {
+		t.Fatalf("cleanup operation count = %d, want 12", len(cleanup))
 	}
 	keyHex := "0x" + strings.Repeat("11", 16)
 	for _, operation := range cleanup {

@@ -108,7 +108,47 @@ func readSIPResponse(reader *bufio.Reader) (*sipResponse, error) {
 }
 
 func readSIPPacket(reader *bufio.Reader) (sipPacket, error) {
+	packet, _, err := readSIPPacketWithKeepalive(reader, nil)
+	return packet, err
+}
+
+// readSIPPacketWithKeepalive reads one SIP message from a connection-oriented
+// SIP stream. A double CRLF received between SIP messages is reported to
+// onCRLF as an inbound ping. A single CRLF is ignored: in a TCP byte stream it
+// is indistinguishable from the first half of a peer ping, so it must not be
+// used as proof that a local keepalive received a pong.
+func readSIPPacketWithKeepalive(
+	reader *bufio.Reader,
+	onCRLF func(ping bool) error,
+) (sipPacket, bool, error) {
+	blankCRLF := false
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return sipPacket{}, false, fmt.Errorf("ims: read SIP headers: %w", err)
+		}
+		if line == "\r\n" {
+			if blankCRLF {
+				if onCRLF != nil {
+					if err := onCRLF(true); err != nil {
+						return sipPacket{}, false, err
+					}
+				}
+				blankCRLF = false
+			} else {
+				blankCRLF = true
+			}
+			continue
+		}
+		blankCRLF = false
+		packet, err := readSIPPacketAfterStartLine(reader, line)
+		return packet, true, err
+	}
+}
+
+func readSIPPacketAfterStartLine(reader *bufio.Reader, startLine string) (sipPacket, error) {
 	var header bytes.Buffer
+	header.WriteString(startLine)
 	for header.Len() <= maxSIPHeaderBytes {
 		line, err := reader.ReadString('\n')
 		if err != nil {

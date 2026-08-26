@@ -55,6 +55,7 @@ type fakeEnvironment struct {
 	tunnelRequests []TunnelRequest
 	tunnelFailures chan error
 	imsFailures    chan error
+	imsStates      chan IMSRuntimeStateEvent
 }
 
 func newFakeEnvironment() *fakeEnvironment {
@@ -264,6 +265,10 @@ func (fake *fakeIMSSession) Failures() <-chan error {
 	return fake.environment.imsFailures
 }
 
+func (fake *fakeIMSSession) RuntimeStates() <-chan IMSRuntimeStateEvent {
+	return fake.environment.imsStates
+}
+
 type fakePhones struct{ environment *fakeEnvironment }
 
 func (fake fakePhones) SaveAssociatedNumber(ctx context.Context, record PhoneRecord) error {
@@ -334,6 +339,53 @@ func TestEnableKeepsIMSAndNumberWhenSMSCapabilityIsOptional(t *testing.T) {
 		environment.callCount("tunnel.close") != 0 {
 		t.Fatal("optional SMS failure tore down a valid IMS registration")
 	}
+}
+
+func TestIMSFlowRecoveryRevokesReadinessWithoutTearingDownTunnel(t *testing.T) {
+	environment := newFakeEnvironment()
+	environment.imsStates = make(chan IMSRuntimeStateEvent, 2)
+	orchestrator := newTestOrchestrator(t, environment, false)
+
+	if _, err := orchestrator.Enable(context.Background()); err != nil {
+		t.Fatalf("Enable() error = %v", err)
+	}
+	environment.imsStates <- IMSRuntimeStateEvent{
+		RegistrationState: "flow_recovering",
+		Reason:            "tcp_connection_lost",
+	}
+	waitForState(t, orchestrator, func(state State) bool {
+		return state.Phase == PhaseTunnelReady && state.TunnelReady &&
+			!state.IMSReady && !state.SMSReady && state.Active
+	})
+	if environment.callCount("tunnel.close") != 0 {
+		t.Fatal("IMS flow recovery closed the established tunnel")
+	}
+
+	environment.imsStates <- IMSRuntimeStateEvent{
+		IMSReady:          true,
+		SMSReady:          true,
+		RegistrationState: "registered",
+		Reason:            "ims_flow_recovered",
+	}
+	waitForState(t, orchestrator, func(state State) bool {
+		return state.Phase == PhaseSMSReady && state.IMSReady && state.SMSReady
+	})
+
+	if _, err := orchestrator.Disable(context.Background()); err != nil {
+		t.Fatalf("Disable() error = %v", err)
+	}
+}
+
+func waitForState(t *testing.T, orchestrator *Orchestrator, match func(State) bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if match(orchestrator.State()) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for state: %+v", orchestrator.State())
 }
 
 func TestEnableUsesEvidenceBackedOrderAndDisableRollsBackInReverse(t *testing.T) {

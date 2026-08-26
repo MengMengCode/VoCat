@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -402,6 +403,24 @@ type RuntimeFailureNotifier interface {
 	Failures() <-chan error
 }
 
+// IMSRuntimeStateEvent reports a non-terminal change in an IMS session. The
+// session may keep its tunnel alive while its SIP registration flow is being
+// recovered, so the orchestrator must not infer readiness from resource
+// presence alone.
+type IMSRuntimeStateEvent struct {
+	IMSReady          bool
+	SMSReady          bool
+	RegistrationState string
+	Reason            string
+}
+
+// IMSRuntimeStateNotifier is an optional long-lived IMS session capability.
+// It is separate from RuntimeFailureNotifier because flow recovery is not a
+// terminal session failure and must not tear down the established tunnel.
+type IMSRuntimeStateNotifier interface {
+	RuntimeStates() <-chan IMSRuntimeStateEvent
+}
+
 // IMSProvider registers IMS over an established tunnel. The Start context
 // bounds setup; a returned session remains alive until Close is called.
 type IMSProvider interface {
@@ -485,6 +504,7 @@ type Options struct {
 	AllowMissingResponderAUTH bool
 	AllowIMSWithoutSMS        bool
 	CleanupTimeout            time.Duration
+	Logger                    *slog.Logger
 }
 
 func (options Options) validate() error {

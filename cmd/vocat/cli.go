@@ -39,6 +39,9 @@ Usage:
                        --force           Reinstall even at the same version.
                      Environment:
                        VOCAT_REPO        Fallback for --repo.
+                       VOCAT_IMS_USER_AGENT
+                                         Fallback User-Agent when the carrier
+                                         profile does not define one.
                        GITHUB_TOKEN      Optional bearer token for private repos
                                          or higher rate limits.
   vocat menu         Interactive lifecycle menu (root on the host):

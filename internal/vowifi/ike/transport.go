@@ -127,7 +127,7 @@ func roundTripFragments(
 	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(deadline) {
 		deadline = callerDeadline
 	}
-	retransmit := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
+	retransmit := []time.Duration{4 * time.Second, 7200 * time.Millisecond}
 	buffer := make([]byte, 65535)
 	var lastErr error
 	for _, interval := range retransmit {

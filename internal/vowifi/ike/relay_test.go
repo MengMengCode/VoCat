@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -213,6 +214,97 @@ func TestSessionRelayDemuxesESPAndAnswersEncryptedDPD(t *testing.T) {
 	}
 }
 
+func TestSessionRelaySendsAuthenticatedDPDAndAcceptsResponse(t *testing.T) {
+	transport := newFakeSessionTransport()
+	suite := legacyTestSuite()
+	keys := ikeKeys{
+		SKai: bytes.Repeat([]byte{0x11}, 20),
+		SKar: bytes.Repeat([]byte{0x12}, 20),
+		SKei: bytes.Repeat([]byte{0x13}, 16),
+		SKer: bytes.Repeat([]byte{0x14}, 16),
+	}
+	spii := [8]byte{1}
+	spir := [8]byte{2}
+	relay := newSessionRelay(transport, suite, keys, spii, spir, 9, true, 10*time.Millisecond)
+	stopResponder := make(chan struct{})
+	defer close(stopResponder)
+	defer relay.Close()
+
+	responded := make(chan struct{}, 1)
+	go func() {
+		for {
+			var sent fakeSentPacket
+			select {
+			case <-stopResponder:
+				return
+			case sent = <-transport.sent:
+			}
+			if !sent.ike {
+				continue
+			}
+			header, payloads, err := decryptPayloads(sent.data, suite, keys.SKei, keys.SKai)
+			if err != nil || header.Exchange != exchangeInformational || len(payloads) != 0 {
+				continue
+			}
+			response, err := encryptPayloads(ikeHeader{
+				InitiatorSPI: spii,
+				ResponderSPI: spir,
+				Exchange:     exchangeInformational,
+				Flags:        flagInitiator | flagResponse,
+				MessageID:    header.MessageID,
+			}, nil, suite, keys.SKer, keys.SKar, bytes.NewReader(bytes.Repeat([]byte{0x55}, 64)))
+			if err == nil {
+				transport.incoming <- fakeSessionPacket{data: response, ike: true}
+				select {
+				case responded <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	select {
+	case <-responded:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("relay did not send an authenticated DPD probe")
+	}
+	time.Sleep(150 * time.Millisecond)
+	if err := relay.terminalErrorIfFailure(); err != nil {
+		t.Fatalf("relay failed after a valid DPD response: %v", err)
+	}
+}
+
+func TestSessionRelayFailsAfterUnansweredDPD(t *testing.T) {
+	transport := newFakeSessionTransport()
+	keys := ikeKeys{
+		SKai: bytes.Repeat([]byte{0x11}, 20),
+		SKar: bytes.Repeat([]byte{0x12}, 20),
+		SKei: bytes.Repeat([]byte{0x13}, 16),
+		SKer: bytes.Repeat([]byte{0x14}, 16),
+	}
+	relay := newSessionRelay(
+		transport,
+		legacyTestSuite(),
+		keys,
+		[8]byte{1},
+		[8]byte{2},
+		9,
+		false,
+		10*time.Millisecond,
+	)
+	defer relay.Close()
+	deadline := time.Now().Add(700 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if err := relay.terminalErrorIfFailure(); err != nil {
+			if !strings.Contains(err.Error(), "liveness check failed") {
+				t.Fatalf("relay failure = %v, want liveness failure", err)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("relay did not fail after unanswered DPD probes")
+}
+
 func TestSessionRelaySendsEncryptedIKESADelete(t *testing.T) {
 	transport := newFakeSessionTransport()
 	suite := legacyTestSuite()
@@ -259,7 +351,10 @@ func TestSessionRelaySendsNATKeepalive(t *testing.T) {
 	relay := newSessionRelay(
 		transport,
 		legacyTestSuite(),
-		ikeKeys{},
+		ikeKeys{
+			SKai: bytes.Repeat([]byte{0x11}, 20),
+			SKei: bytes.Repeat([]byte{0x12}, 16),
+		},
 		[8]byte{1},
 		[8]byte{2},
 		9,
@@ -267,13 +362,16 @@ func TestSessionRelaySendsNATKeepalive(t *testing.T) {
 		10*time.Millisecond,
 	)
 	defer relay.Close()
-	select {
-	case packet := <-transport.sent:
-		if packet.ike || !bytes.Equal(packet.data, []byte{0xff}) {
-			t.Fatalf("keepalive = ike:%v data:%x", packet.ike, packet.data)
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case packet := <-transport.sent:
+			if !packet.ike && bytes.Equal(packet.data, []byte{0xff}) {
+				return
+			}
+		case <-deadline:
+			t.Fatal("relay did not send a NAT-T keepalive")
 		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("relay did not send a NAT-T keepalive")
 	}
 }
 

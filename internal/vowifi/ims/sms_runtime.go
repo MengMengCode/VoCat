@@ -107,7 +107,11 @@ func (session *Session) startRuntimeReceivers() error {
 	if session.runtimeStarted {
 		return nil
 	}
-	if err := session.conn.SetDeadline(time.Time{}); err != nil {
+	connection, reader, _, err := session.currentConnection()
+	if err != nil {
+		return err
+	}
+	if err := connection.SetDeadline(time.Time{}); err != nil {
 		return fmt.Errorf("ims: clear SIP connection deadline: %w", err)
 	}
 	if session.protectedUDP != nil {
@@ -116,7 +120,7 @@ func (session *Session) startRuntimeReceivers() error {
 	session.runtimeStarted = true
 
 	session.receiveDone.Add(1)
-	go session.readMainConnection()
+	go session.readMainConnection(connection, reader)
 	// Vodafone UK (and others) deliver MT SMS as SIP MESSAGE to the
 	// ipsec-3gpp UE server port over UDP even when REGISTER used TCP.
 	// Always read both sockets when they were reserved.
@@ -128,34 +132,127 @@ func (session *Session) startRuntimeReceivers() error {
 		session.receiveDone.Add(1)
 		go session.readProtectedUDP()
 	}
+	session.startSIPFlowKeepalive()
 	return nil
 }
 
-func (session *Session) readMainConnection() {
+func sipReadErrorKind(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "unexpected_eof"
+	}
+	if errors.Is(err, io.EOF) {
+		return "eof"
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return "closed"
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		if networkErr.Timeout() {
+			return "timeout"
+		}
+		return "network"
+	}
+	return "protocol_or_parser"
+}
+
+func (session *Session) logSIPConnectionEnd(
+	level slog.Level,
+	message string,
+	connection net.Conn,
+	direction string,
+	err error,
+) {
+	if session == nil {
+		return
+	}
+	logger := session.imsLogger()
+	attributes := []any{
+		"category", "ims",
+		"subsystem", "sip",
+		"device_id", session.request.DeviceID,
+		"stage", "runtime_read",
+		"direction", direction,
+		"transport", session.transport,
+		"security_active", session.securityActive,
+		"runtime_started", session.runtimeStarted,
+		"error_kind", sipReadErrorKind(err),
+		"error", err,
+	}
+	if connection != nil {
+		if local := connection.LocalAddr(); local != nil {
+			attributes = append(attributes, "local", local.String())
+		}
+		if remote := connection.RemoteAddr(); remote != nil {
+			attributes = append(attributes, "remote", remote.String())
+		}
+	}
+	logger.Log(context.Background(), level, message, attributes...)
+}
+
+func (session *Session) readMainConnection(connection net.Conn, reader *bufio.Reader) {
 	defer session.receiveDone.Done()
 	for {
 		var packet sipPacket
+		var hasPacket bool
 		var err error
 		if session.transport == "tcp" {
-			packet, err = readSIPPacket(session.reader)
+			packet, hasPacket, err = readSIPPacketWithKeepalive(reader, func(ping bool) error {
+				return session.handleSIPCRLF(connection, ping)
+			})
 		} else {
 			buffer := make([]byte, 65535)
 			var count int
-			count, err = session.conn.Read(buffer)
+			count, err = connection.Read(buffer)
 			if err == nil {
 				packet, err = parseSIPPacket(buffer[:count])
+				hasPacket = err == nil
 			}
 		}
 		if err != nil {
 			if !session.isClosed() {
-				session.publishFailure(fmt.Errorf("ims: SIP receive loop: %w", err))
+				level := slog.LevelDebug
+				if kind := sipReadErrorKind(err); kind != "eof" && kind != "closed" {
+					level = slog.LevelWarn
+				}
+				session.logSIPConnectionEnd(
+					level,
+					"IMS SIP outbound connection read ended",
+					connection,
+					"outbound",
+					err,
+				)
+				if session.transport == "tcp" {
+					if session.detachMainConnection(connection) {
+						session.publishRuntimeState(vowifi.IMSRuntimeStateEvent{
+							RegistrationState: "flow_recovering",
+							Reason:            "tcp_connection_lost",
+						})
+						session.imsLogger().Info("IMS SIP flow detached; recovery started",
+							"category", "ims",
+							"subsystem", "sip",
+							"device_id", session.request.DeviceID,
+							"stage", "runtime_read",
+							"reason", "tcp_connection_lost",
+						)
+						session.startSIPFlowRecovery()
+					}
+				} else {
+					session.publishFailure(fmt.Errorf("ims: SIP receive loop: %w", err))
+				}
 			}
 			return
+		}
+		if !hasPacket {
+			continue
 		}
 		session.dispatchPacket(packet, func(response []byte) error {
 			session.writeMu.Lock()
 			defer session.writeMu.Unlock()
-			_, err := session.conn.Write(response)
+			_, err := connection.Write(response)
 			return err
 		})
 	}
@@ -168,12 +265,29 @@ func (session *Session) acceptProtectedTCP() {
 		if err != nil {
 			return
 		}
-		if !session.validProtectedTCPSource(connection.RemoteAddr()) {
-			session.logInboundSMS(slog.LevelWarn, "IMS inbound TCP rejected", nil,
-				"stage", "source_filter", "remote", connection.RemoteAddr().String())
+		reason := session.protectedTCPSourceRejectReason(connection.RemoteAddr())
+		if reason != "" {
+			level := slog.LevelDebug
+			if reason == "unexpected_pcscf_ip" {
+				level = slog.LevelWarn
+			}
+			session.logInboundSMS(level, "IMS inbound TCP rejected", nil,
+				"stage", "source_filter", "reject_reason", reason, "remote", connection.RemoteAddr().String())
 			_ = connection.Close()
 			continue
 		}
+		// A protected reverse flow is an inbound SIP transport. It is not the
+		// client-initiated registration flow, so keep it separate from the
+		// current outbound connection and dispatch requests as they arrive.
+		session.imsLogger().Debug("IMS protected reverse TCP connection accepted as inbound SIP flow",
+			"category", "ims",
+			"subsystem", "sip",
+			"device_id", session.request.DeviceID,
+			"stage", "reverse_tcp",
+			"transport", "tcp",
+			"local", connection.LocalAddr(),
+			"remote", connection.RemoteAddr(),
+		)
 		session.inboundMu.Lock()
 		session.inboundConnections[connection] = struct{}{}
 		session.inboundMu.Unlock()
@@ -192,14 +306,27 @@ func (session *Session) readInboundTCP(connection net.Conn) {
 	}()
 	reader := bufio.NewReader(connection)
 	for {
-		packet, err := readSIPPacket(reader)
+		packet, hasPacket, err := readSIPPacketWithKeepalive(reader, func(ping bool) error {
+			return session.handleSIPCRLF(connection, ping)
+		})
 		if err != nil {
-			if !session.isClosed() && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-				session.logInboundSMS(slog.LevelWarn, "IMS protected SIP packet read failed", nil,
-					"stage", "sip_parse", "transport", "tcp",
-					"remote", connection.RemoteAddr().String(), "error", err)
+			if !session.isClosed() {
+				level := slog.LevelDebug
+				if kind := sipReadErrorKind(err); kind != "eof" && kind != "closed" {
+					level = slog.LevelWarn
+				}
+				session.logSIPConnectionEnd(
+					level,
+					"IMS protected SIP inbound connection read ended",
+					connection,
+					"inbound",
+					err,
+				)
 			}
 			return
+		}
+		if !hasPacket {
+			continue
 		}
 		session.dispatchPacket(packet, func(response []byte) error {
 			_, err := connection.Write(response)
@@ -216,9 +343,14 @@ func (session *Session) readProtectedUDP() {
 		if err != nil {
 			return
 		}
-		if !session.validProtectedUDPSource(remote) {
-			session.logInboundSMS(slog.LevelWarn, "IMS inbound UDP rejected", nil,
-				"stage", "source_filter", "remote", remote.String(), "packet_bytes", count)
+		reason := session.protectedUDPSourceRejectReason(remote)
+		if reason != "" {
+			level := slog.LevelDebug
+			if reason == "unexpected_pcscf_ip" {
+				level = slog.LevelWarn
+			}
+			session.logInboundSMS(level, "IMS inbound UDP rejected", nil,
+				"stage", "source_filter", "reject_reason", reason, "remote", remote.String(), "packet_bytes", count)
 			continue
 		}
 		packet, err := parseSIPPacket(buffer[:count])
@@ -235,15 +367,35 @@ func (session *Session) readProtectedUDP() {
 	}
 }
 
-func (session *Session) validProtectedTCPSource(address net.Addr) bool {
+func (session *Session) protectedTCPSourceRejectReason(address net.Addr) string {
 	remote, ok := address.(*net.TCPAddr)
-	if !ok || !session.securityActive {
-		return false
+	if !ok {
+		return "invalid_remote_address"
 	}
-	expected := addressIP(session.conn.RemoteAddr())
+	session.mu.Lock()
+	closed := session.closed
+	securityActive := session.securityActive
+	rotationPending := session.securityRotationPending
+	session.mu.Unlock()
+	if closed {
+		return "session_closed"
+	}
+	if !securityActive {
+		return "security_inactive"
+	}
+	if rotationPending {
+		return "security_rotation_pending"
+	}
+	expected := append(net.IP(nil), session.pcscfIP...)
+	if expected == nil {
+		return "pcscf_ip_unavailable"
+	}
 	// Require P-CSCF IP. Do not require port-c (50601): some cores originate
 	// MESSAGE from an ephemeral port on the same P-CSCF.
-	return expected != nil && expected.Equal(remote.IP)
+	if !expected.Equal(remote.IP) {
+		return "unexpected_pcscf_ip"
+	}
+	return ""
 }
 
 func (session *Session) dispatchPacket(packet sipPacket, respond func([]byte) error) {
@@ -285,6 +437,17 @@ func (session *Session) exchangeRuntime(
 	request []byte,
 	key sipTransactionKey,
 ) (*sipResponse, error) {
+	if _, _, _, connectionErr := session.currentConnection(); connectionErr != nil {
+		// A runtime SIP request cannot be sent without a registered SIP flow.
+		// The reader normally starts recovery on EOF; this also covers callers
+		// that submit a request while the flow is already absent.
+		session.startSIPFlowRecovery()
+	}
+	connection, _, err := session.waitForMainConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_, _, changed, _ := session.currentConnection()
 	responses := make(chan *sipResponse, 4)
 	session.transactionsMu.Lock()
 	if _, duplicate := session.transactions[key]; duplicate {
@@ -302,7 +465,11 @@ func (session *Session) exchangeRuntime(
 	writeRequest := func() error {
 		session.writeMu.Lock()
 		defer session.writeMu.Unlock()
-		_, err := session.conn.Write(request)
+		_, err := connection.Write(request)
+		if err != nil {
+			session.detachMainConnection(connection)
+			return fmt.Errorf("%w: %v", errSIPConnectionUnavailable, err)
+		}
 		return err
 	}
 	if err := writeRequest(); err != nil {
@@ -323,6 +490,10 @@ func (session *Session) exchangeRuntime(
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		case <-changed:
+			if !session.isCurrentConnection(connection) {
+				return nil, errSIPConnectionUnavailable
+			}
 		case <-timer.C:
 			if retransmitTimer != nil {
 				return nil, fmt.Errorf(
@@ -337,9 +508,6 @@ func (session *Session) exchangeRuntime(
 				return nil, fmt.Errorf("ims: retransmit SIP %s: %w", key.method, err)
 			}
 			retransmitCount++
-			session.logOutboundSMS(slog.LevelDebug, "IMS SIP MESSAGE retransmitted",
-				"stage", "sip_retransmit", "call_id", key.callID,
-				"cseq", key.cseq, "attempt", retransmitCount)
 			retransmitInterval *= 2
 			if retransmitInterval > sipMessageRetransmitMax {
 				retransmitInterval = sipMessageRetransmitMax
@@ -365,6 +533,7 @@ func (session *Session) exchangeRuntime(
 }
 
 func (session *Session) handleSIPRequest(request *sipRequest, respond func([]byte) error) {
+	session.negotiateInboundSIPViaKeepalive(request)
 	if session.handleCallRequest(request, respond) {
 		return
 	}
@@ -1147,7 +1316,11 @@ func (session *Session) sendSIPMessageWith(
 	if err != nil {
 		return nil, err
 	}
-	callID := callToken + "@" + addressHost(session.conn.LocalAddr())
+	connection, _, err := session.waitForMainConnection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	callID := callToken + "@" + addressHost(connection.LocalAddr())
 	session.mu.Lock()
 	cseq := session.cseq
 	session.cseq++
@@ -1160,7 +1333,7 @@ func (session *Session) sendSIPMessageWith(
 	transportUpper := strings.ToUpper(session.transport)
 	lines := []string{
 		"MESSAGE " + target + " SIP/2.0",
-		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportUpper, session.conn.LocalAddr().String(), branch),
+		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportUpper, connection.LocalAddr().String(), branch),
 		"Max-Forwards: 70",
 	}
 	lines = append(lines, securityHeaders...)
@@ -1187,6 +1360,7 @@ func (session *Session) sendSIPMessageWith(
 	lines = append(lines,
 		"Request-Disposition: no-fork",
 		"Allow: MESSAGE",
+		"Supported: "+session.appendSupportedOptions(""),
 		"User-Agent: "+session.imsUserAgent(),
 	)
 	if inReplyTo != "" {
@@ -1199,9 +1373,6 @@ func (session *Session) sendSIPMessageWith(
 		"", "",
 	)
 	request := append([]byte(strings.Join(lines, "\r\n")), body...)
-	session.logOutboundSMS(slog.LevelDebug, "IMS SIP MESSAGE transaction started",
-		"stage", "sip_send", "call_id", callID, "cseq", cseq,
-		"body_bytes", len(body), "service_routes", len(serviceRoutes))
 	response, exchangeErr := session.exchangeRuntime(
 		ctx,
 		request,
@@ -1212,9 +1383,6 @@ func (session *Session) sendSIPMessageWith(
 			"stage", "sip_transaction", "call_id", callID, "cseq", cseq, "error", exchangeErr)
 		return response, exchangeErr
 	}
-	session.logOutboundSMS(slog.LevelDebug, "IMS SIP MESSAGE response received",
-		"stage", "sip_response", "call_id", callID, "cseq", cseq,
-		"sip_status", response.StatusCode)
 	return response, nil
 }
 

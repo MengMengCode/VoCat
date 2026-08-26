@@ -1,7 +1,6 @@
 package ims
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -79,6 +78,29 @@ type securityProposal struct {
 	fallbackEncryption       string
 	integrityAlgorithms      []string
 	encryptionAlgorithmsList []string
+}
+
+func rotatedSecurityProposal(localIP net.IP, previous securityProposal) (securityProposal, error) {
+	if !validProtectedPort(previous.portServer) {
+		return securityProposal{}, errors.New("ims: existing protected UE server port is unavailable")
+	}
+	for attempts := 0; attempts < 8; attempts++ {
+		proposal, err := newSecurityProposal(localIP, 0, previous.portServer)
+		if err != nil {
+			return securityProposal{}, err
+		}
+		if proposal.portClient == previous.portClient ||
+			proposal.spiClient == previous.spiClient ||
+			proposal.spiServer == previous.spiServer {
+			continue
+		}
+		proposal.encryption = previous.encryption
+		proposal.fallbackEncryption = previous.fallbackEncryption
+		proposal.integrityAlgorithms = append([]string(nil), previous.integrityAlgorithms...)
+		proposal.encryptionAlgorithmsList = append([]string(nil), previous.encryptionAlgorithmsList...)
+		return proposal, nil
+	}
+	return securityProposal{}, errors.New("ims: could not rotate protected UE client port")
 }
 
 func newSecurityProposal(localIP net.IP, configuredClientPort int, configuredServerPort int) (securityProposal, error) {
@@ -656,7 +678,7 @@ func xfrmFlows(config IPSecSAConfig) []xfrmFlow {
 			sourcePort: config.PCSCFServerPort, destinationPort: config.UEClientPort,
 			direction: "in", templateSource: config.RemoteIP, templateDestination: config.LocalIP,
 			spi: config.UEClientSPI, reqid: clientPairReqID(config),
-			protocols: []string{"tcp"},
+			protocols: []string{"tcp", "udp"},
 		},
 		{
 			description: "P-CSCF-client to UE-server", family: family,
@@ -672,7 +694,7 @@ func xfrmFlows(config IPSecSAConfig) []xfrmFlow {
 			sourcePort: config.UEServerPort, destinationPort: config.PCSCFClientPort,
 			direction: "out", templateSource: config.LocalIP, templateDestination: config.RemoteIP,
 			spi: config.PCSCFClientSPI, reqid: serverPairReqID(config),
-			protocols: []string{"tcp"},
+			protocols: []string{"tcp", "udp"},
 		},
 	}
 }
@@ -838,8 +860,12 @@ func (session *Session) activateIPSec(
 	defer zeroBytes(encryptionKey)
 	defer zeroBytes(integrityKey)
 
-	localIP := addressIP(session.conn.LocalAddr())
-	remoteIP := addressIP(session.conn.RemoteAddr())
+	connection, _, _, err := session.currentConnection()
+	if err != nil {
+		return err
+	}
+	localIP := addressIP(connection.LocalAddr())
+	remoteIP := addressIP(connection.RemoteAddr())
 	if localIP == nil || remoteIP == nil {
 		return errors.New("ims: protected SIP endpoints are unavailable")
 	}
@@ -869,7 +895,7 @@ func (session *Session) activateIPSec(
 	}
 
 	remoteAddress := net.JoinHostPort(remoteIP.String(), strconv.Itoa(selected.portServer))
-	_ = session.conn.Close()
+	_ = connection.Close()
 	connection, dialErr := dialSIP(
 		ctx,
 		session.transport,
@@ -888,25 +914,29 @@ func (session *Session) activateIPSec(
 		return fmt.Errorf("ims: connect protected P-CSCF: %w", dialErr)
 	}
 
-	session.conn = connection
-	if session.transport == "tcp" {
-		session.reader = bufio.NewReader(connection)
-	} else {
-		session.reader = nil
+	if err := session.installMainConnection(connection); err != nil {
+		_ = connection.Close()
+		_ = handle.Close(context.Background())
+		return err
 	}
 	session.endpoint.port = selected.portServer
 	session.securityAgreement = agreement
 	session.securityActive = true
+	session.securityBootstrap = false
 	session.ipsecHandle = handle
 	return nil
 }
 
 func (session *Session) contactAddress() string {
+	connection, _, _, err := session.currentConnection()
+	if err != nil {
+		return ""
+	}
 	if session.securityOffered() {
-		host := addressHost(session.conn.LocalAddr())
+		host := addressHost(connection.LocalAddr())
 		return net.JoinHostPort(host, strconv.Itoa(session.securityProposal.portServer))
 	}
-	return session.conn.LocalAddr().String()
+	return connection.LocalAddr().String()
 }
 
 func (session *Session) emptyDigestAuthorization() string {
@@ -923,11 +953,24 @@ func (session *Session) emptyDigestAuthorization() string {
 }
 
 func (session *Session) validProtectedUDPSource(remote *net.UDPAddr) bool {
-	if remote == nil || !session.securityActive {
-		return false
+	return session.protectedUDPSourceRejectReason(remote) == ""
+}
+
+func (session *Session) protectedUDPSourceRejectReason(remote *net.UDPAddr) string {
+	if remote == nil {
+		return "invalid_remote_address"
 	}
-	expectedIP := addressIP(session.conn.RemoteAddr())
-	return expectedIP != nil && expectedIP.Equal(remote.IP)
+	if !session.securityActive {
+		return "security_inactive"
+	}
+	expectedIP := append(net.IP(nil), session.pcscfIP...)
+	if expectedIP == nil {
+		return "pcscf_ip_unavailable"
+	}
+	if !expectedIP.Equal(remote.IP) {
+		return "unexpected_pcscf_ip"
+	}
+	return ""
 }
 
 func (session *Session) effectiveSecurityMode() string {

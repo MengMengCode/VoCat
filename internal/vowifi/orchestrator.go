@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ type runtimeResources struct {
 type Orchestrator struct {
 	deps    Dependencies
 	options Options
+	logger  *slog.Logger
 
 	operation chan struct{}
 
@@ -52,6 +54,7 @@ func New(deps Dependencies, options Options) (*Orchestrator, error) {
 	orchestrator := &Orchestrator{
 		deps:      deps,
 		options:   options,
+		logger:    options.Logger,
 		operation: make(chan struct{}, 1),
 		state: State{
 			DeviceID:  strings.TrimSpace(options.DeviceID),
@@ -63,6 +66,9 @@ func New(deps Dependencies, options Options) (*Orchestrator, error) {
 			},
 		},
 		subscribers: make(map[uint64]chan State),
+	}
+	if orchestrator.logger == nil {
+		orchestrator.logger = slog.Default()
 	}
 	orchestrator.operation <- struct{}{}
 	return orchestrator, nil
@@ -821,6 +827,7 @@ func (orchestrator *Orchestrator) watchRuntimeTunnel(
 		runtimeContext,
 		resources,
 		notifier,
+		"tunnel",
 		"tunnel_runtime",
 		"runtime_tunnel_failed",
 	)
@@ -831,6 +838,9 @@ func (orchestrator *Orchestrator) watchRuntimeIMS(
 	resources *runtimeResources,
 	ims IMSSession,
 ) {
+	if notifier, ok := ims.(IMSRuntimeStateNotifier); ok {
+		orchestrator.watchRuntimeIMSState(runtimeContext, resources, notifier)
+	}
 	notifier, ok := ims.(RuntimeFailureNotifier)
 	if !ok {
 		return
@@ -839,15 +849,64 @@ func (orchestrator *Orchestrator) watchRuntimeIMS(
 		runtimeContext,
 		resources,
 		notifier,
+		"ims",
 		"ims_runtime",
 		"runtime_ims_failed",
 	)
+}
+
+func (orchestrator *Orchestrator) watchRuntimeIMSState(
+	runtimeContext context.Context,
+	resources *runtimeResources,
+	notifier IMSRuntimeStateNotifier,
+) {
+	states := notifier.RuntimeStates()
+	if states == nil {
+		return
+	}
+	go func() {
+		for {
+			select {
+			case <-runtimeContext.Done():
+				return
+			case event, ok := <-states:
+				if !ok {
+					return
+				}
+				orchestrator.mutate(func(state *State) {
+					if orchestrator.resources != resources || !state.Enabled {
+						return
+					}
+					state.IMSReady = event.IMSReady
+					state.SMSReady = event.IMSReady && event.SMSReady
+					state.IMSRegistration = strings.TrimSpace(event.RegistrationState)
+					state.LastReason = strings.TrimSpace(event.Reason)
+					state.LastError = ""
+					state.LastErrorClass = ""
+					if state.IMSReady {
+						if state.SMSReady {
+							state.Phase = PhaseSMSReady
+						} else {
+							state.Phase = PhaseIMSReady
+						}
+						return
+					}
+					if state.TunnelReady {
+						state.Phase = PhaseTunnelReady
+					} else if state.AccessReady {
+						state.Phase = PhaseAccessReady
+					}
+				})
+			}
+		}
+	}()
 }
 
 func (orchestrator *Orchestrator) watchRuntimeFailure(
 	runtimeContext context.Context,
 	resources *runtimeResources,
 	notifier RuntimeFailureNotifier,
+	source string,
 	errorClass string,
 	reason string,
 ) {
@@ -863,6 +922,21 @@ func (orchestrator *Orchestrator) watchRuntimeFailure(
 			if cause == nil {
 				cause = errors.New("VoWiFi runtime session stopped")
 			}
+			beforeCleanup := orchestrator.State()
+			orchestrator.logger.Warn(
+				"VoWiFi runtime failure received",
+				"source", source,
+				"error_class", errorClass,
+				"reason", reason,
+				"phase", beforeCleanup.Phase,
+				"active", beforeCleanup.Active,
+				"tunnel_ready", beforeCleanup.TunnelReady,
+				"ims_ready", beforeCleanup.IMSReady,
+				"sms_ready", beforeCleanup.SMSReady,
+				"tunnel_present", resources.tunnel != nil,
+				"ims_present", resources.ims != nil,
+				"error", cause,
+			)
 			// Interrupt any still-running IMS setup before waiting for the
 			// serialized lifecycle lock.
 			if resources.cancel != nil {

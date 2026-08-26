@@ -1,11 +1,13 @@
 package ims
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime/multipart"
 	"net"
@@ -21,6 +23,75 @@ type smsTestAKA struct{ *recordingAKA }
 
 func (smsTestAKA) ReadSMSCenter(context.Context, string) (string, error) {
 	return "+447785016005", nil
+}
+
+func TestMainSIPTCPEOFKeepsIPSecSessionAndHandlesReverseAsInbound(t *testing.T) {
+	mainConnection, mainPeer := net.Pipe()
+	defer mainPeer.Close()
+	ready := make(chan struct{})
+	close(ready)
+	session := &Session{
+		provider:           &Provider{config: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}},
+		transport:          "tcp",
+		conn:               mainConnection,
+		reader:             bufio.NewReader(mainConnection),
+		mainConnReady:      ready,
+		mainConnChanged:    make(chan struct{}),
+		failures:           make(chan error, 1),
+		securityActive:     true,
+		fromTag:            "reverse-flow-test",
+		inboundConnections: make(map[net.Conn]struct{}),
+	}
+	session.receiveDone.Add(1)
+	go session.readMainConnection(mainConnection, session.reader)
+	_ = mainPeer.Close()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, _, _, err := session.currentConnection(); errors.Is(err, errSIPConnectionUnavailable) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, _, _, err := session.currentConnection(); !errors.Is(err, errSIPConnectionUnavailable) {
+		t.Fatal("main SIP TCP connection was not detached after EOF")
+	}
+	select {
+	case err := <-session.failures:
+		t.Fatalf("SIP TCP EOF was reported as an IMS failure: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	reverseConnection, reversePeer := net.Pipe()
+	defer reversePeer.Close()
+	session.inboundMu.Lock()
+	session.inboundConnections[reverseConnection] = struct{}{}
+	session.inboundMu.Unlock()
+	session.receiveDone.Add(1)
+	go session.readInboundTCP(reverseConnection)
+
+	request := []byte("OPTIONS sip:ims.example.test SIP/2.0\r\n" +
+		"Via: SIP/2.0/TCP reverse.example.test:5064;branch=z9hG4bKreverse\r\n" +
+		"From: <sip:caller@example.test>;tag=caller\r\n" +
+		"To: <sip:user@example.test>\r\n" +
+		"Call-ID: reverse-flow-test\r\n" +
+		"CSeq: 1 OPTIONS\r\n" +
+		"Content-Length: 0\r\n\r\n")
+	if _, err := reversePeer.Write(request); err != nil {
+		t.Fatal("write reverse SIP request:", err)
+	}
+	response, err := readSIPPacket(bufio.NewReader(reversePeer))
+	if err != nil {
+		t.Fatal("read reverse SIP response:", err)
+	}
+	if response.Response == nil || response.Response.StatusCode != 200 {
+		t.Fatalf("reverse SIP response = %#v, want 200 response", response)
+	}
+	if _, _, _, err := session.currentConnection(); !errors.Is(err, errSIPConnectionUnavailable) {
+		t.Fatalf("reverse connection became main SIP flow: %v", err)
+	}
+	_ = reversePeer.Close()
+	session.receiveDone.Wait()
 }
 
 func TestSessionReceivesAndAcknowledgesSMSOverIMS(t *testing.T) {

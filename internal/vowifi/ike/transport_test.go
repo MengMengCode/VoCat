@@ -15,17 +15,17 @@ func (deadlineError) Error() string   { return "deadline" }
 func (deadlineError) Timeout() bool   { return true }
 func (deadlineError) Temporary() bool { return true }
 
-func TestRoundTripDatagramWaitsBeyondFirst500Milliseconds(t *testing.T) {
+func TestRoundTripDatagramWaitsBeyondFirstRetransmitWindow(t *testing.T) {
 	available := make(chan struct{})
 	go func() {
-		time.Sleep(700 * time.Millisecond)
+		time.Sleep(4200 * time.Millisecond)
 		close(available)
 	}()
 	writes := 0
 	started := time.Now()
 	response, err := roundTripDatagram(
 		context.Background(),
-		2*time.Second,
+		6*time.Second,
 		func([]byte) error {
 			writes++
 			return nil
@@ -47,7 +47,7 @@ func TestRoundTripDatagramWaitsBeyondFirst500Milliseconds(t *testing.T) {
 	if string(response) != "response" || writes < 2 {
 		t.Fatalf("response=%q writes=%d", response, writes)
 	}
-	if elapsed := time.Since(started); elapsed < 650*time.Millisecond {
+	if elapsed := time.Since(started); elapsed < 4150*time.Millisecond {
 		t.Fatalf("round trip returned too early after %v", elapsed)
 	}
 }

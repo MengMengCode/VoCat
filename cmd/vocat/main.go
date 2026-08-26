@@ -987,6 +987,7 @@ func newVoWiFiOrchestrator(
 	}, vowifi.Options{
 		DeviceID:           deviceConfig.ID,
 		AllowIMSWithoutSMS: true,
+		Logger:             vowifiLogger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("device %q VoWiFi orchestrator: %w", deviceConfig.ID, err)

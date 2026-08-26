@@ -57,9 +57,6 @@ func TestResolveCarrierProfileGiffgaffIMSHeaders(t *testing.T) {
 	if profile.IMSUserAgent != "iOS/18.6.2 iPhone" {
 		t.Fatalf("giffgaff User-Agent = %q", profile.IMSUserAgent)
 	}
-	if options.SupportedHeader != nil || options.AllowHeader != nil {
-		t.Fatalf("giffgaff REGISTER header overrides = supported=%v allow=%v", options.SupportedHeader, options.AllowHeader)
-	}
 	if options.PAccessNetworkInfo != nil {
 		t.Fatalf("giffgaff unexpectedly defines a carrier PANI override = %v", *options.PAccessNetworkInfo)
 	}
@@ -100,9 +97,6 @@ func TestResolveCarrierProfileStandardHasNoRegisterOverrides(t *testing.T) {
 	}
 	if profile.IMSRegisterOptions.ContactFormat != "" {
 		t.Fatalf("standard contact format = %q", profile.IMSRegisterOptions.ContactFormat)
-	}
-	if profile.IMSRegisterOptions.SupportedHeader != nil {
-		t.Fatalf("standard supported header = %v", *profile.IMSRegisterOptions.SupportedHeader)
 	}
 	if profile.PANIEnabled != nil || profile.PANICountry != "" {
 		t.Fatalf("standard PANI behavior = enabled=%v country=%q", profile.PANIEnabled, profile.PANICountry)

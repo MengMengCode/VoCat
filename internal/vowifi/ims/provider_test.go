@@ -300,7 +300,7 @@ func TestProviderRegisterAKAParseEvidenceAndClose(t *testing.T) {
 	}
 }
 
-func TestRefreshFailureRevokesRegistrationEvidence(t *testing.T) {
+func TestRefreshTemporary503PreservesRegistrationEvidence(t *testing.T) {
 	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
 		t.Fatalf("ListenUDP() error = %v", err)
@@ -312,7 +312,7 @@ func TestRefreshFailureRevokesRegistrationEvidence(t *testing.T) {
 	nonce := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- serveRefreshFailure(listener, nonce)
+		serverDone <- serveRefreshFailure(listener, nonce, 503)
 	}()
 
 	provider, err := NewProvider(
@@ -342,15 +342,22 @@ func TestRefreshFailureRevokesRegistrationEvidence(t *testing.T) {
 		t.Fatalf("Provider.Start() error = %v", err)
 	}
 	concrete := session.(*Session)
-	if err := concrete.refreshOnce(context.Background()); err == nil {
+	err = concrete.refreshOnce(context.Background())
+	if err == nil {
 		t.Fatal("refreshOnce() error = nil, want SIP rejection")
 	}
-	evidence := session.Evidence()
-	if evidence.Registered || evidence.RegistrationState != "refresh_failed" {
-		t.Fatalf("evidence after failed refresh = %#v", evidence)
+	if status, ok := registrationRejectionStatus(err); !ok || status != 503 {
+		t.Fatalf("registrationRejectionStatus() = (%d, %t), want (503, true)", status, ok)
 	}
-	if sms, err := session.EnableSMS(context.Background()); sms.Ready || !errors.Is(err, vowifi.ErrIMSNotRegistered) {
-		t.Fatalf("EnableSMS() = (%#v, %v), want IMS not registered", sms, err)
+	if retryAfter, ok := registrationRetryAfter(err); ok || retryAfter != 0 {
+		t.Fatalf("registrationRetryAfter() = (%s, %t), want (0s, false)", retryAfter, ok)
+	}
+	evidence := session.Evidence()
+	if !evidence.Registered || evidence.RegistrationState != "refresh_retrying" {
+		t.Fatalf("evidence after temporary refresh rejection = %#v", evidence)
+	}
+	if delay := registrationRefreshRetryDelay(err, 0); delay != defaultRegistrationRetry {
+		t.Fatalf("registrationRefreshRetryDelay() = %s, want %s", delay, defaultRegistrationRetry)
 	}
 	if err := session.Close(context.Background()); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -581,16 +588,13 @@ func TestAppendPaniCountryModes(t *testing.T) {
 }
 
 func TestIMSProfileUserAgentUsesUnifiedHeaderValue(t *testing.T) {
+	t.Setenv(imsUserAgentOverrideEnv, "")
 	giffgaff := &Session{request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
 		IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10", GID1: "508FFFFF",
 	}}}
 	if got := giffgaff.imsUserAgent(); got != "iOS/18.6.2 iPhone" {
 		t.Fatalf("giffgaff IMS User-Agent = %q", got)
 	}
-	if options := giffgaff.imsRegisterOptions(); options.AllowHeader != nil || options.SupportedHeader != nil {
-		t.Fatalf("giffgaff REGISTER capability overrides leaked from business headers: %#v", options)
-	}
-
 	standard := &Session{request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
 		IMSI: "999010000000001", HomeMCC: "999", HomeMNC: "01",
 	}}}
@@ -599,9 +603,61 @@ func TestIMSProfileUserAgentUsesUnifiedHeaderValue(t *testing.T) {
 	}
 }
 
+func TestIMSUserAgentEnvironmentOverridesOnlyDefaultFallback(t *testing.T) {
+	t.Setenv(imsUserAgentOverrideEnv, "configured-default-agent")
+	standard := &Session{request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
+		HomeMCC: "999", HomeMNC: "01",
+	}}}
+	if got := standard.imsUserAgent(); got != "configured-default-agent" {
+		t.Fatalf("environment IMS User-Agent fallback = %q", got)
+	}
+
+	giffgaff := &Session{request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
+		IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10", GID1: "508FFFFF",
+	}}}
+	if got := giffgaff.imsUserAgent(); got != "iOS/18.6.2 iPhone" {
+		t.Fatalf("profile IMS User-Agent with environment fallback = %q", got)
+	}
+}
+
+func TestBuildRegisterUsesImplementationCapabilityHeaders(t *testing.T) {
+	session := &Session{
+		provider: &Provider{config: Config{UserAgent: "test-agent"}},
+		request:  vowifi.IMSRequest{Identity: vowifi.SIMIdentity{HomeMCC: "999", HomeMNC: "01"}},
+		identity: identitySet{
+			public: "sip:001010123456789@ims.example",
+			user:   "001010123456789",
+			domain: "ims.example",
+		},
+		transport:         "tcp",
+		conn:              &registerRetransmitConn{},
+		callID:            "capability-test",
+		fromTag:           "capability-tag",
+		instanceID:        "urn:uuid:capability-test",
+		outboundRequested: true,
+	}
+
+	request, err := session.buildRegister(1, 3600, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(request)
+	if !strings.Contains(text, "Via: SIP/2.0/TCP ") ||
+		!strings.Contains(text, ";rport;keep\r\n") {
+		t.Fatalf("REGISTER Via keep negotiation = %q", text)
+	}
+	if !strings.Contains(text, "Supported: path, outbound\r\n") || strings.Contains(text, "gruu") {
+		t.Fatalf("REGISTER capability header = %q", text)
+	}
+	if !strings.Contains(text, "Allow: REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, PRACK, UPDATE\r\n") ||
+		strings.Contains(text, "SUBSCRIBE") || strings.Contains(text, "NOTIFY") {
+		t.Fatalf("REGISTER Allow header = %q", text)
+	}
+}
+
 func TestSipInstanceIDUsesGSMAFormWhenIMEIIsAvailable(t *testing.T) {
 	identity := vowifi.SIMIdentity{IMEI: "353024112557010"}
-	if got := sipInstanceID(identity, "00000000-0000-4000-8000-000000000001"); got != "urn:gsma:imei:353024112557010-0" {
+	if got := sipInstanceID(identity, "00000000-0000-4000-8000-000000000001"); got != "urn:gsma:imei:35302411-255701-0" {
 		t.Fatalf("sipInstanceID() = %q", got)
 	}
 	if got := sipInstanceID(vowifi.SIMIdentity{IMEI: "not-an-imei"}, "00000000-0000-4000-8000-000000000001"); got != "urn:uuid:00000000-0000-4000-8000-000000000001" {
@@ -613,13 +669,13 @@ func TestGSMAContactFormatUsesAddressAndDeviceInstance(t *testing.T) {
 	session := &Session{
 		identity:   identitySet{user: "234105776448519"},
 		transport:  "tcp",
-		instanceID: "urn:gsma:imei:353024112557010-0",
+		instanceID: "urn:gsma:imei:35302411-255701-0",
 	}
 	got := session.buildContact("[2001:db8::1]:49686", vowifi.IMSRegisterOptions{
 		ContactFormat:    vowifi.IMSContactFormatGSMA,
 		ContactExtraTags: []string{"+g.3gpp.mid-call", "+g.3gpp.smsip"},
 	})
-	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:353024112557010-0>"`
+	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:35302411-255701-0>"`
 	if got != want {
 		t.Fatalf("GSMA Contact = %q, want %q", got, want)
 	}
@@ -665,9 +721,9 @@ func validateTestPANI(value string) error {
 	return nil
 }
 
-func serveRefreshFailure(listener *net.UDPConn, nonce string) error {
+func serveRefreshFailure(listener *net.UDPConn, nonce string, rejectionStatus int) error {
 	var callID string
-	for step := 0; step < 3; step++ {
+	for step := 0; step < 4; step++ {
 		packet := make([]byte, 65535)
 		count, remote, err := listener.ReadFromUDP(packet)
 		if err != nil {
@@ -720,8 +776,27 @@ func serveRefreshFailure(listener *net.UDPConn, nonce string) error {
 		if headers["authorization"] != "" {
 			return errors.New("refresh reused the one-time AKAv1 RES")
 		}
+		if step == 2 {
+			reason := "Service Unavailable"
+			if rejectionStatus != 503 {
+				reason = "Forbidden"
+			}
+			if _, err := listener.WriteToUDP(
+				testResponse(rejectionStatus, reason, callID, headers["cseq"], nil),
+				remote,
+			); err != nil {
+				return err
+			}
+			if rejectionStatus != 503 {
+				return nil
+			}
+			continue
+		}
+		if headers["expires"] != "0" {
+			return fmt.Errorf("deregister Expires = %q, want 0", headers["expires"])
+		}
 		if _, err := listener.WriteToUDP(
-			testResponse(503, "Service Unavailable", callID, headers["cseq"], nil),
+			testResponse(200, "OK", callID, headers["cseq"], nil),
 			remote,
 		); err != nil {
 			return err
@@ -791,6 +866,9 @@ func TestRegistrationRejectionErrorIncludesSafeDiagnostics(t *testing.T) {
 	}, "authenticated")
 	if !errors.Is(err, ErrRegistrationRejected) {
 		t.Fatalf("error does not wrap ErrRegistrationRejected: %v", err)
+	}
+	if status, ok := registrationRejectionStatus(err); !ok || status != 403 {
+		t.Fatalf("registrationRejectionStatus() = (%d, %t), want (403, true)", status, ok)
 	}
 	message := err.Error()
 	for _, expected := range []string{

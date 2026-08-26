@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,10 +21,17 @@ import (
 
 const (
 	defaultSIPPort              = 5060
+	defaultSIPUserAgent         = "vocat/1"
+	imsUserAgentOverrideEnv     = "VOCAT_IMS_USER_AGENT"
 	defaultRegistrationExpiry   = 3600 * time.Second
 	defaultTransactionTimeout   = 12 * time.Second
+	defaultRegistrationRetry    = 60 * time.Second
+	maxRegistrationRetry        = 5 * time.Minute
+	registrationSafetyMargin    = 5 * time.Second
 	maxAuthenticationChallenges = 3
 	defaultPANIWLANNode         = "ffffffffffff"
+	sipFlowRecoveryBase         = 30 * time.Second
+	sipFlowRecoveryMax          = 30 * time.Minute
 )
 
 var (
@@ -31,6 +39,7 @@ var (
 	ErrSessionClosed             = errors.New("ims: session is closed")
 	ErrRegistrationExpired       = errors.New("ims: registration has expired")
 	ErrSMSCapabilityNotConfirmed = errors.New("ims: registrar did not confirm the +g.3gpp.smsip contact")
+	errSIPConnectionUnavailable  = errors.New("ims: SIP connection is unavailable")
 )
 
 // Config defines only deployment-specific SIP details. If PCSCF or
@@ -170,7 +179,7 @@ func normalizeConfig(config Config) (Config, error) {
 	}
 	config.SMSCenterByPLMN = smsCenterByPLMN
 	if strings.TrimSpace(config.UserAgent) == "" {
-		config.UserAgent = "vocat/1"
+		config.UserAgent = defaultSIPUserAgent
 	}
 	if config.SecurityMode == "" {
 		config.SecurityMode = SecurityRequired
@@ -390,6 +399,37 @@ type identitySet struct {
 	user    string
 }
 
+type registrationRejectedError struct {
+	statusCode    int
+	message       string
+	retryAfter    time.Duration
+	hasRetryAfter bool
+}
+
+func (err *registrationRejectedError) Error() string {
+	return err.message
+}
+
+func (err *registrationRejectedError) Unwrap() error {
+	return ErrRegistrationRejected
+}
+
+func registrationRejectionStatus(err error) (int, bool) {
+	var rejected *registrationRejectedError
+	if !errors.As(err, &rejected) {
+		return 0, false
+	}
+	return rejected.statusCode, true
+}
+
+func registrationRetryAfter(err error) (time.Duration, bool) {
+	var rejected *registrationRejectedError
+	if !errors.As(err, &rejected) || !rejected.hasRetryAfter {
+		return 0, false
+	}
+	return rejected.retryAfter, true
+}
+
 func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, error) {
 	imsi := strings.TrimSpace(identity.IMSI)
 	if !digitsBetween(imsi, 5, 16) {
@@ -587,46 +627,479 @@ type Session struct {
 	identity         identitySet
 	endpoint         pcscfEndpoint
 	transport        string
+	connMu           sync.RWMutex
 	conn             net.Conn
 	reader           *bufio.Reader
+	sipLocalIP       net.IP
+	pcscfIP          net.IP
+	mainConnReady    chan struct{}
+	mainConnChanged  chan struct{}
 	initialEndpoint  pcscfEndpoint
 	securityDeclined bool
 
-	callID             string
-	fromTag            string
-	instanceID         string
-	pani               string
-	paniResolved       bool
-	cseq               uint32
-	auth               *authenticationState
-	securityProposal   securityProposal
-	securityAgreement  securityAgreement
-	securityActive     bool
-	ipsecHandle        IPSecSAHandle
-	protectedTCP       *net.TCPListener
-	protectedUDP       *net.UDPConn
-	failures           chan error
-	failureOnce        sync.Once
-	writeMu            sync.Mutex
-	transactionsMu     sync.Mutex
-	transactions       map[sipTransactionKey]chan *sipResponse
-	runtimeStarted     bool
-	receiveDone        sync.WaitGroup
-	inboundMu          sync.Mutex
-	inboundConnections map[net.Conn]struct{}
-	smsMu              sync.Mutex
-	nextRPReference    byte
-	callMu             sync.Mutex
-	calls              map[string]*imsCall
+	callID                  string
+	fromTag                 string
+	instanceID              string
+	outboundRequested       bool
+	pani                    string
+	paniResolved            bool
+	cseq                    uint32
+	auth                    *authenticationState
+	securityProposal        securityProposal
+	securityAgreement       securityAgreement
+	securityActive          bool // current IPsec-3gpp context, independent of main SIP flow
+	securityBootstrap       bool // next REGISTER must start a fresh security negotiation
+	securityRotationPending bool // reject old reverse flows while replacing the SA set
+	ipsecHandle             IPSecSAHandle
+	protectedTCP            *net.TCPListener
+	protectedUDP            *net.UDPConn
+	failures                chan error
+	failureOnce             sync.Once
+	registrationMu          sync.Mutex
+	flowMu                  sync.Mutex
+	recoveryMu              sync.Mutex
+	recoveryRunning         bool
+	keepaliveMu             sync.Mutex
+	keepaliveNegotiated     bool
+	keepaliveInterval       time.Duration
+	keepaliveRunning        bool
+	writeMu                 sync.Mutex
+	transactionsMu          sync.Mutex
+	transactions            map[sipTransactionKey]chan *sipResponse
+	runtimeStarted          bool
+	receiveDone             sync.WaitGroup
+	inboundMu               sync.Mutex
+	inboundConnections      map[net.Conn]struct{}
+	smsMu                   sync.Mutex
+	nextRPReference         byte
+	callMu                  sync.Mutex
+	calls                   map[string]*imsCall
 
 	mu                  sync.Mutex
 	closed              bool
 	evidence            vowifi.IMSEvidence
 	smsContactConfirmed bool
+	smsFallbackLogged   bool
 	expiresAt           time.Time
 	refreshContext      context.Context
 	refreshCancel       context.CancelFunc
 	refreshDone         chan struct{}
+	runtimeStates       chan vowifi.IMSRuntimeStateEvent
+}
+
+func (session *Session) currentConnection() (net.Conn, *bufio.Reader, <-chan struct{}, error) {
+	if session == nil {
+		return nil, nil, nil, errSIPConnectionUnavailable
+	}
+	session.connMu.RLock()
+	connection, reader, changed := session.conn, session.reader, session.mainConnChanged
+	session.connMu.RUnlock()
+	if connection == nil {
+		return nil, nil, changed, errSIPConnectionUnavailable
+	}
+	return connection, reader, changed, nil
+}
+
+func (session *Session) isCurrentConnection(connection net.Conn) bool {
+	if session == nil || connection == nil {
+		return false
+	}
+	session.connMu.RLock()
+	defer session.connMu.RUnlock()
+	return session.conn == connection
+}
+
+func (session *Session) waitForMainConnection(ctx context.Context) (net.Conn, *bufio.Reader, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		connection, reader, changed, err := session.currentConnection()
+		if err == nil {
+			return connection, reader, nil
+		}
+		session.connMu.RLock()
+		ready := session.mainConnReady
+		session.connMu.RUnlock()
+		if ready == nil {
+			ready = make(chan struct{})
+		}
+		var sessionDone <-chan struct{}
+		if session.refreshContext != nil {
+			sessionDone = session.refreshContext.Done()
+		}
+		select {
+		case <-ready:
+		case <-changed:
+		case <-sessionDone:
+			return nil, nil, ErrSessionClosed
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+func (session *Session) installMainConnection(connection net.Conn) error {
+	if connection == nil {
+		return errSIPConnectionUnavailable
+	}
+	var reader *bufio.Reader
+	if session.transport == "tcp" {
+		reader = bufio.NewReader(connection)
+	}
+	ready := make(chan struct{})
+	close(ready)
+	session.connMu.Lock()
+	old := session.conn
+	previousReady := session.mainConnReady
+	previousChanged := session.mainConnChanged
+	session.conn = connection
+	session.reader = reader
+	session.mainConnReady = ready
+	session.mainConnChanged = make(chan struct{})
+	if previousReady != nil {
+		select {
+		case <-previousReady:
+		default:
+			close(previousReady)
+		}
+	}
+	if previousChanged != nil {
+		close(previousChanged)
+	}
+	session.connMu.Unlock()
+	if old != nil && old != connection {
+		_ = old.Close()
+	}
+	return nil
+}
+
+// installMainConnectionIfEmpty installs a newly dialled SIP flow only when
+// another main flow has not won the race. The losing connection is left to
+// the caller to close.
+func (session *Session) installMainConnectionIfEmpty(connection net.Conn) (*bufio.Reader, bool) {
+	if connection == nil || session.isClosed() {
+		return nil, false
+	}
+	return session.installMainConnectionIfEmptyLocked(connection)
+}
+
+// installMainConnectionIfEmptyLocked is used by the recovery transaction
+// while session.mu is already held. The caller has already checked closed.
+func (session *Session) installMainConnectionIfEmptyLocked(connection net.Conn) (*bufio.Reader, bool) {
+	if connection == nil {
+		return nil, false
+	}
+	var reader *bufio.Reader
+	if session.transport == "tcp" {
+		reader = bufio.NewReader(connection)
+	}
+	session.connMu.Lock()
+	if session.conn != nil {
+		session.connMu.Unlock()
+		return nil, false
+	}
+	ready := session.mainConnReady
+	if ready == nil {
+		ready = make(chan struct{})
+		session.mainConnReady = ready
+	}
+	select {
+	case <-ready:
+	default:
+		close(ready)
+	}
+	changed := session.mainConnChanged
+	session.conn = connection
+	session.reader = reader
+	session.mainConnChanged = make(chan struct{})
+	if changed != nil {
+		close(changed)
+	}
+	session.connMu.Unlock()
+	return reader, true
+}
+
+func (session *Session) detachMainConnection(connection net.Conn) bool {
+	if session == nil || connection == nil {
+		return false
+	}
+	session.connMu.Lock()
+	if session.conn != connection {
+		session.connMu.Unlock()
+		return false
+	}
+	changed := session.mainConnChanged
+	session.conn = nil
+	session.reader = nil
+	session.mainConnReady = make(chan struct{})
+	session.mainConnChanged = make(chan struct{})
+	if changed != nil {
+		close(changed)
+	}
+	session.connMu.Unlock()
+	_ = connection.Close()
+	return true
+}
+
+func (session *Session) startSIPFlowRecovery() {
+	if session == nil || session.transport != "tcp" || session.provider == nil ||
+		len(session.sipLocalIP) == 0 || session.endpoint.host == "" {
+		return
+	}
+	session.recoveryMu.Lock()
+	if session.recoveryRunning {
+		session.recoveryMu.Unlock()
+		return
+	}
+	session.recoveryRunning = true
+	session.recoveryMu.Unlock()
+	go session.recoverSIPFlow()
+}
+
+func (session *Session) recoverSIPFlow() {
+	defer func() {
+		session.recoveryMu.Lock()
+		session.recoveryRunning = false
+		session.recoveryMu.Unlock()
+	}()
+
+	ctx := session.refreshContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	consecutiveFailures := 0
+	for {
+		if ctx.Err() != nil || session.isClosed() {
+			return
+		}
+
+		_, _, _, connectionErr := session.currentConnection()
+		requireNewFlow := connectionErr != nil
+		forceNewSecurity := requireNewFlow && session.securityOffered()
+		if forceNewSecurity {
+			// Prevent a late connection from the old port-s from being accepted
+			// while the old IPsec context is being replaced.
+			session.mu.Lock()
+			if session.closed {
+				session.mu.Unlock()
+				return
+			}
+			if _, _, _, currentErr := session.currentConnection(); currentErr == nil {
+				requireNewFlow = false
+				forceNewSecurity = false
+			} else {
+				session.securityRotationPending = true
+			}
+			session.mu.Unlock()
+		}
+		recoveryMode := "current_flow"
+		if forceNewSecurity {
+			recoveryMode = "new_security"
+		} else if requireNewFlow {
+			recoveryMode = "new_flow"
+		}
+		if err := session.reregisterRecoveredFlow(ctx, forceNewSecurity); err == nil {
+			if err := session.startRecoveredMainReader(); err != nil {
+				if current, _, _, currentErr := session.currentConnection(); currentErr == nil {
+					_ = session.detachMainConnection(current)
+				}
+				session.imsLogger().Warn("IMS recovered SIP flow could not start receiver",
+					"category", "ims", "subsystem", "sip", "stage", "flow_recovery",
+					"transport", session.transport, "error", err,
+					"retry_in", sipFlowRecoveryDelay(consecutiveFailures),
+					"consecutive_failures", consecutiveFailures+1)
+				retryIn := sipFlowRecoveryDelay(consecutiveFailures)
+				consecutiveFailures++
+				if !waitForSIPFlowRecovery(ctx, retryIn) {
+					return
+				}
+				continue
+			}
+			consecutiveFailures = 0
+			session.imsLogger().Info("IMS SIP flow recovered and re-registered",
+				"category", "ims", "subsystem", "sip", "stage", "flow_recovery",
+				"transport", session.transport, "mode", recoveryMode)
+			session.publishRuntimeState(vowifi.IMSRuntimeStateEvent{
+				IMSReady:          true,
+				SMSReady:          session.runtimeSMSReady(),
+				RegistrationState: "registered",
+				Reason:            "ims_flow_recovered",
+			})
+			return
+		} else {
+			if ctx.Err() != nil || errors.Is(err, ErrSessionClosed) {
+				return
+			}
+			retryIn := sipFlowRecoveryDelay(consecutiveFailures)
+			level := slog.LevelWarn
+			if statusCode, ok := registrationRejectionStatus(err); ok && statusCode == 503 {
+				// A temporary registrar rejection is retried without treating the
+				// protected security context as failed.
+				level = slog.LevelDebug
+			}
+			session.imsLogger().Log(context.Background(), level, "IMS SIP flow recovery attempt failed",
+				"category", "ims", "subsystem", "sip", "stage", "flow_recovery",
+				"transport", session.transport, "error", err,
+				"mode", recoveryMode,
+				"retry_in", retryIn,
+				"consecutive_failures", consecutiveFailures+1)
+			if current, _, _, currentErr := session.currentConnection(); currentErr == nil {
+				_ = session.detachMainConnection(current)
+			}
+			consecutiveFailures++
+			if !waitForSIPFlowRecovery(ctx, retryIn) {
+				return
+			}
+		}
+	}
+}
+
+func (session *Session) startRecoveredMainReader() error {
+	if session == nil || session.transport != "tcp" || !session.runtimeStarted {
+		return nil
+	}
+	connection, reader, _, err := session.currentConnection()
+	if err != nil {
+		return err
+	}
+	if reader == nil {
+		return errors.New("ims: recovered SIP TCP reader is unavailable")
+	}
+	if err := connection.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("ims: clear recovered SIP connection deadline: %w", err)
+	}
+	session.receiveDone.Add(1)
+	go session.readMainConnection(connection, reader)
+	session.startSIPFlowKeepalive()
+	return nil
+}
+
+func waitForSIPFlowRecovery(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (session *Session) reregisterRecoveredFlow(ctx context.Context, forceNewSecurity bool) error {
+	session.mu.Lock()
+	if session.closed {
+		session.mu.Unlock()
+		return ErrSessionClosed
+	}
+	session.evidence.RegistrationState = "flow_recovering"
+	session.registrationMu.Lock()
+	defer session.registrationMu.Unlock()
+	defer session.mu.Unlock()
+	if _, _, _, connectionErr := session.currentConnection(); connectionErr != nil {
+		if !forceNewSecurity && session.securityActive {
+			return errors.New("ims: protected SIP flow recovery requires a new security agreement")
+		}
+		if err := session.prepareSIPFlowRecoveryLocked(ctx); err != nil {
+			return err
+		}
+	}
+
+	response, err := session.registerOnNewFlow(ctx, int(session.provider.config.RegistrationExpiry/time.Second))
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != 200 {
+		return registrationRejectionError(response, "flow recovery")
+	}
+	return session.applyRegistrationEvidence(response)
+}
+
+// prepareSIPFlowRecoveryLocked creates a fresh protected SIP proposal when the
+// main flow is unavailable and the active security context must be replaced.
+// The old security context is removed before the new proposal is used. The UE
+// server port remains stable so the protected listeners can be reused after
+// the new agreement is installed; only the UE client port and its associated
+// SA identifiers rotate.
+func (session *Session) prepareSIPFlowRecoveryLocked(ctx context.Context) error {
+	session.flowMu.Lock()
+	defer session.flowMu.Unlock()
+
+	if _, _, _, err := session.currentConnection(); err == nil {
+		return nil
+	}
+	if len(session.sipLocalIP) == 0 {
+		return errors.New("ims: SIP flow recovery local IP address is unavailable")
+	}
+
+	if session.securityOffered() && validProtectedPort(session.securityProposal.portServer) {
+		previous := session.securityProposal
+		proposal, err := rotatedSecurityProposal(session.sipLocalIP, previous)
+		if err != nil {
+			return fmt.Errorf("ims: prepare rotated protected SIP flow: %w", err)
+		}
+		if session.ipsecHandle != nil {
+			cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			closeErr := session.ipsecHandle.Close(cleanupContext)
+			cleanupCancel()
+			if closeErr != nil {
+				return fmt.Errorf("ims: remove previous protected SIP security associations: %w", closeErr)
+			}
+			session.ipsecHandle = nil
+		}
+		session.securityActive = false
+		session.securityBootstrap = session.securityOffered()
+		session.securityAgreement = securityAgreement{}
+		session.endpoint = session.initialEndpoint
+		session.securityProposal = proposal
+		session.clearAuthentication()
+		session.imsLogger().Info("IMS protected SIP flow recovery prepared with a new UE client port",
+			"category", "ims", "subsystem", "sip", "stage", "flow_recovery",
+			"transport", session.transport,
+			"old_port_c", previous.portClient,
+			"new_port_c", proposal.portClient,
+			"port_s", proposal.portServer,
+			"old_spi_c", previous.spiClient,
+			"new_spi_c", proposal.spiClient,
+			"old_spi_s", previous.spiServer,
+			"new_spi_s", proposal.spiServer)
+	} else {
+		session.endpoint = session.initialEndpoint
+		session.securityBootstrap = session.securityOffered()
+	}
+
+	dialContext, cancel := context.WithTimeout(ctx, session.provider.config.TransactionTimeout)
+	connection, err := dialSIP(
+		dialContext,
+		session.transport,
+		session.sipLocalIP.String(),
+		0,
+		session.initialEndpoint.address(),
+	)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("ims: flow recovery SIP dial: %w", err)
+	}
+	if _, installed := session.installMainConnectionIfEmptyLocked(connection); !installed {
+		_ = connection.Close()
+		if _, _, _, currentErr := session.currentConnection(); currentErr == nil {
+			return nil
+		}
+		return errors.New("ims: flow recovery replacement connection was not installed")
+	}
+	if err := connection.SetDeadline(time.Time{}); err != nil {
+		_ = session.detachMainConnection(connection)
+		return fmt.Errorf("ims: clear recovered SIP connection deadline: %w", err)
+	}
+	return nil
+}
+
+func (session *Session) closeMainConnection() error {
+	connection, _, _, err := session.currentConnection()
+	if err != nil {
+		return nil
+	}
+	return connection.Close()
 }
 
 func newSession(
@@ -655,23 +1128,32 @@ func newSession(
 		instanceURI = sipInstanceID(request.Identity, instanceID)
 	}
 	refreshContext, refreshCancel := context.WithCancel(context.Background())
+	mainConnReady := make(chan struct{})
+	close(mainConnReady)
 	session := &Session{
-		provider:           provider,
-		request:            request,
-		identity:           identity,
-		endpoint:           endpoint,
-		initialEndpoint:    endpoint,
-		transport:          transport,
-		conn:               connection,
-		callID:             callToken + "@" + addressHost(connection.LocalAddr()),
-		fromTag:            fromTag,
-		instanceID:         instanceURI,
+		provider:        provider,
+		request:         request,
+		identity:        identity,
+		endpoint:        endpoint,
+		initialEndpoint: endpoint,
+		transport:       transport,
+		conn:            connection,
+		sipLocalIP:      append(net.IP(nil), addressIP(connection.LocalAddr())...),
+		pcscfIP:         append(net.IP(nil), addressIP(connection.RemoteAddr())...),
+		mainConnReady:   mainConnReady,
+		mainConnChanged: make(chan struct{}),
+		callID:          callToken + "@" + addressHost(connection.LocalAddr()),
+		fromTag:         fromTag,
+		instanceID:      instanceURI,
+
+		outboundRequested:  transport == "tcp",
 		pani:               resolveSessionPAccessNetworkInfo(request.Identity, provider.config.Logger),
 		paniResolved:       true,
 		cseq:               1,
 		refreshContext:     refreshContext,
 		refreshCancel:      refreshCancel,
 		refreshDone:        make(chan struct{}),
+		runtimeStates:      make(chan vowifi.IMSRuntimeStateEvent, 4),
 		failures:           make(chan error, 1),
 		transactions:       make(map[sipTransactionKey]chan *sipResponse),
 		inboundConnections: make(map[net.Conn]struct{}),
@@ -747,7 +1229,7 @@ func securityEncryptionForIdentity(identity vowifi.SIMIdentity) string {
 
 func (session *Session) abort() {
 	session.refreshCancel()
-	_ = session.conn.Close()
+	_ = session.closeMainConnection()
 	if session.protectedTCP != nil {
 		_ = session.protectedTCP.Close()
 	}
@@ -822,7 +1304,36 @@ func registrationRejectionError(response *sipResponse, phase string) error {
 			break
 		}
 	}
-	return fmt.Errorf("%w: %s", ErrRegistrationRejected, message)
+	retryAfter, hasRetryAfter := parseSIPRetryAfter(response.values("Retry-After"))
+	return &registrationRejectedError{
+		statusCode:    response.StatusCode,
+		message:       message,
+		retryAfter:    retryAfter,
+		hasRetryAfter: hasRetryAfter,
+	}
+}
+
+func parseSIPRetryAfter(values []string) (time.Duration, bool) {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		end := 0
+		for end < len(value) && value[end] >= '0' && value[end] <= '9' {
+			end++
+		}
+		if end == 0 {
+			continue
+		}
+		seconds, err := strconv.ParseInt(value[:end], 10, 64)
+		if err != nil {
+			continue
+		}
+		maximum := int64((24 * time.Hour) / time.Second)
+		if seconds > maximum {
+			seconds = maximum
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	return 0, false
 }
 
 func safeSIPDiagnostic(value string) string {
@@ -835,6 +1346,14 @@ func safeSIPDiagnostic(value string) string {
 }
 
 func (session *Session) register(ctx context.Context, expires int) (*sipResponse, error) {
+	return session.registerWithRuntime(ctx, expires, session.runtimeStarted)
+}
+
+func (session *Session) registerOnNewFlow(ctx context.Context, expires int) (*sipResponse, error) {
+	return session.registerWithRuntime(ctx, expires, false)
+}
+
+func (session *Session) registerWithRuntime(ctx context.Context, expires int, runtimeStarted bool) (*sipResponse, error) {
 	for challenges := 0; challenges <= maxAuthenticationChallenges; challenges++ {
 		cseq := session.cseq
 		session.cseq++
@@ -862,31 +1381,59 @@ func (session *Session) register(ctx context.Context, expires int) (*sipResponse
 		if err != nil {
 			return nil, err
 		}
-		response, err := session.exchange(ctx, request, cseq)
+		response, err := session.exchangeWithRuntime(ctx, request, cseq, runtimeStarted)
 		if err != nil {
 			return nil, err
 		}
 		session.evidence.LastSIPCode = response.StatusCode
+		if response.StatusCode == 439 && session.outboundRequested {
+			// RFC 5626 permits falling back to an ordinary registration when
+			// the first hop explicitly reports that it lacks outbound support.
+			session.outboundRequested = false
+			continue
+		}
 		if response.StatusCode != 401 && response.StatusCode != 407 {
 			return response, nil
 		}
 		if challenges == maxAuthenticationChallenges {
 			break
 		}
-		if session.securityActive {
-			return nil, errors.New("ims: protected registration was challenged again")
-		}
 		challenge, err := challengeFromResponse(response)
-		if err != nil {
-			return nil, err
-		}
-		agreement, useSecurity, err := session.securityFromResponse(response)
 		if err != nil {
 			return nil, err
 		}
 		preference := ""
 		if vowifi.IsATT310280(session.request.Identity) {
 			preference = "isim_strict"
+		}
+		if session.securityActive {
+			material, err := authenticateAKA(ctx, session.provider.aka, session.request.Identity, challenge, preference)
+			if err != nil {
+				return nil, err
+			}
+			credentials, err := newDigestCredentials(
+				session.identity.private,
+				material.response,
+				"sip:"+session.identity.domain,
+				"REGISTER",
+				1,
+			)
+			if err != nil {
+				clearAKAMaterial(&material)
+				return nil, err
+			}
+			session.auth = &authenticationState{
+				challenge: challenge,
+				response:  append([]byte(nil), material.response...),
+				auts:      base64.StdEncoding.EncodeToString(material.auts),
+				cnonce:    credentials.CNonce,
+			}
+			clearAKAMaterial(&material)
+			continue
+		}
+		agreement, useSecurity, err := session.securityFromResponse(response)
+		if err != nil {
+			return nil, err
 		}
 		material, err := authenticateAKA(ctx, session.provider.aka, session.request.Identity, challenge, preference)
 		if err != nil {
@@ -957,29 +1504,51 @@ func (session *Session) buildRegister(
 	if err != nil {
 		return nil, err
 	}
-	local := session.conn.LocalAddr().String()
+	connection, _, _, err := session.currentConnection()
+	if err != nil {
+		return nil, err
+	}
+	local := connection.LocalAddr().String()
 	contactAddress := session.contactAddress()
 	transportUpper := strings.ToUpper(session.transport)
 	requestURI := "sip:" + session.identity.domain
 	routeURI := "sip:" + session.endpoint.address() + ";transport=" + session.transport + ";lr"
 	contact := session.buildContact(contactAddress, registerOptions)
 
-	defaultSupported := "path, gruu"
-	defaultAllow := "REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, SUBSCRIBE, NOTIFY"
+	// Keep Supported and Allow tied to request handlers implemented by this
+	// runtime. Carrier profiles may select identity and wire formatting, but
+	// must not add or remove SIP capabilities that VoCat cannot actually use.
+	// Path is a REGISTER routing capability; the UA may ignore the Path
+	// returned in a REGISTER response. GRUU is not advertised because this
+	// runtime does not consume pub-gruu/temp-gruu or route using ;gr. Without
+	// that flow, advertising gruu would promise instance-routable Contact URIs
+	// that the runtime cannot process. If RFC 5627 GRUU support is implemented
+	// later, add gruu back only together with those response, URI, and routing
+	// handlers; do not restore the declaration by profile configuration alone.
+	defaultSupported := "path"
+	if session.outboundRequested {
+		defaultSupported += ", outbound"
+	}
+	// SUBSCRIBE and NOTIFY are event-package methods, not the reverse-TCP
+	// mechanism. VoCat has no corresponding event subscription/notification
+	// handler, so they are intentionally not advertised in Allow.
+	defaultAllow := "REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, PRACK, UPDATE"
 	supported := defaultSupported
-	if registerOptions.SupportedHeader != nil {
-		supported = *registerOptions.SupportedHeader
-	}
 	allow := defaultAllow
-	if registerOptions.AllowHeader != nil {
-		allow = *registerOptions.AllowHeader
-	}
 
 	userAgent := session.imsUserAgent()
 
+	via := fmt.Sprintf("SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportUpper, local, branch)
+	if session.transport == "tcp" {
+		// RFC 6223 uses Via;keep to negotiate keep-alives associated with
+		// this registration. The parameter is not added to UDP because this
+		// runtime does not implement the corresponding STUN keep-alive flow.
+		via += ";keep"
+	}
+
 	lines := []string{
 		"REGISTER " + requestURI + " SIP/2.0",
-		fmt.Sprintf("Via: SIP/2.0/%s %s;branch=z9hG4bK%s;rport", transportUpper, local, branch),
+		"Via: " + via,
 		"Max-Forwards: 70",
 		"Route: <" + routeURI + ">",
 		"From: <" + session.identity.public + ">;tag=" + session.fromTag,
@@ -1043,7 +1612,7 @@ func (session *Session) buildRegister(
 			authorization += ", integrity-protected=" + integrity
 		}
 		lines = append(lines, authorizationHeader+": "+authorization)
-	} else if cseq == 1 && session.securityOffered() {
+	} else if (cseq == 1 || session.securityBootstrap) && session.securityOffered() {
 		lines = append(lines, "Authorization: "+session.emptyDigestAuthorization())
 	}
 	lines = append(lines, "Content-Length: 0", "", "")
@@ -1054,6 +1623,10 @@ func (session *Session) buildContact(contactAddress string, registerOptions vowi
 	base := fmt.Sprintf("<sip:%s@%s;transport=%s>", session.identity.user, contactAddress, session.transport)
 	instanceID := session.instanceID
 	icsiRef := "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
+	regID := ""
+	if session.outboundRequested && session.transport == "tcp" {
+		regID = ";reg-id=1"
+	}
 
 	switch registerOptions.ContactFormat {
 	case vowifi.IMSContactFormatATT:
@@ -1062,8 +1635,8 @@ func (session *Session) buildContact(contactAddress string, registerOptions vowi
 			extra += ";" + tag
 		}
 		return fmt.Sprintf(
-			`%s%s;audio;+g.3gpp.smsip;+g.3gpp.icsi-ref="%s";+sip.instance="<%s>"`,
-			base, extra, icsiRef, instanceID,
+			`%s%s;audio;+g.3gpp.smsip;+g.3gpp.icsi-ref="%s";+sip.instance="<%s>"%s`,
+			base, extra, icsiRef, instanceID, regID,
 		)
 	case vowifi.IMSContactFormatGSMA:
 		extra := ""
@@ -1071,8 +1644,8 @@ func (session *Session) buildContact(contactAddress string, registerOptions vowi
 			extra += ";" + tag
 		}
 		return fmt.Sprintf(
-			`<sip:%s>;+g.3gpp.icsi-ref="%s"%s;+sip.instance="<%s>"`,
-			contactAddress, icsiRef, extra, instanceID,
+			`<sip:%s>;+g.3gpp.icsi-ref="%s"%s;+sip.instance="<%s>"%s`,
+			contactAddress, icsiRef, extra, instanceID, regID,
 		)
 	default:
 		extra := ""
@@ -1080,8 +1653,8 @@ func (session *Session) buildContact(contactAddress string, registerOptions vowi
 			extra += ";" + tag
 		}
 		return fmt.Sprintf(
-			`%s;+sip.instance="<%s>";+g.3gpp.smsip;audio;+g.3gpp.icsi-ref="%s"%s`,
-			base, instanceID, icsiRef, extra,
+			`%s;+sip.instance="<%s>"%s;+g.3gpp.smsip;audio;+g.3gpp.icsi-ref="%s"%s`,
+			base, instanceID, regID, icsiRef, extra,
 		)
 	}
 }
@@ -1099,7 +1672,7 @@ func sipInstanceID(identity vowifi.SIMIdentity, fallback string) string {
 			}
 		}
 		if valid {
-			return "urn:gsma:imei:" + imei + "-0"
+			return "urn:gsma:imei:" + imei[:8] + "-" + imei[8:14] + "-0"
 		}
 	}
 	return "urn:uuid:" + strings.TrimSpace(fallback)
@@ -1115,7 +1688,7 @@ func (session *Session) imsRegisterOptions() vowifi.IMSRegisterOptions {
 func (session *Session) imsUserAgent() string {
 	if session != nil && session.provider != nil {
 		if value := strings.TrimSpace(session.provider.config.UserAgent); value != "" {
-			if value != "vocat/1" {
+			if value != defaultSIPUserAgent {
 				return value
 			}
 		}
@@ -1131,7 +1704,10 @@ func (session *Session) imsUserAgent() string {
 			return value
 		}
 	}
-	return "vocat/1"
+	if value := strings.TrimSpace(os.Getenv(imsUserAgentOverrideEnv)); value != "" {
+		return value
+	}
+	return defaultSIPUserAgent
 }
 
 func (session *Session) imsLogger() *slog.Logger {
@@ -1225,15 +1801,28 @@ func ueProvidedPANI(value string) string {
 }
 
 func (session *Session) exchange(ctx context.Context, request []byte, cseq uint32) (*sipResponse, error) {
+	return session.exchangeWithRuntime(ctx, request, cseq, session.runtimeStarted)
+}
+
+func (session *Session) exchangeWithRuntime(
+	ctx context.Context,
+	request []byte,
+	cseq uint32,
+	runtimeStarted bool,
+) (*sipResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if session.runtimeStarted {
+	if runtimeStarted {
 		return session.exchangeRuntime(ctx, request, sipTransactionKey{
 			callID: session.callID,
 			cseq:   cseq,
 			method: "REGISTER",
 		})
+	}
+	connection, reader, _, err := session.currentConnection()
+	if err != nil {
+		return nil, err
 	}
 	transactionDeadline := time.Now().Add(session.provider.config.TransactionTimeout)
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(transactionDeadline) {
@@ -1242,7 +1831,7 @@ func (session *Session) exchange(ctx context.Context, request []byte, cseq uint3
 	readUDP := session.protectedUDP
 	protectedUDP := session.securityActive && session.transport == "udp" && readUDP != nil
 	setReadDeadline := func(deadline time.Time) error {
-		if err := session.conn.SetDeadline(deadline); err != nil {
+		if err := connection.SetDeadline(deadline); err != nil {
 			return fmt.Errorf("ims: set SIP transaction deadline: %w", err)
 		}
 		if protectedUDP {
@@ -1264,14 +1853,16 @@ func (session *Session) exchange(ctx context.Context, request []byte, cseq uint3
 		return nil, err
 	}
 	stopCancellation := context.AfterFunc(ctx, func() {
-		_ = session.conn.SetDeadline(time.Now())
+		_ = connection.SetDeadline(time.Now())
 		if protectedUDP {
 			_ = readUDP.SetReadDeadline(time.Now())
 		}
 	})
 	defer stopCancellation()
-	if _, err := session.conn.Write(request); err != nil {
-		return nil, fmt.Errorf("ims: send SIP REGISTER: %w", err)
+	_, writeErr := connection.Write(request)
+	if writeErr != nil {
+		session.detachMainConnection(connection)
+		return nil, fmt.Errorf("ims: send SIP REGISTER: %w", writeErr)
 	}
 
 	retransmissions := 0
@@ -1279,7 +1870,7 @@ func (session *Session) exchange(ctx context.Context, request []byte, cseq uint3
 		var response *sipResponse
 		var err error
 		if session.transport == "tcp" {
-			response, err = readSIPResponse(session.reader)
+			response, err = readSIPResponse(reader)
 		} else if protectedUDP {
 			packet := make([]byte, 65535)
 			var count int
@@ -1294,7 +1885,7 @@ func (session *Session) exchange(ctx context.Context, request []byte, cseq uint3
 		} else {
 			packet := make([]byte, 65535)
 			var count int
-			count, err = session.conn.Read(packet)
+			count, err = connection.Read(packet)
 			if err == nil {
 				response, err = parseSIPResponse(packet[:count])
 			}
@@ -1319,13 +1910,11 @@ func (session *Session) exchange(ctx context.Context, request []byte, cseq uint3
 				if deadlineErr := setReadDeadline(nextDeadline); deadlineErr != nil {
 					return nil, deadlineErr
 				}
-				if _, writeErr := session.conn.Write(request); writeErr != nil {
+				if _, writeErr := connection.Write(request); writeErr != nil {
+					session.detachMainConnection(connection)
 					return nil, fmt.Errorf("ims: retransmit SIP REGISTER: %w", writeErr)
 				}
 				retransmissions++
-				session.provider.config.Logger.Debug("IMS SIP REGISTER retransmitted",
-					"carrier_profile", vowifi.ResolveCarrierProfile(session.request.Identity).ID,
-					"transport", session.transport, "attempt", retransmissions)
 				continue
 			}
 			return nil, fmt.Errorf("ims: receive SIP REGISTER response: %w", err)
@@ -1392,6 +1981,20 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 		session.clearAuthentication()
 		return fmt.Errorf("%w: registrar granted zero expiry", ErrRegistrationRejected)
 	}
+	keepaliveNegotiated, keepaliveInterval := parseSIPViaKeepalive(response.values("Via"))
+	outboundConfirmed := session.transport == "tcp" && hasSIPOptionTag(response.values("Require"), "outbound")
+	session.keepaliveMu.Lock()
+	session.keepaliveNegotiated = session.transport == "tcp" && keepaliveNegotiated
+	session.keepaliveInterval = keepaliveInterval
+	if !outboundConfirmed {
+		// A successful response without Require: outbound does not confirm
+		// RFC 5626 outbound processing for additional flows.
+		session.outboundRequested = false
+	}
+	session.keepaliveMu.Unlock()
+	if session.runtimeStarted {
+		session.startSIPFlowKeepalive()
+	}
 	session.expiresAt = time.Now().Add(expiry)
 	session.smsContactConfirmed = smsConfirmed
 	session.evidence = vowifi.IMSEvidence{
@@ -1406,19 +2009,34 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 		SecurityMode:         session.effectiveSecurityMode(),
 		SecurityVerified:     session.securityActive,
 	}
+	session.securityBootstrap = false
+	session.securityRotationPending = false
 	session.clearAuthentication()
 	return nil
 }
 
 func (session *Session) refreshLoop() {
 	defer close(session.refreshDone)
+	consecutiveTemporaryRejections := 0
+	var retryDelay time.Duration
 	for {
 		session.mu.Lock()
 		if session.closed || !session.evidence.Registered {
 			session.mu.Unlock()
 			return
 		}
-		delay := refreshDelay(time.Until(session.expiresAt))
+		remaining := time.Until(session.expiresAt)
+		if remaining <= 0 {
+			session.failRefresh()
+			session.mu.Unlock()
+			session.publishFailure(ErrRegistrationExpired)
+			return
+		}
+		delay := retryDelay
+		if delay <= 0 {
+			delay = refreshDelay(remaining)
+		}
+		retryDelay = 0
 		session.mu.Unlock()
 
 		timer := time.NewTimer(delay)
@@ -1430,11 +2048,80 @@ func (session *Session) refreshLoop() {
 			return
 		case <-timer.C:
 		}
+		if _, _, err := session.waitForMainConnection(session.refreshContext); err != nil {
+			return
+		}
 		if err := session.refreshOnce(session.refreshContext); err != nil {
+			if errors.Is(err, errSIPConnectionUnavailable) {
+				continue
+			}
+			if statusCode, ok := registrationRejectionStatus(err); ok && statusCode == 503 {
+				delay, ok := session.scheduleRegistrationRefreshRetry(err, consecutiveTemporaryRejections)
+				if !ok {
+					return
+				}
+				consecutiveTemporaryRejections++
+				retryDelay = delay
+				continue
+			}
 			session.publishFailure(err)
 			return
 		}
+		consecutiveTemporaryRejections = 0
 	}
+}
+
+func registrationRefreshRetryDelay(err error, consecutiveFailures int) time.Duration {
+	if retryAfter, ok := registrationRetryAfter(err); ok {
+		if retryAfter < time.Second {
+			return time.Second
+		}
+		return retryAfter
+	}
+	delay := defaultRegistrationRetry
+	for index := 0; index < consecutiveFailures && delay < maxRegistrationRetry; index++ {
+		if delay > maxRegistrationRetry/2 {
+			return maxRegistrationRetry
+		}
+		delay *= 2
+	}
+	if delay > maxRegistrationRetry {
+		return maxRegistrationRetry
+	}
+	return delay
+}
+
+func (session *Session) scheduleRegistrationRefreshRetry(err error, consecutiveFailures int) (time.Duration, bool) {
+	retryDelay := registrationRefreshRetryDelay(err, consecutiveFailures)
+	session.mu.Lock()
+	if session.closed || !session.evidence.Registered || session.expiresAt.IsZero() {
+		session.mu.Unlock()
+		return 0, false
+	}
+	remaining := time.Until(session.expiresAt)
+	safety := registrationSafetyMargin
+	if session.provider != nil {
+		safety += session.provider.config.TransactionTimeout
+	}
+	if remaining <= safety {
+		session.failRefresh()
+		session.mu.Unlock()
+		session.publishFailure(fmt.Errorf("ims: registration expired after temporary SIP rejection: %w", err))
+		return 0, false
+	}
+	if retryDelay > remaining-safety {
+		retryDelay = remaining - safety
+	}
+	if retryDelay <= 0 {
+		session.failRefresh()
+		session.mu.Unlock()
+		session.publishFailure(fmt.Errorf("ims: registration expired after temporary SIP rejection: %w", err))
+		return 0, false
+	}
+	session.evidence.RegistrationState = "refresh_retrying"
+	session.mu.Unlock()
+
+	return retryDelay, true
 }
 
 func refreshDelay(remaining time.Duration) time.Duration {
@@ -1454,6 +2141,8 @@ func refreshDelay(remaining time.Duration) time.Duration {
 func (session *Session) refreshOnce(ctx context.Context) error {
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	session.registrationMu.Lock()
+	defer session.registrationMu.Unlock()
 	switch {
 	case session.closed:
 		return ErrSessionClosed
@@ -1462,12 +2151,21 @@ func (session *Session) refreshOnce(ctx context.Context) error {
 	}
 	response, err := session.register(ctx, int(session.provider.config.RegistrationExpiry/time.Second))
 	if err != nil {
+		if errors.Is(err, errSIPConnectionUnavailable) {
+			return err
+		}
 		session.failRefresh()
 		return fmt.Errorf("ims: refresh registration: %w", err)
 	}
 	if response.StatusCode != 200 {
+		if response.StatusCode == 503 {
+			// A temporary registrar rejection does not revoke an otherwise
+			// valid binding or invalidate the protected SIP/IPsec context.
+			session.evidence.RegistrationState = "refresh_retrying"
+			return registrationRejectionError(response, "refresh")
+		}
 		session.failRefresh()
-		return fmt.Errorf("ims: refresh registration returned SIP %d", response.StatusCode)
+		return registrationRejectionError(response, "refresh")
 	}
 	if err := session.applyRegistrationEvidence(response); err != nil {
 		session.failRefresh()
@@ -1491,6 +2189,48 @@ func (session *Session) publishFailure(err error) {
 	session.failureOnce.Do(func() {
 		session.failures <- err
 	})
+}
+
+func (session *Session) runtimeSMSReady() bool {
+	if session == nil {
+		return false
+	}
+	session.mu.Lock()
+	registered := session.evidence.Registered
+	confirmed := session.smsContactConfirmed
+	identity := session.request.Identity
+	session.mu.Unlock()
+	if !registered {
+		return false
+	}
+	return confirmed || vowifi.ResolveCarrierProfile(identity).AllowSMSWithoutContactConfirmation
+}
+
+func (session *Session) publishRuntimeState(event vowifi.IMSRuntimeStateEvent) {
+	if session == nil || session.runtimeStates == nil {
+		return
+	}
+	select {
+	case session.runtimeStates <- event:
+	default:
+		// State events are snapshots. If a slow consumer fills the small
+		// buffer, discard the oldest snapshot and retain the newest one.
+		select {
+		case <-session.runtimeStates:
+		default:
+		}
+		select {
+		case session.runtimeStates <- event:
+		default:
+		}
+	}
+}
+
+func (session *Session) RuntimeStates() <-chan vowifi.IMSRuntimeStateEvent {
+	if session == nil {
+		return nil
+	}
+	return session.runtimeStates
 }
 
 func (session *Session) Failures() <-chan error {
@@ -1595,10 +2335,16 @@ func (session *Session) smsCapabilityReady() bool {
 	}
 	profile := vowifi.ResolveCarrierProfile(session.request.Identity)
 	if profile.AllowSMSWithoutContactConfirmation {
-		session.provider.config.Logger.Warn("IMS SMS capability was not confirmed by registrar; proceeding because carrier profile permits it",
-			"device_id", session.request.DeviceID,
-			"carrier_profile", profile.ID,
-			"match_source", profile.MatchSource)
+		if !session.smsFallbackLogged {
+			session.smsFallbackLogged = true
+			if session.provider != nil && session.provider.config.Logger != nil {
+				session.provider.config.Logger.Info("IMS SMS capability fallback enabled",
+					"device_id", session.request.DeviceID,
+					"carrier_profile", profile.ID,
+					"match_source", profile.MatchSource,
+					"reason", "registrar_contact_feature_not_confirmed")
+			}
+		}
 		return true
 	}
 	return false
@@ -1612,7 +2358,7 @@ func (session *Session) Close(ctx context.Context) error {
 	select {
 	case <-session.refreshDone:
 	case <-ctx.Done():
-		_ = session.conn.Close()
+		_ = session.closeMainConnection()
 		<-session.refreshDone
 	}
 
@@ -1621,6 +2367,7 @@ func (session *Session) Close(ctx context.Context) error {
 		session.mu.Unlock()
 		return nil
 	}
+	session.registrationMu.Lock()
 	var unregisterErr error
 	if session.evidence.Registered && ctx.Err() == nil {
 		response, err := session.register(ctx, 0)
@@ -1635,6 +2382,7 @@ func (session *Session) Close(ctx context.Context) error {
 	session.evidence.RegistrationState = "closed"
 	session.smsContactConfirmed = false
 	session.clearAuthentication()
+	session.registrationMu.Unlock()
 	session.mu.Unlock()
 	session.callMu.Lock()
 	for _, call := range session.calls {
@@ -1650,7 +2398,7 @@ func (session *Session) Close(ctx context.Context) error {
 	// Runtime receive loops block in Read/Accept. Close every socket before
 	// waiting for those goroutines; waiting first deadlocks VoWiFi shutdown and
 	// leaves the modem permanently in CFUN=4.
-	if err := session.conn.Close(); err != nil {
+	if err := session.closeMainConnection(); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
 	}
 	if session.protectedTCP != nil {
@@ -1743,3 +2491,4 @@ func digitsBetween(value string, minimum int, maximum int) bool {
 var _ vowifi.IMSProvider = (*Provider)(nil)
 var _ vowifi.IMSSession = (*Session)(nil)
 var _ vowifi.RuntimeFailureNotifier = (*Session)(nil)
+var _ vowifi.IMSRuntimeStateNotifier = (*Session)(nil)
