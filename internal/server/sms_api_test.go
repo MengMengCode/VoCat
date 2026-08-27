@@ -238,6 +238,67 @@ func TestSyncModemSMSLogsMultipartMessageOnlyOnceAcrossStoragesAndPolls(t *testi
 	}
 }
 
+func TestSyncModemSMSSeparatesReusedConcatReferencesWithoutCursorChurn(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	const (
+		deviceID = "ec20-1"
+		imei     = "867394042309830"
+		peer     = "+447700900123"
+	)
+	if err := database.UpsertDevice(ctx, store.Device{
+		ID: deviceID, Name: "EC20", DeviceType: store.DeviceTypePCIeEC20EC25,
+		ModemIMEI: imei, SMSEnabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	receivedAt := time.Unix(1_700_000_000, 0).UTC()
+	part := func(index, sequence int, body string) device.SMSMessage {
+		return device.SMSMessage{
+			Index: index, Storage: "SM", StorageStatus: device.SMSStatusReceivedUnread,
+			Direction: device.SMSDirectionReceived, From: peer, Text: body,
+			Encoding: device.SMSEncodingGSM7PDU, ServiceCenterTimestamp: &receivedAt,
+			Concat: &device.SMSConcatInfo{Reference: 7, Total: 2, Sequence: sequence},
+			RawPDU: body,
+		}
+	}
+	messages := []device.SMSMessage{
+		part(20, 1, "old-a "), part(21, 2, "old-b"),
+		part(42, 1, "new-a "), part(43, 2, "new-b"),
+	}
+	server := &Server{
+		store: database, logger: regionTestLogger(),
+		devices: fakeDeviceController{
+			entry: device.Device{ID: deviceID, Discovered: true,
+				Snapshot: &device.Snapshot{DeviceID: deviceID, IMEI: imei, IMSI: "23433"}},
+			smsMessages: messages,
+		},
+	}
+
+	server.syncModemSMS(ctx, deviceID)
+	first, err := database.ListSMSMessages(ctx, store.SMSFilter{DeviceID: deviceID})
+	if err != nil || len(first) != 2 {
+		t.Fatalf("first sync messages = %#v, %v", first, err)
+	}
+	latest, err := database.LatestSMSMessageID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.syncModemSMS(ctx, deviceID)
+	second, err := database.ListSMSMessages(ctx, store.SMSFilter{DeviceID: deviceID})
+	if err != nil || len(second) != 2 {
+		t.Fatalf("second sync messages = %#v, %v", second, err)
+	}
+	fresh, err := database.ListInboundSMSAfterID(ctx, latest, 10)
+	if err != nil || len(fresh) != 0 {
+		t.Fatalf("notification rows after repeated scan = %#v, %v", fresh, err)
+	}
+}
+
 func TestDeleteSMSRemovesModemCopyBeforeDatabaseRow(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, ":memory:")

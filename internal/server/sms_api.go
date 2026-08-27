@@ -697,9 +697,11 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 				"message_reference":  message.MessageReference,
 				"delivery_status":    message.DeliveryStatus,
 				"data_coding_scheme": message.DataCodingScheme,
-				// Mark 410 rows so completed multipart messages retain their durable
-				// id when its modem storage is decoded again on the next poll.
-				"keep_durable_id_on_rescan": store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeWiFi410,
+				// Every AT modem periodically rescans persistent SMS storage. Keep a
+				// completed multipart row's cursor stable when a decoder presents a
+				// segment differently on a later pass, otherwise notification
+				// providers can treat the old message as newly inserted.
+				"keep_durable_id_on_rescan": true,
 			})
 			saveResult, saveErr := s.store.SaveSMSMessageWithResult(ctx, store.SMSMessage{
 				MessageID:     messageID,
@@ -742,10 +744,19 @@ func modemSMSMessageID(message device.SMSMessage, modemIMEI, deviceID, peer stri
 	)
 	if message.Concat != nil && message.Concat.Total > 1 {
 		// A segment of a carrier-split long SMS. Address the whole message
-		// with a stable id so SaveSMSMessage folds every segment into one
-		// progressively merged row instead of one row per segment.
+		// with a storage-generation id so SaveSMSMessage folds every segment
+		// into one row without colliding with an older message that reused the
+		// same UDH reference. SM and ME can expose duplicate copies of the same
+		// slots, so the generation uses the first segment index, not storage.
+		source := "cellular_at"
+		if message.Concat.Sequence > 0 {
+			baseIndex := message.Index - (message.Concat.Sequence - 1)
+			if baseIndex >= 0 {
+				source = fmt.Sprintf("cellular_at:%d", baseIndex)
+			}
+		}
 		messageID = store.StableConcatMessageID(
-			"cellular_at", modemIMEI, deviceID, peer,
+			source, modemIMEI, deviceID, peer,
 			message.Concat.Reference, message.Concat.Total,
 		)
 	}

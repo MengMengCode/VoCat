@@ -104,6 +104,10 @@ func (s *Server) runSMSNotificationChannel(ctx context.Context, channel string) 
 				}
 			} else {
 				for _, message := range messages {
+					if !store.ConcatSMSReadyToNotify(message.MessageID, message.Extra) {
+						cursor = message.ID
+						continue
+					}
 					notification := s.newSMSNotification(ctx, message)
 					if sendErr := sendSMSNotification(s.notificationDestinationContext(ctx), channel, config, notification); sendErr != nil {
 						if sendErr.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
