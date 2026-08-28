@@ -46,7 +46,6 @@ func (s *Server) handleSMSContacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	deviceID := normalizeSMSDeviceFilter(r.URL.Query().Get("device_id"))
-	s.syncModemSMS(r.Context(), deviceID)
 	filter := s.smsStoreFilter(r.Context(), deviceID, "")
 	filter.Limit = queryLimit(r, 100)
 	contacts, err := s.store.ListSMSContacts(r.Context(), filter)
@@ -88,7 +87,6 @@ func (s *Server) handleSMSThread(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		s.syncModemSMS(r.Context(), deviceID)
 		filter := s.smsStoreFilter(r.Context(), deviceID, modemIMEI)
 		filter.IMSI = imsi
 		filter.Peer = peer
@@ -854,11 +852,12 @@ func shouldDeferModemSMSSync(state vowifi.State, stateErr error) bool {
 	if stateErr != nil || !state.Enabled {
 		return false
 	}
-	// SMSReady is a quiescent runtime state: SIM/AKA setup has finished and
-	// reading stored messages cannot race the eSIM/VoWiFi startup sequence.
-	// Failed is also safe because the orchestrator has restored cellular radio
-	// operation before publishing the terminal failure state.
-	return state.Phase != vowifi.PhaseSMSReady && state.Phase != vowifi.PhaseFailed
+	// An enabled VoWiFi policy keeps cellular RF off. Even after IMS reaches
+	// SMSReady, EC20 AT+CMGL can block until its command timeout or close the
+	// serial session, delaying every SMS-page request and competing with SIM/AKA
+	// work. SIP MESSAGE delivery persists live IMS SMS; scan modem storage only
+	// after VoWiFi is disabled or a terminal failure restores cellular radio.
+	return state.Phase != vowifi.PhaseFailed
 }
 
 // StartSMSSyncLoop periodically persists inbound cellular SMS even when no

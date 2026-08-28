@@ -40,6 +40,8 @@ import (
 	"vocat/web"
 )
 
+const flightModeTransitionTimeout = 45 * time.Second
+
 func main() {
 	logs := loghub.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}), 2000)
 	logger := slog.New(logs)
@@ -462,7 +464,7 @@ func restoreDefaultCellularRadios(
 				continue
 			}
 		}
-		restoreContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+		restoreContext, cancel := context.WithTimeout(ctx, flightModeTransitionTimeout)
 		_, err = manager.SetFlight(restoreContext, entry.ID, false)
 		cancel()
 		if err != nil {
@@ -759,7 +761,7 @@ func protectVoWiFiStartupRadioWithRetry(
 ) error {
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		flightContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+		flightContext, cancel := context.WithTimeout(ctx, flightModeTransitionTimeout)
 		_, lastErr = manager.SetFlight(flightContext, physicalID, true)
 		cancel()
 		if lastErr == nil {
@@ -1132,7 +1134,7 @@ func enforceDefaultSafeCardPolicy(
 		logger.Warn("default card policy: read policy", "iccid", iccid, "error", err)
 		return
 	}
-	flightContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	flightContext, cancel := context.WithTimeout(ctx, flightModeTransitionTimeout)
 	_, err := manager.SetFlight(flightContext, physicalID, true)
 	cancel()
 	if err != nil {
@@ -1250,7 +1252,7 @@ func reconcileCardPolicies(
 			state, stateErr := vowifiManager.State(config.ID)
 			if policy.VoWiFiEnabled {
 				if !entry.Snapshot.FlightMode {
-					flightContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+					flightContext, cancel := context.WithTimeout(ctx, flightModeTransitionTimeout)
 					_, _ = manager.SetFlight(flightContext, entry.ID, true)
 					cancel()
 				}
@@ -1272,7 +1274,7 @@ func reconcileCardPolicies(
 				continue
 			}
 			if policy.AirplaneEnabled != entry.Snapshot.FlightMode {
-				flightContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+				flightContext, cancel := context.WithTimeout(ctx, flightModeTransitionTimeout)
 				_, _ = manager.SetFlight(flightContext, entry.ID, policy.AirplaneEnabled)
 				cancel()
 			}
@@ -1322,7 +1324,7 @@ func enforceCardRegion(
 	}
 	if reason := device.RegionBlockReason(imsi); reason != "" {
 		if !snapshot.FlightMode {
-			flightContext, cancelFlight := context.WithTimeout(ctx, 30*time.Second)
+			flightContext, cancelFlight := context.WithTimeout(ctx, flightModeTransitionTimeout)
 			_, err := manager.SetFlight(flightContext, id, true)
 			cancelFlight()
 			if err != nil && ctx.Err() == nil {

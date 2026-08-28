@@ -1273,6 +1273,10 @@ func resolveNotificationAddresses(ctx context.Context, host string, allowLocal b
 
 var notificationFakeIPNetworks = []netip.Prefix{
 	netip.MustParsePrefix("198.18.0.0/15"),
+	// Mihomo/Clash can synthesize ULA addresses alongside its RFC 2544
+	// IPv4 Fake-IP range. These addresses are consumed by the local TUN DNS
+	// interceptor and do not identify a LAN service.
+	netip.MustParsePrefix("fdfe:dcba:9876::/48"),
 }
 
 var blockedNotificationDestinationNetworks = []netip.Prefix{
