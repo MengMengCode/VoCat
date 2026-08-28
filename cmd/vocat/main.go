@@ -381,9 +381,13 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 
 	select {
 	case err := <-serverError:
+		cancelDeviceStartup()
 		_ = protocolMux.Close()
 		return err
 	case <-signalContext.Done():
+		// Stop delayed OpenStick 410 startup work before the deferred VoWiFi
+		// manager shutdown begins, so it cannot enqueue a late enable request.
+		cancelDeviceStartup()
 		logger.Info("shutdown signal received")
 	}
 	// Long-lived SSE and polling handlers use this context. Stop them before
