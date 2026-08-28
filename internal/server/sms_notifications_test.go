@@ -1,10 +1,28 @@
 package server
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"vocat/internal/store"
 )
+
+func TestSMSNotificationReadyWaitsForAllLongSMSParts(t *testing.T) {
+	partial := store.SMSMessage{
+		MessageID: "concat:cellular_at:imei:sender:1:2",
+		Extra:     json.RawMessage(`{"concat_complete":false}`),
+	}
+	if smsNotificationReady(partial) {
+		t.Fatal("incomplete long SMS is ready for notification")
+	}
+
+	partial.Extra = json.RawMessage(`{"concat_complete":true}`)
+	if !smsNotificationReady(partial) {
+		t.Fatal("complete long SMS is not ready for notification")
+	}
+}
 
 func TestSMSNotificationTextMatchesUserFacingTemplate(t *testing.T) {
 	location := time.FixedZone("UTC+8", 8*60*60)

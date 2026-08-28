@@ -104,6 +104,13 @@ func (s *Server) runSMSNotificationChannel(ctx context.Context, channel string) 
 				}
 			} else {
 				for _, message := range messages {
+					if !smsNotificationReady(message) {
+						// Advance past an incomplete carrier-split long SMS. Once every
+						// segment arrives, storage creates a new completed row and it
+						// returns through this cursor as one notification.
+						cursor = message.ID
+						continue
+					}
 					notification := s.newSMSNotification(ctx, message)
 					if sendErr := sendSMSNotification(s.notificationDestinationContext(ctx), channel, config, notification); sendErr != nil {
 						if sendErr.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
@@ -121,6 +128,10 @@ func (s *Server) runSMSNotificationChannel(ctx context.Context, channel string) 
 			return
 		}
 	}
+}
+
+func smsNotificationReady(message store.SMSMessage) bool {
+	return store.ConcatSMSReadyToNotify(message.MessageID, message.Extra)
 }
 
 func (s *Server) smsNotificationConfig(ctx context.Context, channel string) (map[string]any, bool, error) {
