@@ -44,6 +44,7 @@ type ReceivedSMS struct {
 	MessageID              string
 	DeviceID               string
 	ICCID                  string
+	ModemIMEI              string
 	IMSI                   string
 	From                   string
 	Text                   string
@@ -62,6 +63,7 @@ type ReceivedSMS struct {
 type ReceivedSMSStatus struct {
 	DeviceID               string
 	ICCID                  string
+	ModemIMEI              string
 	IMSI                   string
 	To                     string
 	MessageReference       int
@@ -509,6 +511,7 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 		status := ReceivedSMSStatus{
 			DeviceID:               session.request.DeviceID,
 			ICCID:                  session.request.Identity.ICCID,
+			ModemIMEI:              strings.TrimSpace(session.request.Identity.IMEI),
 			IMSI:                   session.request.Identity.IMSI,
 			To:                     message.To,
 			MessageReference:       intPtrValue(message.MessageReference),
@@ -554,6 +557,7 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 			MessageID:              fmt.Sprintf("ims:%s:%d", callID, rpdu.reference),
 			DeviceID:               session.request.DeviceID,
 			ICCID:                  session.request.Identity.ICCID,
+			ModemIMEI:              strings.TrimSpace(session.request.Identity.IMEI),
 			IMSI:                   session.request.Identity.IMSI,
 			From:                   message.From,
 			Text:                   message.Text,

@@ -22,17 +22,20 @@ const userspaceTunnelMTU = 1380
 
 const userspaceTunnelPollInterval = 100 * time.Millisecond
 
+const openWrtFirewallEnsureInterval = 10 * time.Second
+
 type linuxUserspaceInstaller struct {
 	ipCommand string
 }
 
 type linuxUserspaceHandle struct {
-	ipCommand string
-	config    ChildSAConfig
-	tunnel    *espTunnel
-	tun       *os.File
-	tunFD     int
-	relay     NATTPacketRelay
+	ipCommand  string
+	nftCommand string
+	config     ChildSAConfig
+	tunnel     *espTunnel
+	tun        *os.File
+	tunFD      int
+	relay      NATTPacketRelay
 
 	runContext context.Context
 	cancel     context.CancelFunc
@@ -40,11 +43,12 @@ type linuxUserspaceHandle struct {
 	cancelOnce sync.Once
 	closeOnce  sync.Once
 
-	mu          sync.Mutex
-	closed      bool
-	terminalErr error
-	failures    chan error
-	cleanup     []ipCleanupCommand
+	mu            sync.Mutex
+	closed        bool
+	terminalErr   error
+	failures      chan error
+	cleanup       []ipCleanupCommand
+	firewallRules []openWrtFirewallRule
 }
 
 type ipCleanupCommand struct {
@@ -92,6 +96,7 @@ func (installer linuxUserspaceInstaller) Install(
 	runContext, cancel := context.WithCancel(context.Background())
 	handle := &linuxUserspaceHandle{
 		ipCommand:  command,
+		nftCommand: "nft",
 		config:     cloneChildSAConfig(config),
 		tunnel:     tunnel,
 		tun:        tun,
@@ -107,9 +112,10 @@ func (installer linuxUserspaceInstaller) Install(
 		_ = tun.Close()
 		return nil, err
 	}
-	handle.wait.Add(2)
+	handle.wait.Add(3)
 	go handle.copyTUNToRelay()
 	go handle.copyRelayToTUN()
+	go handle.maintainOpenWrtFirewall()
 	return handle, nil
 }
 
@@ -259,7 +265,115 @@ func (handle *linuxUserspaceHandle) configure(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := handle.configureOpenWrtFirewall(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (handle *linuxUserspaceHandle) configureOpenWrtFirewall(ctx context.Context) error {
+	command := strings.TrimSpace(handle.nftCommand)
+	if command == "" {
+		command = "nft"
+	}
+	if _, err := exec.LookPath(command); err != nil {
+		return nil
+	}
+	probe := exec.CommandContext(ctx, command, "list", "chain", "inet", "fw4", "input")
+	if _, err := probe.CombinedOutput(); err != nil {
+		// fw4 is OpenWrt-specific. Other Linux hosts retain their native input
+		// policy and do not need this compatibility rule.
+		return nil
+	}
+	handle.firewallRules = buildOpenWrtFirewallRules(handle.config)
+	if len(handle.firewallRules) == 0 {
+		return nil
+	}
+	if err := handle.ensureOpenWrtFirewall(ctx); err != nil {
+		_ = handle.cleanupOpenWrtFirewall(context.Background())
+		return fmt.Errorf("ike: permit IMS input on OpenWrt TUN: %w", err)
+	}
+	return nil
+}
+
+func (handle *linuxUserspaceHandle) ensureOpenWrtFirewall(ctx context.Context) error {
+	if len(handle.firewallRules) == 0 {
+		return nil
+	}
+	command := strings.TrimSpace(handle.nftCommand)
+	if command == "" {
+		command = "nft"
+	}
+	list := exec.CommandContext(ctx, command, "-a", "list", "chain", "inet", "fw4", "input")
+	output, err := list.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("inspect fw4 input chain: %s", commandErrorText(output, err))
+	}
+	current := string(output)
+	for _, rule := range handle.firewallRules {
+		if strings.Contains(current, `comment "`+rule.comment+`"`) {
+			continue
+		}
+		install := exec.CommandContext(ctx, command, rule.arguments...)
+		if output, err := install.CombinedOutput(); err != nil {
+			return fmt.Errorf("install %s: %s", rule.comment, commandErrorText(output, err))
+		}
+	}
+	return nil
+}
+
+func (handle *linuxUserspaceHandle) maintainOpenWrtFirewall() {
+	defer handle.wait.Done()
+	if len(handle.firewallRules) == 0 {
+		return
+	}
+	ticker := time.NewTicker(openWrtFirewallEnsureInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-handle.runContext.Done():
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(handle.runContext, 5*time.Second)
+			_ = handle.ensureOpenWrtFirewall(ctx)
+			cancel()
+		}
+	}
+}
+
+func commandErrorText(output []byte, err error) string {
+	message := strings.TrimSpace(string(output))
+	if message == "" && err != nil {
+		message = err.Error()
+	}
+	return message
+}
+
+func (handle *linuxUserspaceHandle) cleanupOpenWrtFirewall(ctx context.Context) error {
+	if len(handle.firewallRules) == 0 {
+		return nil
+	}
+	command := strings.TrimSpace(handle.nftCommand)
+	if command == "" {
+		command = "nft"
+	}
+	list := exec.CommandContext(ctx, command, "-a", "list", "chain", "inet", "fw4", "input")
+	output, err := list.CombinedOutput()
+	if err != nil {
+		// A firewall reload may temporarily remove fw4; there is then nothing
+		// owned by this session left to delete.
+		return nil
+	}
+	handles := nftRuleHandles(string(output), firewallRuleComments(handle.firewallRules))
+	var errs []error
+	for _, nftHandle := range handles {
+		remove := exec.CommandContext(ctx, command, "delete", "rule", "inet", "fw4", "input", "handle", nftHandle)
+		if output, err := remove.CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Errorf("remove fw4 rule %s: %s", nftHandle, commandErrorText(output, err)))
+		}
+	}
+	handle.firewallRules = nil
+	return errors.Join(errs...)
 }
 
 func (handle *linuxUserspaceHandle) configureFamily(
@@ -671,6 +785,9 @@ func (handle *linuxUserspaceHandle) cleanupNetwork(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var errs []error
+	if err := handle.cleanupOpenWrtFirewall(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	for index := len(handle.cleanup) - 1; index >= 0; index-- {
 		item := handle.cleanup[index]
 		command := exec.CommandContext(ctx, handle.ipCommand, item.arguments...)

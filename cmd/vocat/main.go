@@ -845,6 +845,7 @@ func newVoWiFiOrchestrator(
 		OnIncomingCall:        onIncomingCall,
 		OnSMS: func(ctx context.Context, message ims.ReceivedSMS) error {
 			localPhone, _ := database.PhoneNumberForICCID(ctx, message.ICCID)
+			modemIMEI := firstNonEmpty(message.ModemIMEI, deviceConfig.ModemIMEI)
 			extra, _ := json.Marshal(map[string]any{
 				"transport":                "ims",
 				"encoding":                 message.Encoding,
@@ -867,14 +868,14 @@ func newVoWiFiOrchestrator(
 				// message with a stable id so SaveSMSMessage folds every segment
 				// into one progressively merged row instead of one row per segment.
 				messageID = store.StableConcatMessageID(
-					"ims", deviceConfig.ModemIMEI, message.DeviceID, message.From,
+					"ims", modemIMEI, message.DeviceID, message.From,
 					message.Concat.Reference, message.Concat.Total,
 				)
 			}
 			_, saveErr := database.SaveSMSMessage(ctx, store.SMSMessage{
 				MessageID:  messageID,
 				DeviceID:   message.DeviceID,
-				ModemIMEI:  deviceConfig.ModemIMEI,
+				ModemIMEI:  modemIMEI,
 				ICCID:      message.ICCID,
 				IMSI:       message.IMSI,
 				LocalPhone: localPhone,
@@ -893,7 +894,7 @@ func newVoWiFiOrchestrator(
 		OnSMSStatus: func(ctx context.Context, report ims.ReceivedSMSStatus) error {
 			deliveryReport := store.SMSDeliveryReport{
 				DeviceID:          report.DeviceID,
-				ModemIMEI:         deviceConfig.ModemIMEI,
+				ModemIMEI:         firstNonEmpty(report.ModemIMEI, deviceConfig.ModemIMEI),
 				IMSI:              report.IMSI,
 				Peer:              report.To,
 				Source:            "ims",
