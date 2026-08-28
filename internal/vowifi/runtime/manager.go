@@ -231,6 +231,16 @@ func (manager *Manager) State(deviceID string) (vowifi.State, error) {
 	return item.orchestrator.State(), nil
 }
 
+// ModemSMSSyncBlocked reports whether the desired VoWiFi lifecycle still owns
+// the modem command path. The HTTP layer consults this signal for PhaseFailed,
+// including the small handoff window before an automatic retry is scheduled.
+func (manager *Manager) ModemSMSSyncBlocked(deviceID string) bool {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	item := manager.entries[deviceID]
+	return item != nil && (item.desiredEnabled || item.busy || item.autoRetryPending)
+}
+
 // RequestEnabled queues an enable or disable transaction and returns
 // immediately. Callers observe progress through State; provider errors are
 // persisted in the orchestrator state instead of being lost with an HTTP

@@ -617,7 +617,13 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 		// though subsequent live SMS is delivered by SIP MESSAGE.
 		if s.vowifi != nil {
 			state, stateErr := s.vowifi.State(config.ID)
-			if shouldDeferModemSMSSync(state, stateErr) {
+			deferSync := shouldDeferModemSMSSync(state, stateErr)
+			if !deferSync && stateErr == nil && state.Enabled && state.Phase == vowifi.PhaseFailed {
+				if controller, ok := s.vowifi.(VoWiFiSMSSyncController); ok {
+					deferSync = controller.ModemSMSSyncBlocked(config.ID)
+				}
+			}
+			if deferSync {
 				continue
 			}
 		}
@@ -852,11 +858,15 @@ func shouldDeferModemSMSSync(state vowifi.State, stateErr error) bool {
 	if stateErr != nil || !state.Enabled {
 		return false
 	}
-	// An enabled VoWiFi policy owns the UICC/AT path, including the interval
-	// between a failure and its automatic retry. EC20 AT+CMGL can hold the device
-	// lock for its full timeout and delay that retry. SIP MESSAGE persists live
-	// IMS SMS; scan modem storage only after the policy is explicitly disabled.
-	return true
+	// Setup phases own the UICC/AT path. Once IMS SMS is stable, allow the modem
+	// storage catch-up scan. A failed phase is also eligible unless the runtime's
+	// separate busy/retry signal says an automatic recovery currently owns AT.
+	switch state.Phase {
+	case vowifi.PhaseSMSReady, vowifi.PhaseFailed:
+		return false
+	default:
+		return true
+	}
 }
 
 // StartSMSSyncLoop periodically persists inbound cellular SMS even when no

@@ -40,13 +40,18 @@ import (
 	"vocat/web"
 )
 
-const flightModeTransitionTimeout = 45 * time.Second
+const (
+	flightModeTransitionTimeout = 45 * time.Second
+	deviceStartupTimeout        = 4 * time.Minute
+)
+
+func deviceStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), deviceStartupTimeout)
+}
 
 func startupFlightModeContext(parent context.Context) (context.Context, context.CancelFunc) {
-	// Startup has a short database/configuration deadline. CFUN transitions on
-	// EC20 can legitimately outlive it while USB disappears and re-enumerates,
-	// so retain startup values without inheriting that deadline.
-	return context.WithTimeout(context.WithoutCancel(parent), flightModeTransitionTimeout)
+	// Bound each EC20 CFUN transition inside the larger device-startup budget.
+	return context.WithTimeout(parent, flightModeTransitionTimeout)
 }
 
 func main() {
@@ -220,14 +225,20 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	if err != nil {
 		return fmt.Errorf("create device manager: %w", err)
 	}
-	if err := deviceManager.Start(startupContext); err != nil {
+	// Device startup has a separate budget because EC20 CFUN transitions can
+	// temporarily remove the USB serial transport, and OpenStick 410 deliberately
+	// delays its persisted VoWiFi policy after a cold boot. Do not reuse the short
+	// database/configuration deadline for this hardware lifecycle.
+	deviceStartupContext, cancelDeviceStartup := deviceStartupContext(startupContext)
+	defer cancelDeviceStartup()
+	if err := deviceManager.Start(deviceStartupContext); err != nil {
 		logger.Warn("device discovery is not available at startup", "error", err)
 	}
-	if err := provisionDiscoveredDevices(startupContext, database, deviceManager); err != nil {
+	if err := provisionDiscoveredDevices(deviceStartupContext, database, deviceManager); err != nil {
 		logger.Warn("automatic first-run device provisioning failed", "error", err)
 	}
-	configureDeviceBackends(startupContext, logger, database, deviceManager)
-	restoreDefaultCellularRadios(startupContext, logger, database, deviceManager)
+	configureDeviceBackends(deviceStartupContext, logger, database, deviceManager)
+	restoreDefaultCellularRadios(deviceStartupContext, logger, database, deviceManager)
 	defer func() {
 		stopContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -249,7 +260,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	var onIncomingCall func(context.Context, ims.ReceivedCall) error
 
 	vowifiManager, err := configureVoWiFiRuntime(
-		startupContext,
+		deviceStartupContext,
 		logger,
 		database,
 		deviceManager,
@@ -770,7 +781,7 @@ func protectVoWiFiStartupRadioWithRetry(
 		return nil
 	}
 	retryBudget := time.Duration(attempts)*flightModeTransitionTimeout + time.Duration(attempts-1)*delay
-	retryContext, cancelRetry := context.WithTimeout(context.WithoutCancel(ctx), retryBudget)
+	retryContext, cancelRetry := context.WithTimeout(ctx, retryBudget)
 	defer cancelRetry()
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {

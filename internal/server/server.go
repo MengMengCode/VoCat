@@ -183,6 +183,10 @@ type VoWiFiController interface {
 	RequestReconnect(string) (vowifi.State, error)
 }
 
+type VoWiFiSMSSyncController interface {
+	ModemSMSSyncBlocked(string) bool
+}
+
 type VoWiFiMaintenanceController interface {
 	BeginMaintenance(string) error
 	EndMaintenance(string)

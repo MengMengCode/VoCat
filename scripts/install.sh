@@ -507,7 +507,10 @@ acquire_modem_control() {
     [ -x "$MODEM_RECOVERY_SCRIPT" ] || return 0
     mkdir -p "$MODEM_LOCK_DIR" || return 1
     if [ ! -e "$MODEM_LOCK_FILE" ]; then
-        printf '%s\n' lock > "$MODEM_LOCK_FILE" || return 1
+        if ! printf '%s\n' lock > "$MODEM_LOCK_FILE"; then
+            rm -f "$MODEM_LOCK_FILE"
+            return 1
+        fi
         if ! : > "$MODEM_LOCK_OWNER"; then
             rm -f "$MODEM_LOCK_FILE"
             return 1
@@ -521,7 +524,10 @@ release_modem_control() {
 start_service() {
     if ! acquire_modem_control; then
         logger -t vocat "cannot acquire GL.iNet modem recovery lock"
-        return 1
+        # rc.common's rc_procd ignores start_service's return value and would
+        # otherwise submit an empty service definition. Exit before its
+        # unconditional procd_close_service call and preserve the failure status.
+        exit 1
     fi
     procd_open_instance
     procd_set_param command "$PROGRAM" serve
