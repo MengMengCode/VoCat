@@ -321,7 +321,7 @@ func (manager *Manager) SetFlight(
 			client,
 			fmt.Sprintf("AT+CFUN=%d", target),
 		); err != nil {
-			recoveredClient, recoveredMode, recoveryErr := manager.recoverOperatingModeAfterTransportLoss(
+			_, recoveredMode, recoveryErr := manager.recoverOperatingModeAfterTransportLoss(
 				ctx, id, state, client, target, err,
 			)
 			if recoveryErr != nil {
@@ -333,7 +333,6 @@ func (manager *Manager) SetFlight(
 					RadioOff:     isRadioOffMode(previous),
 				}, recoveryErr
 			}
-			client = recoveredClient
 			current = recoveredMode
 			currentKnown = true
 		}
@@ -341,14 +340,21 @@ func (manager *Manager) SetFlight(
 	if !currentKnown {
 		current, err = manager.readOperatingMode(ctx, client)
 		if err != nil {
-			manager.setResult(id, state, nil, err)
-			return FlightResult{
-				PreviousMode: previous,
-				CurrentMode:  target,
-				Changed:      changed,
-				FlightMode:   isRadioOffMode(target),
-				RadioOff:     isRadioOffMode(target),
-			}, err
+			recoveredClient, recoveredMode, recoveryErr := manager.recoverOperatingModeAfterTransportLoss(
+				ctx, id, state, client, target, err,
+			)
+			if recoveryErr != nil {
+				manager.setResult(id, state, nil, recoveryErr)
+				return FlightResult{
+					PreviousMode: previous,
+					CurrentMode:  target,
+					Changed:      changed,
+					FlightMode:   isRadioOffMode(target),
+					RadioOff:     isRadioOffMode(target),
+				}, recoveryErr
+			}
+			client = recoveredClient
+			current = recoveredMode
 		}
 	}
 	if !enabled && !isRadioOffMode(current) {

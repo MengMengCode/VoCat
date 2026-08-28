@@ -852,12 +852,11 @@ func shouldDeferModemSMSSync(state vowifi.State, stateErr error) bool {
 	if stateErr != nil || !state.Enabled {
 		return false
 	}
-	// An enabled VoWiFi policy keeps cellular RF off. Even after IMS reaches
-	// SMSReady, EC20 AT+CMGL can block until its command timeout or close the
-	// serial session, delaying every SMS-page request and competing with SIM/AKA
-	// work. SIP MESSAGE delivery persists live IMS SMS; scan modem storage only
-	// after VoWiFi is disabled or a terminal failure restores cellular radio.
-	return state.Phase != vowifi.PhaseFailed
+	// An enabled VoWiFi policy owns the UICC/AT path, including the interval
+	// between a failure and its automatic retry. EC20 AT+CMGL can hold the device
+	// lock for its full timeout and delay that retry. SIP MESSAGE persists live
+	// IMS SMS; scan modem storage only after the policy is explicitly disabled.
+	return true
 }
 
 // StartSMSSyncLoop periodically persists inbound cellular SMS even when no

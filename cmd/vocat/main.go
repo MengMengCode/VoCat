@@ -42,6 +42,13 @@ import (
 
 const flightModeTransitionTimeout = 45 * time.Second
 
+func startupFlightModeContext(parent context.Context) (context.Context, context.CancelFunc) {
+	// Startup has a short database/configuration deadline. CFUN transitions on
+	// EC20 can legitimately outlive it while USB disappears and re-enumerates,
+	// so retain startup values without inheriting that deadline.
+	return context.WithTimeout(context.WithoutCancel(parent), flightModeTransitionTimeout)
+}
+
 func main() {
 	logs := loghub.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}), 2000)
 	logger := slog.New(logs)
@@ -464,7 +471,7 @@ func restoreDefaultCellularRadios(
 				continue
 			}
 		}
-		restoreContext, cancel := context.WithTimeout(ctx, flightModeTransitionTimeout)
+		restoreContext, cancel := startupFlightModeContext(ctx)
 		_, err = manager.SetFlight(restoreContext, entry.ID, false)
 		cancel()
 		if err != nil {
@@ -759,9 +766,15 @@ func protectVoWiFiStartupRadioWithRetry(
 	attempts int,
 	delay time.Duration,
 ) error {
+	if attempts <= 0 {
+		return nil
+	}
+	retryBudget := time.Duration(attempts)*flightModeTransitionTimeout + time.Duration(attempts-1)*delay
+	retryContext, cancelRetry := context.WithTimeout(context.WithoutCancel(ctx), retryBudget)
+	defer cancelRetry()
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		flightContext, cancel := context.WithTimeout(ctx, flightModeTransitionTimeout)
+		flightContext, cancel := context.WithTimeout(retryContext, flightModeTransitionTimeout)
 		_, lastErr = manager.SetFlight(flightContext, physicalID, true)
 		cancel()
 		if lastErr == nil {
@@ -772,11 +785,11 @@ func protectVoWiFiStartupRadioWithRetry(
 		}
 		timer := time.NewTimer(delay)
 		select {
-		case <-ctx.Done():
+		case <-retryContext.Done():
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return errors.Join(lastErr, ctx.Err())
+			return errors.Join(lastErr, retryContext.Err())
 		case <-timer.C:
 		}
 	}
