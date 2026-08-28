@@ -939,6 +939,9 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 			_, _ = manager.Refresh(refreshContext, id)
 			cancelRefresh()
 			manager.unlockESIM()
+			mbnContext, cancelMBN := context.WithTimeout(context.WithoutCancel(ctx), profileSwitchVerificationTimeout(manager))
+			defer cancelMBN()
+			manager.reconcileEC20MBNAfterProfileSwitchBestEffort(mbnContext, id, iccid)
 			return nil
 		}
 	}
@@ -953,7 +956,13 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	if err := manager.waitForESIMRecovery(verifyContext, id); err != nil {
 		return err
 	}
-	return manager.verifySwitchedICCID(verifyContext, id, iccid)
+	if err := manager.verifySwitchedICCID(verifyContext, id, iccid); err != nil {
+		return err
+	}
+	mbnContext, cancelMBN := context.WithTimeout(context.WithoutCancel(ctx), profileSwitchVerificationTimeout(manager))
+	defer cancelMBN()
+	manager.reconcileEC20MBNAfterProfileSwitchBestEffort(mbnContext, id, iccid)
+	return nil
 }
 
 type esimCATBusyRetryKey struct{}
