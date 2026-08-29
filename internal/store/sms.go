@@ -144,6 +144,9 @@ func saveSMSMessage(
 			// A storage rescan can happen after an eSIM profile switch. The first
 			// durable subscription identity belongs to the delivery; never replace
 			// it with whichever profile happens to be active for a later segment.
+			if canonicalIMEI := strings.TrimSpace(existing.ModemIMEI); canonicalIMEI != "" {
+				value.ModemIMEI = canonicalIMEI
+			}
 			preserveSMSSubscriptionIdentity(&value, existing)
 			if !changed {
 				if value.Read != existing.Read {
@@ -408,21 +411,26 @@ func (s *Store) ApplySMSDeliveryReport(ctx context.Context, report SMSDeliveryRe
 		return SMSMessage{}, fmt.Errorf("begin SMS delivery report: %w", err)
 	}
 	defer tx.Rollback()
+	// Prefer the report's live IMEI when it identifies a stored submission, but
+	// fall back to the stable device id because IMS session and device snapshots
+	// can legitimately expose different IMEI values during a reconnect.
 	query := smsMessageSelect + `
-		WHERE ((? <> '' AND modem_imei = ?) OR (? = '' AND device_id = ?))
+		WHERE ((? <> '' AND modem_imei = ?) OR (? <> '' AND device_id = ?))
 			AND direction IN ('outbound', 'sent')
 			AND (? = '' OR imsi = ?)
 			AND (? = '' OR peer = ?)
 			AND (? = '' OR source = ?)
-		ORDER BY created_at DESC, id DESC
+		ORDER BY CASE WHEN ? <> '' AND modem_imei = ? THEN 0 ELSE 1 END,
+			created_at DESC, id DESC
 		LIMIT 256`
 	rows, err := tx.QueryContext(
 		ctx,
 		query,
-		report.ModemIMEI, report.ModemIMEI, report.ModemIMEI, report.DeviceID,
+		report.ModemIMEI, report.ModemIMEI, report.DeviceID, report.DeviceID,
 		report.IMSI, report.IMSI,
 		report.Peer, report.Peer,
 		report.Source, report.Source,
+		report.ModemIMEI, report.ModemIMEI,
 	)
 	if err != nil {
 		return SMSMessage{}, fmt.Errorf("find SMS delivery target: %w", err)

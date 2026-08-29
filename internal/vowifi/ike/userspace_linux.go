@@ -271,6 +271,7 @@ func (handle *linuxUserspaceHandle) configure(ctx context.Context) error {
 	return nil
 }
 
+// configureOpenWrtFirewall prepares fw4 access for the dynamic VoWiFi tunnel.
 func (handle *linuxUserspaceHandle) configureOpenWrtFirewall(ctx context.Context) error {
 	command := strings.TrimSpace(handle.nftCommand)
 	if command == "" {
@@ -296,6 +297,7 @@ func (handle *linuxUserspaceHandle) configureOpenWrtFirewall(ctx context.Context
 	return nil
 }
 
+// ensureOpenWrtFirewall installs any managed fw4 rules missing after a reload.
 func (handle *linuxUserspaceHandle) ensureOpenWrtFirewall(ctx context.Context) error {
 	if len(handle.firewallRules) == 0 {
 		return nil
@@ -322,6 +324,7 @@ func (handle *linuxUserspaceHandle) ensureOpenWrtFirewall(ctx context.Context) e
 	return nil
 }
 
+// maintainOpenWrtFirewall restores managed rules while the tunnel remains open.
 func (handle *linuxUserspaceHandle) maintainOpenWrtFirewall() {
 	defer handle.wait.Done()
 	if len(handle.firewallRules) == 0 {
@@ -341,6 +344,7 @@ func (handle *linuxUserspaceHandle) maintainOpenWrtFirewall() {
 	}
 }
 
+// commandErrorText combines command output and its execution error for logs.
 func commandErrorText(output []byte, err error) string {
 	message := strings.TrimSpace(string(output))
 	if message == "" && err != nil {
@@ -349,6 +353,7 @@ func commandErrorText(output []byte, err error) string {
 	return message
 }
 
+// cleanupOpenWrtFirewall removes only the fw4 rules owned by this tunnel.
 func (handle *linuxUserspaceHandle) cleanupOpenWrtFirewall(ctx context.Context) error {
 	if len(handle.firewallRules) == 0 {
 		return nil

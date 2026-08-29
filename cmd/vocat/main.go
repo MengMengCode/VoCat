@@ -817,6 +817,21 @@ type vowifiDeviceAdapter interface {
 	vowifi.RadioController
 }
 
+// receivedIMSSMSMessageID returns a session-independent identity for an IMS SMS.
+func receivedIMSSMSMessageID(message ims.ReceivedSMS) string {
+	if message.Concat == nil || message.Concat.Total <= 1 {
+		return message.MessageID
+	}
+	// A segment of a carrier-split long SMS over IMS. Address the whole
+	// message by the configured device rather than the current IMS session's
+	// reported IMEI. A reconnect can expose another IMEI while later segments
+	// of the same message are still in flight.
+	return store.StableConcatMessageID(
+		"ims", "", message.DeviceID, message.From,
+		message.Concat.Reference, message.Concat.Total,
+	)
+}
+
 func newVoWiFiOrchestrator(
 	deviceConfig store.Device,
 	database *store.Store,
@@ -862,16 +877,7 @@ func newVoWiFiOrchestrator(
 			if message.Concat != nil && message.Concat.Total > 0 {
 				partsTotal = message.Concat.Total
 			}
-			messageID := message.MessageID
-			if message.Concat != nil && message.Concat.Total > 1 {
-				// A segment of a carrier-split long SMS over IMS. Address the whole
-				// message with a stable id so SaveSMSMessage folds every segment
-				// into one progressively merged row instead of one row per segment.
-				messageID = store.StableConcatMessageID(
-					"ims", modemIMEI, message.DeviceID, message.From,
-					message.Concat.Reference, message.Concat.Total,
-				)
-			}
+			messageID := receivedIMSSMSMessageID(message)
 			_, saveErr := database.SaveSMSMessage(ctx, store.SMSMessage{
 				MessageID:  messageID,
 				DeviceID:   message.DeviceID,
