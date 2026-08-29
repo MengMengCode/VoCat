@@ -90,6 +90,44 @@ func nftRuleHandles(output string, comments map[string]struct{}) []string {
 	return handles
 }
 
+// staleOpenWrtFirewallRuleHandles returns managed rules for the same TUN
+// interface that do not belong to the current Child SA. This removes rules
+// left behind when a previous process was killed before graceful cleanup.
+func staleOpenWrtFirewallRuleHandles(
+	output string,
+	interfaceName string,
+	currentComments map[string]struct{},
+) []string {
+	interfaceName = strings.TrimSpace(interfaceName)
+	if interfaceName == "" {
+		return nil
+	}
+	interfaceMatch := `iifname "` + interfaceName + `"`
+	var handles []string
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.Contains(line, interfaceMatch) ||
+			!strings.Contains(line, `comment "`+openWrtFirewallCommentPrefix) {
+			continue
+		}
+		current := false
+		for comment := range currentComments {
+			if strings.Contains(line, `comment "`+comment+`"`) {
+				current = true
+				break
+			}
+		}
+		if current {
+			continue
+		}
+		match := nftHandlePattern.FindStringSubmatch(strings.TrimSpace(line))
+		if len(match) == 2 {
+			handles = append(handles, match[1])
+		}
+	}
+	sort.Strings(handles)
+	return handles
+}
+
 func firewallRuleComments(rules []openWrtFirewallRule) map[string]struct{} {
 	result := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {

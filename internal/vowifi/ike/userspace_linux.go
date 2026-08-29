@@ -312,6 +312,13 @@ func (handle *linuxUserspaceHandle) ensureOpenWrtFirewall(ctx context.Context) e
 		return fmt.Errorf("inspect fw4 input chain: %s", commandErrorText(output, err))
 	}
 	current := string(output)
+	comments := firewallRuleComments(handle.firewallRules)
+	for _, nftHandle := range staleOpenWrtFirewallRuleHandles(current, handle.config.Name, comments) {
+		remove := exec.CommandContext(ctx, command, "delete", "rule", "inet", "fw4", "input", "handle", nftHandle)
+		if output, err := remove.CombinedOutput(); err != nil {
+			return fmt.Errorf("remove stale fw4 rule %s: %s", nftHandle, commandErrorText(output, err))
+		}
+	}
 	for _, rule := range handle.firewallRules {
 		if strings.Contains(current, `comment "`+rule.comment+`"`) {
 			continue
