@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -817,17 +819,30 @@ type vowifiDeviceAdapter interface {
 	vowifi.RadioController
 }
 
-// receivedIMSSMSMessageID returns a session-independent identity for an IMS SMS.
+// receivedIMSSMSMessageID returns a session-independent, subscription-scoped
+// identity for an IMS SMS.
 func receivedIMSSMSMessageID(message ims.ReceivedSMS) string {
 	if message.Concat == nil || message.Concat.Total <= 1 {
 		return message.MessageID
 	}
+	subscriptionID := firstNonEmpty(
+		strings.TrimSpace(message.ICCID),
+		strings.TrimSpace(message.IMSI),
+	)
+	if subscriptionID == "" {
+		// Without a subscription identity, reusing the concat reference after an
+		// eSIM switch is indistinguishable from a later segment. Keep the IMS
+		// delivery identity instead of risking a cross-profile merge.
+		return message.MessageID
+	}
 	// A segment of a carrier-split long SMS over IMS. Address the whole
 	// message by the configured device rather than the current IMS session's
-	// reported IMEI. A reconnect can expose another IMEI while later segments
-	// of the same message are still in flight.
+	// reported IMEI, and include the subscription so a later eSIM profile cannot
+	// reuse the same sender/reference tuple and merge into the old message.
+	fingerprint := sha256.Sum256([]byte(subscriptionID))
+	deviceSubscription := message.DeviceID + ":subscription:" + hex.EncodeToString(fingerprint[:])
 	return store.StableConcatMessageID(
-		"ims", "", message.DeviceID, message.From,
+		"ims", "", deviceSubscription, message.From,
 		message.Concat.Reference, message.Concat.Total,
 	)
 }
