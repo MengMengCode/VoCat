@@ -319,8 +319,12 @@ func TestSyncModemSMSSeparatesReusedConcatReferencesWithoutCursorChurn(t *testin
 		}
 	}
 	messages := []device.SMSMessage{
-		part(20, 1, "old-a "), part(21, 2, "old-b"),
-		part(42, 1, "new-a "), part(43, 2, "new-b"),
+		// Storage slot 21 and 43 contain unrelated messages that the modem did
+		// not return in this filtered view. Multipart segments still belong to
+		// the first segment's actual slot, rather than an inferred consecutive
+		// slot number.
+		part(20, 1, "old-a "), part(25, 2, "old-b"),
+		part(42, 1, "new-a "), part(47, 2, "new-b"),
 	}
 	server := &Server{
 		store: database, logger: regionTestLogger(),

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -683,6 +684,7 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 			snapshotString(currentEntry.Snapshot, func(snapshot *device.Snapshot) string { return snapshot.IMEI }),
 			config.ModemIMEI,
 		)
+		concatSources := modemSMSConcatSources(messages)
 		for _, message := range messages {
 			if message.Direction == device.SMSDirectionStatusReport &&
 				message.MessageReference != nil && message.StatusCode != nil {
@@ -718,7 +720,7 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 			if message.Direction == device.SMSDirectionSubmitted {
 				direction = "outbound"
 			}
-			messageID := modemSMSMessageID(message, modemIMEI, config.ID, peer)
+			messageID := modemSMSMessageID(message, modemIMEI, config.ID, peer, concatSources[modemSMSStorageKey(message)])
 			extra, _ := json.Marshal(map[string]any{
 				"modem_index":        message.Index,
 				"storage":            message.Storage,
@@ -769,7 +771,7 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 	}
 }
 
-func modemSMSMessageID(message device.SMSMessage, modemIMEI, deviceID, peer string) string {
+func modemSMSMessageID(message device.SMSMessage, modemIMEI, deviceID, peer, concatSource string) string {
 	digest := sha256.Sum256([]byte(message.RawPDU))
 	messageID := fmt.Sprintf(
 		"modem:%s:%d:%s",
@@ -783,13 +785,7 @@ func modemSMSMessageID(message device.SMSMessage, modemIMEI, deviceID, peer stri
 		// into one row without colliding with an older message that reused the
 		// same UDH reference. SM and ME can expose duplicate copies of the same
 		// slots, so the generation uses the first segment index, not storage.
-		source := "cellular_at"
-		if message.Concat.Sequence > 0 {
-			baseIndex := message.Index - (message.Concat.Sequence - 1)
-			if baseIndex >= 0 {
-				source = fmt.Sprintf("cellular_at:%d", baseIndex)
-			}
-		}
+		source := firstNonEmpty(concatSource, "cellular_at")
 		messageID = store.StableConcatMessageID(
 			source, modemIMEI, deviceID, peer,
 			message.Concat.Reference, message.Concat.Total,
@@ -838,6 +834,60 @@ func (s *Server) smsLocalPhone(
 		return strings.TrimSpace(snapshot.Phone.Number)
 	}
 	return ""
+}
+
+// modemSMSConcatSources identifies every multipart group by the storage slot of
+// its first segment. Carrier and modem storage can interleave unrelated SMS
+// between segments, so deriving that slot through index arithmetic separates a
+// single long SMS into several rows. The real first-segment slot also keeps
+// messages that reuse the same UDH reference in distinct groups.
+func modemSMSConcatSources(messages []device.SMSMessage) map[string]string {
+	firstSlots := make(map[string][]int)
+	for _, message := range messages {
+		if message.Concat == nil || message.Concat.Total <= 1 || message.Concat.Sequence != 1 {
+			continue
+		}
+		peer := firstNonEmpty(message.From, message.To)
+		if peer == "" {
+			continue
+		}
+		key := modemSMSConcatKey(message, peer)
+		firstSlots[key] = append(firstSlots[key], message.Index)
+	}
+	for key := range firstSlots {
+		sort.Ints(firstSlots[key])
+	}
+
+	result := make(map[string]string)
+	for _, message := range messages {
+		if message.Concat == nil || message.Concat.Total <= 1 {
+			continue
+		}
+		peer := firstNonEmpty(message.From, message.To)
+		if peer == "" {
+			continue
+		}
+		source := ""
+		for _, firstSlot := range firstSlots[modemSMSConcatKey(message, peer)] {
+			if firstSlot > message.Index {
+				break
+			}
+			source = fmt.Sprintf("cellular_at:%d", firstSlot)
+		}
+		if source == "" {
+			source = fmt.Sprintf("cellular_at:pending:%d", message.Index)
+		}
+		result[modemSMSStorageKey(message)] = source
+	}
+	return result
+}
+
+func modemSMSConcatKey(message device.SMSMessage, peer string) string {
+	return peer + ":" + strconv.Itoa(message.Concat.Reference) + ":" + strconv.Itoa(message.Concat.Total)
+}
+
+func modemSMSStorageKey(message device.SMSMessage) string {
+	return message.Storage + ":" + strconv.Itoa(message.Index)
 }
 
 func (s *Server) deleteSMSMessages(ctx context.Context, messages []store.SMSMessage) error {
@@ -897,13 +947,14 @@ func (s *Server) deleteModemSMS(ctx context.Context, stored store.SMSMessage) er
 	if err != nil {
 		return fmt.Errorf("list modem SMS before deletion: %w", err)
 	}
+	concatSources := modemSMSConcatSources(modemMessages)
 	locations := make(map[string]device.SMSMessage)
 	for _, message := range modemMessages {
 		peer := firstNonEmpty(message.From, message.To)
-		if peer == "" || modemSMSMessageID(message, stored.ModemIMEI, config.ID, peer) != stored.MessageID {
+		if peer == "" || modemSMSMessageID(message, stored.ModemIMEI, config.ID, peer, concatSources[modemSMSStorageKey(message)]) != stored.MessageID {
 			continue
 		}
-		locations[message.Storage+":"+strconv.Itoa(message.Index)] = message
+		locations[modemSMSStorageKey(message)] = message
 	}
 	for _, message := range locations {
 		deleteContext, cancelDelete := context.WithTimeout(ctx, 10*time.Second)
