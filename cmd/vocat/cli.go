@@ -39,9 +39,6 @@ Usage:
                        --force           Reinstall even at the same version.
                      Environment:
                        VOCAT_REPO        Fallback for --repo.
-                       VOCAT_IMS_DEFAULT_USER_AGENT
-                                         Fallback User-Agent when the carrier
-                                         profile does not define one.
                        GITHUB_TOKEN      Optional bearer token for private repos
                                          or higher rate limits.
   vocat menu         Interactive lifecycle menu (root on the host):
@@ -52,5 +49,10 @@ Usage:
 When run without a subcommand on a non-TTY (e.g. systemd), vocat starts the
 HTTP server using VOCAT_* environment variables or $VOCAT_CONFIG for
 configuration.
+
+Server environment:
+  VOCAT_IMS_DEFAULT_USER_AGENT
+                     Final fallback IMS SIP User-Agent when carrier, provider,
+                     and generated device identity profiles do not define one.
 `, buildinfo.Version)
 }
