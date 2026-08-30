@@ -315,8 +315,8 @@ func TestXFRMPlanContainsFourStatesAndProtocolSpecificPolicies(t *testing.T) {
 		"udp 40666 50600 out": false,
 		"tcp 50600 40666 in":  false,
 		"udp 50600 40666 in":  false,
-		"tcp * 55610 in":      false,
-		"udp * 55610 in":      false,
+		"tcp 50601 55610 in":  false,
+		"udp 50601 55610 in":  false,
 		"tcp 55610 50601 out": false,
 		"udp 55610 50601 out": false,
 	}

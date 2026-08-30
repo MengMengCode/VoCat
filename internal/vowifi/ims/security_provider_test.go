@@ -100,7 +100,7 @@ func TestSessionCloseCleansIPSecAfterCallerDeadline(t *testing.T) {
 	}
 }
 
-func TestProviderNegotiatesIPSecAndRegistersOverProtectedTCP(t *testing.T) {
+func TestProviderNegotiatesIPSecAndRegistersOverInboundFlowTCP(t *testing.T) {
 	localIP := net.ParseIP("127.0.0.1")
 	remoteIP := net.ParseIP("127.0.0.2")
 	initial, err := net.ListenTCP("tcp", &net.TCPAddr{IP: remoteIP})
@@ -246,6 +246,222 @@ func TestProviderNegotiatesIPSecAndRegistersOverProtectedTCP(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedRefreshUsesTheOfferedCandidateSecurityContext(t *testing.T) {
+	localIP := net.ParseIP("127.0.0.1")
+	remoteIP := net.ParseIP("127.0.0.2")
+	oldListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: remoteIP})
+	if err != nil {
+		t.Skipf("secondary loopback address is unavailable: %v", err)
+	}
+	defer oldListener.Close()
+	candidateListener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: remoteIP})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer candidateListener.Close()
+	for _, listener := range []*net.TCPListener{oldListener, candidateListener} {
+		if err := listener.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	activeClientPort, err := availableProtectedPort(localIP, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeServerPort, err := availableProtectedPort(localIP, activeClientPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcscfClientPort, err := availableProtectedPort(remoteIP, candidateListener.Addr().(*net.TCPAddr).Port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonceBytes := make([]byte, 32)
+	for index := range nonceBytes {
+		nonceBytes[index] = byte(index + 1)
+	}
+	nonce := base64.StdEncoding.EncodeToString(nonceBytes)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		oldConnection, acceptErr := oldListener.AcceptTCP()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer oldConnection.Close()
+		oldReader := bufio.NewReader(oldConnection)
+		packet, readErr := readSIPPacket(oldReader)
+		if readErr != nil {
+			serverDone <- readErr
+			return
+		}
+		if packet.Request == nil {
+			serverDone <- errors.New("refresh REGISTER is missing")
+			return
+		}
+		securityClient := packet.Request.value("Security-Client")
+		offers := splitHeaderValues([]string{securityClient})
+		if len(offers) == 0 {
+			serverDone <- errors.New("refresh REGISTER omitted Security-Client")
+			return
+		}
+		proposal, parseErr := parseSecurityMechanism(offers[0])
+		if parseErr != nil {
+			serverDone <- parseErr
+			return
+		}
+		pcscfClientSPI, pcscfServerSPI := nonCollidingServerSPIs(proposal.spiClient, proposal.spiServer)
+		securityServer := fmt.Sprintf(
+			"ipsec-3gpp;q=1.000;alg=hmac-sha-1-96;prot=esp;mod=trans;"+
+				"ealg=aes-cbc;spi-c=%d;spi-s=%d;port-c=%d;port-s=%d",
+			pcscfClientSPI,
+			pcscfServerSPI,
+			pcscfClientPort,
+			candidateListener.Addr().(*net.TCPAddr).Port,
+		)
+		if _, writeErr := oldConnection.Write(testResponseForRequest(
+			401,
+			"Unauthorized",
+			packet.Request,
+			[]string{
+				`WWW-Authenticate: Digest realm="ims.example", nonce="` + nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
+				"Security-Server: " + securityServer,
+			},
+		)); writeErr != nil {
+			serverDone <- writeErr
+			return
+		}
+
+		candidateConnection, acceptErr := candidateListener.AcceptTCP()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer candidateConnection.Close()
+		if got := candidateConnection.RemoteAddr().(*net.TCPAddr).Port; got != proposal.portClient {
+			serverDone <- fmt.Errorf("candidate source port = %d, want %d", got, proposal.portClient)
+			return
+		}
+		candidatePacket, readErr := readSIPPacket(bufio.NewReader(candidateConnection))
+		if readErr != nil {
+			serverDone <- readErr
+			return
+		}
+		if candidatePacket.Request == nil || candidatePacket.Request.value("Security-Client") != securityClient {
+			serverDone <- errors.New("authenticated REGISTER changed the offered Security-Client")
+			return
+		}
+		if candidatePacket.Request.value("Authorization") == "" {
+			serverDone <- errors.New("authenticated REGISTER omitted Authorization")
+			return
+		}
+		serverDone <- func() error {
+			_, writeErr := candidateConnection.Write(testResponseForRequest(
+				200,
+				"OK",
+				candidatePacket.Request,
+				[]string{"Contact: " + candidatePacket.Request.value("Contact") + ";expires=600"},
+			))
+			return writeErr
+		}()
+	}()
+
+	dialContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	oldConnection, err := dialSIP(
+		dialContext,
+		"tcp",
+		localIP.String(),
+		activeClientPort,
+		oldListener.Addr().String(),
+	)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHandle := &fakeIPSecHandle{}
+	installer := &fakeIPSecInstaller{}
+	session := &Session{
+		provider: &Provider{
+			aka: &recordingAKA{result: vowifi.AKAResult{
+				RES: []byte{1, 2, 3, 4, 5, 6, 7, 8},
+				CK:  []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
+				IK:  []byte{16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31},
+			}},
+			installer: installer,
+			config: Config{
+				SecurityMode:       SecurityRequired,
+				TransactionTimeout: 3 * time.Second,
+			},
+		},
+		request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
+			IMSI: "001010123456789", HomeMCC: "001", HomeMNC: "01",
+		}},
+		identity: identitySet{
+			private: "001010123456789@ims.example",
+			public:  "sip:001010123456789@ims.example",
+			user:    "001010123456789",
+			domain:  "ims.example",
+		},
+		transport:  "tcp",
+		conn:       oldConnection,
+		reader:     bufio.NewReader(oldConnection),
+		sipLocalIP: localIP,
+		pcscfIP:    remoteIP,
+		endpoint: pcscfEndpoint{
+			host: remoteIP.String(), port: oldListener.Addr().(*net.TCPAddr).Port,
+		},
+		initialEndpoint: pcscfEndpoint{host: remoteIP.String(), port: 5060},
+		callID:          "authenticated-refresh",
+		fromTag:         "authenticated-refresh-tag",
+		instanceID:      "urn:uuid:authenticated-refresh",
+		cseq:            10,
+		securityProposal: securityProposal{
+			spiClient:                1001,
+			spiServer:                1002,
+			portClient:               activeClientPort,
+			portServer:               activeServerPort,
+			integrityAlgorithms:      []string{"hmac-sha-1-96"},
+			encryptionAlgorithmsList: []string{"aes-cbc"},
+		},
+		securityAgreement: securityAgreement{
+			selected: securityMechanism{
+				spiClient: 2001, spiServer: 2002,
+				portClient: pcscfClientPort, portServer: oldListener.Addr().(*net.TCPAddr).Port,
+				algorithm: "hmac-sha-1-96", encryption: "aes-cbc", protocol: "esp", mode: "trans",
+			},
+			verifyValue: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=aes-cbc",
+		},
+		securityActive:       true,
+		clientSecurityActive: true,
+		serverSecurityActive: true,
+		ipsecHandle:          oldHandle,
+		refreshContext:       context.Background(),
+	}
+
+	response, err := session.registerWithRuntimeOnFlow(context.Background(), 600, false, oldConnection)
+	if err != nil {
+		t.Fatalf("registerWithRuntimeOnFlow() error = %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("authenticated refresh status = %d", response.StatusCode)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+	session.receiveDone.Wait()
+	if oldHandle.closes() != 1 {
+		t.Fatalf("old SA close count = %d, want 1", oldHandle.closes())
+	}
+	if len(installer.installed()) != 1 {
+		t.Fatalf("candidate SA install count = %d, want 1", len(installer.installed()))
+	}
+	if connection, _, _, currentErr := session.currentOutboundFlow(); currentErr == nil {
+		_ = connection.Close()
+	}
+}
+
 func TestProviderRequiresSecurityServerBeforeAKA(t *testing.T) {
 	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
@@ -275,11 +491,10 @@ func TestProviderRequiresSecurityServerBeforeAKA(t *testing.T) {
 			return
 		}
 		serverDone <- func() error {
-			_, err := listener.WriteToUDP(testResponse(
+			_, err := listener.WriteToUDP(testResponseForHeaders(
 				401,
 				"Unauthorized",
-				headers["call-id"],
-				headers["cseq"],
+				headers,
 				[]string{
 					`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` +
 						nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
@@ -462,12 +677,10 @@ func serveProtectedRegistrar(
 		pcscfClientPort,
 		protectedListener.Addr().(*net.TCPAddr).Port,
 	)
-	callID := headers["call-id"]
-	if _, err := initialConnection.Write(testResponse(
+	if _, err := initialConnection.Write(testResponseForHeaders(
 		401,
 		"Unauthorized",
-		callID,
-		headers["cseq"],
+		headers,
 		[]string{
 			`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` +
 				nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
@@ -535,11 +748,10 @@ func serveProtectedRegistrar(
 		return result, errors.New("registration transaction did not advertise MESSAGE correctly")
 	}
 
-	if _, err := protectedConnection.Write(testResponse(
+	if _, err := protectedConnection.Write(testResponseForHeaders(
 		200,
 		"OK",
-		callID,
-		headers["cseq"],
+		headers,
 		[]string{
 			"P-Associated-URI: <sip:001010123456789@ims.mnc001.mcc001.3gppnetwork.org>, <tel:+8613800138000>",
 			"Contact: " + headers["contact"] + ";expires=600",
@@ -564,7 +776,7 @@ func serveProtectedRegistrar(
 		return result, fmt.Errorf("deregistration Security-Verify = %q", headers["security-verify"])
 	}
 	if _, err := protectedConnection.Write(
-		testResponse(200, "OK", callID, headers["cseq"], nil),
+		testResponseForHeaders(200, "OK", headers, nil),
 	); err != nil {
 		return result, err
 	}

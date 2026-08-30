@@ -52,6 +52,9 @@ func TestLinuxIPSecInstallerLifecycle(t *testing.T) {
 	if count := strings.Count(string(policies), "sport 40666 dport 50600"); count != 2 {
 		t.Fatalf("UE-client policy count = %d: %s", count, policies)
 	}
+	if count := strings.Count(string(policies), "sport 50601 dport 55610"); count != 2 {
+		t.Fatalf("P-CSCF-client policy count = %d: %s", count, policies)
+	}
 
 	closeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

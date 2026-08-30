@@ -68,7 +68,6 @@ type IMSRegisterOptions struct {
 const (
 	IMSContactFormatStandard = "standard"
 	IMSContactFormatATT      = "att"
-	IMSContactFormatGSMA     = "gsma"
 )
 
 type carrierProfileDocument struct {
@@ -341,7 +340,7 @@ func validCarrierProfileRule(rule carrierProfileRule) bool {
 		return false
 	}
 	if format := strings.ToLower(strings.TrimSpace(rule.IMS.RegisterOptions.ContactFormat)); format != "" &&
-		format != IMSContactFormatStandard && format != IMSContactFormatATT && format != IMSContactFormatGSMA {
+		format != IMSContactFormatStandard && format != IMSContactFormatATT {
 		return false
 	}
 	for _, value := range rule.IMS.RegisterOptions.ContactExtraTags {

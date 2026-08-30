@@ -17,13 +17,16 @@ type sipResponse struct {
 	Reason     string
 	Headers    map[string][]string
 	Body       []byte
+	rawHeaders []byte
 }
 
 type sipRequest struct {
-	Method  string
-	URI     string
-	Headers map[string][]string
-	Body    []byte
+	Method     string
+	URI        string
+	Headers    map[string][]string
+	Body       []byte
+	rawHeaders []byte
+	flow       string // only identifies the inbound SIP flow
 }
 
 func (request *sipRequest) values(name string) []string {
@@ -90,8 +93,10 @@ func parseSIPPacket(packet []byte) (sipPacket, error) {
 	}
 	if parsed.Response != nil {
 		parsed.Response.Body = append([]byte(nil), body[:contentLength]...)
+		parsed.Response.rawHeaders = append([]byte(nil), packet[:headerEnd+delimiterSize]...)
 	} else {
 		parsed.Request.Body = append([]byte(nil), body[:contentLength]...)
+		parsed.Request.rawHeaders = append([]byte(nil), packet[:headerEnd+delimiterSize]...)
 	}
 	return parsed, nil
 }
@@ -165,8 +170,9 @@ func readSIPPacketAfterStartLine(reader *bufio.Reader, startLine string) (sipPac
 			if parseErr != nil {
 				return sipPacket{}, parseErr
 			}
+			body := []byte(nil)
 			if contentLength > 0 {
-				body := make([]byte, contentLength)
+				body = make([]byte, contentLength)
 				if _, err := io.ReadFull(reader, body); err != nil {
 					return sipPacket{}, fmt.Errorf("ims: read SIP body: %w", err)
 				}
@@ -175,6 +181,11 @@ func readSIPPacketAfterStartLine(reader *bufio.Reader, startLine string) (sipPac
 				} else {
 					packet.Request.Body = body
 				}
+			}
+			if packet.Response != nil {
+				packet.Response.rawHeaders = append([]byte(nil), headerBytes...)
+			} else {
+				packet.Request.rawHeaders = append([]byte(nil), headerBytes...)
 			}
 			return packet, nil
 		}

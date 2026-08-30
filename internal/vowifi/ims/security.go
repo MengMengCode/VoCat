@@ -69,6 +69,23 @@ type IPSecSAInstaller interface {
 	Install(context.Context, IPSecSAConfig) (IPSecSAHandle, error)
 }
 
+// IPSecFlowPair identifies the two independent SIP flow SA pairs. A c-flow
+// pair protects UE-client/P-CSCF-server traffic; an s-flow pair protects
+// P-CSCF-client/UE-server traffic.
+type IPSecFlowPair uint8
+
+const (
+	IPSecCFlowPair IPSecFlowPair = iota + 1
+	IPSecSFlowPair
+)
+
+// IPSecFlowPairInstaller is implemented by installers that can manage the
+// two SIP flow SA pairs independently. Install remains the compatibility
+// interface for installers that only support installing the complete set.
+type IPSecFlowPairInstaller interface {
+	InstallPair(context.Context, IPSecSAConfig, IPSecFlowPair) (IPSecSAHandle, error)
+}
+
 type securityProposal struct {
 	spiClient                uint32
 	spiServer                uint32
@@ -168,16 +185,20 @@ func (proposal securityProposal) headerValue() string {
 }
 
 func (session *Session) securityClientValue() string {
-	if vowifi.IsATT310280(session.request.Identity) {
+	return securityClientValueForIdentity(session.request.Identity, session.securityProposal)
+}
+
+func securityClientValueForIdentity(identity vowifi.SIMIdentity, proposal securityProposal) string {
+	if vowifi.IsATT310280(identity) {
 		return fmt.Sprintf(
 			"ipsec-3gpp; alg=hmac-sha-1-96; ealg=aes-cbc; prot=esp; mod=trans; spi-c=%d; spi-s=%d; port-c=%d; port-s=%d",
-			session.securityProposal.spiClient,
-			session.securityProposal.spiServer,
-			session.securityProposal.portClient,
-			session.securityProposal.portServer,
+			proposal.spiClient,
+			proposal.spiServer,
+			proposal.portClient,
+			proposal.portServer,
 		)
 	}
-	return session.securityProposal.headerValue()
+	return proposal.headerValue()
 }
 
 func (proposal securityProposal) encryptionAlgorithm() string {
@@ -285,6 +306,30 @@ type securityMechanism struct {
 type securityAgreement struct {
 	selected    securityMechanism
 	verifyValue string
+}
+
+type installedIPSecContext struct {
+	all   IPSecSAHandle
+	cFlow IPSecSAHandle
+	sFlow IPSecSAHandle
+}
+
+func (context installedIPSecContext) close(ctx context.Context) error {
+	if context.all != nil {
+		return context.all.Close(ctx)
+	}
+	var closeErrors []error
+	if context.cFlow != nil {
+		if err := context.cFlow.Close(ctx); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	if context.sFlow != nil {
+		if err := context.sFlow.Close(ctx); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 func parseSecurityAgreement(values []string, proposal securityProposal) (securityAgreement, error) {
@@ -563,6 +608,123 @@ func buildXFRMInstallPlan(config IPSecSAConfig) ([]xfrmOperation, error) {
 	return operations, nil
 }
 
+type xfrmStateSpec struct {
+	description string
+	source      net.IP
+	destination net.IP
+	spi         uint32
+	reqid       uint32
+}
+
+func xfrmStateSpecs(config IPSecSAConfig) []xfrmStateSpec {
+	return []xfrmStateSpec{
+		{"outbound UE-client to P-CSCF-server state", config.LocalIP, config.RemoteIP, config.PCSCFServerSPI, clientPairReqID(config)},
+		{"inbound P-CSCF-server to UE-client state", config.RemoteIP, config.LocalIP, config.UEClientSPI, clientPairReqID(config)},
+		{"inbound P-CSCF-client to UE-server state", config.RemoteIP, config.LocalIP, config.UEServerSPI, serverPairReqID(config)},
+		{"outbound UE-server to P-CSCF-client state", config.LocalIP, config.RemoteIP, config.PCSCFClientSPI, serverPairReqID(config)},
+	}
+}
+
+func xfrmStateInstallOperation(config IPSecSAConfig, state xfrmStateSpec) xfrmOperation {
+	arguments := []string{
+		"xfrm", "state", "add",
+		"src", state.source.String(),
+		"dst", state.destination.String(),
+		"proto", "esp",
+		"spi", fmt.Sprintf("0x%08x", state.spi),
+		"reqid", strconv.FormatUint(uint64(state.reqid), 10),
+		"mode", "transport",
+		"replay-window", "32",
+		"auth-trunc", xfrmIntegrityAlgorithm(config), "0x" + hex.EncodeToString(config.IntegrityKey), "96",
+	}
+	switch ipsecEncryptionAlgorithm(config) {
+	case "aes-cbc":
+		arguments = append(arguments, "enc", "cbc(aes)", "0x"+hex.EncodeToString(config.EncryptionKey))
+	case "des-ede3-cbc":
+		arguments = append(arguments, "enc", "cbc(des3_ede)", "0x"+hex.EncodeToString(config.EncryptionKey))
+	default:
+		arguments = append(arguments, "enc", "cipher_null", "")
+	}
+	return xfrmOperation{description: state.description, arguments: arguments}
+}
+
+func xfrmFlowPairIndexes(pair IPSecFlowPair) ([]int, error) {
+	switch pair {
+	case IPSecCFlowPair:
+		return []int{0, 1}, nil
+	case IPSecSFlowPair:
+		return []int{2, 3}, nil
+	default:
+		return nil, errors.New("ims: unknown ipsec SIP flow pair")
+	}
+}
+
+// buildXFRMFlowPairInstallPlan installs only one SIP flow's two ESP states
+// and policies. The complete config is retained so the pair uses the same
+// negotiated algorithms and key material as the other flow.
+func buildXFRMFlowPairInstallPlan(config IPSecSAConfig, pair IPSecFlowPair) ([]xfrmOperation, error) {
+	if err := validateIPSecSAConfig(config); err != nil {
+		return nil, err
+	}
+	indexes, err := xfrmFlowPairIndexes(pair)
+	if err != nil {
+		return nil, err
+	}
+	states := xfrmStateSpecs(config)
+	flows := xfrmFlows(config)
+	operations := make([]xfrmOperation, 0, 6)
+	for _, index := range indexes {
+		operations = append(operations, xfrmStateInstallOperation(config, states[index]))
+	}
+	for _, index := range indexes {
+		flow := flows[index]
+		for _, protocol := range flow.protocols {
+			operations = append(operations, xfrmOperation{
+				description: flow.description + " " + protocol + " policy",
+				arguments:   xfrmPolicyArgs(flow, protocol, false),
+			})
+		}
+	}
+	return operations, nil
+}
+
+func buildXFRMFlowPairCleanupPlan(config IPSecSAConfig, pair IPSecFlowPair) ([]xfrmOperation, error) {
+	if err := validateIPSecSAConfig(config); err != nil {
+		return nil, err
+	}
+	indexes, err := xfrmFlowPairIndexes(pair)
+	if err != nil {
+		return nil, err
+	}
+	flows := xfrmFlows(config)
+	operations := make([]xfrmOperation, 0, 6)
+	for index := len(indexes) - 1; index >= 0; index-- {
+		flow := flows[indexes[index]]
+		for protocolIndex := len(flow.protocols) - 1; protocolIndex >= 0; protocolIndex-- {
+			protocol := flow.protocols[protocolIndex]
+			operations = append(operations, xfrmOperation{
+				description: "delete " + flow.description + " " + protocol + " policy",
+				arguments:   xfrmPolicyArgs(flow, protocol, true),
+			})
+		}
+	}
+	states := xfrmStateSpecs(config)
+	for index := len(indexes) - 1; index >= 0; index-- {
+		state := states[indexes[index]]
+		operations = append(operations, xfrmOperation{
+			description: "delete ipsec-3gpp state",
+			arguments: []string{
+				"xfrm", "state", "delete",
+				"src", state.source.String(),
+				"dst", state.destination.String(),
+				"proto", "esp",
+				"spi", fmt.Sprintf("0x%08x", state.spi),
+			},
+		})
+	}
+	return operations, nil
+}
+
 func buildXFRMCleanupPlan(config IPSecSAConfig) []xfrmOperation {
 	var operations []xfrmOperation
 	flows := xfrmFlows(config)
@@ -683,7 +845,7 @@ func xfrmFlows(config IPSecSAConfig) []xfrmFlow {
 		{
 			description: "P-CSCF-client to UE-server", family: family,
 			sourcePrefix: remotePrefix, destinationPrefix: localPrefix,
-			sourcePort: 0, destinationPort: config.UEServerPort,
+			sourcePort: config.PCSCFClientPort, destinationPort: config.UEServerPort,
 			direction: "in", templateSource: config.RemoteIP, templateDestination: config.LocalIP,
 			spi: config.UEServerSPI, reqid: serverPairReqID(config),
 			protocols: []string{"tcp", "udp"},
@@ -830,13 +992,13 @@ func (session *Session) securityFromResponse(response *sipResponse) (securityAgr
 func (session *Session) declineSecurity() {
 	session.securityDeclined = true
 	session.endpoint = session.initialEndpoint
-	if session.protectedTCP != nil {
-		_ = session.protectedTCP.Close()
-		session.protectedTCP = nil
+	if session.inboundTCPListener != nil {
+		_ = session.inboundTCPListener.Close()
+		session.inboundTCPListener = nil
 	}
-	if session.protectedUDP != nil {
-		_ = session.protectedUDP.Close()
-		session.protectedUDP = nil
+	if session.inboundUDP != nil {
+		_ = session.inboundUDP.Close()
+		session.inboundUDP = nil
 	}
 	session.securityProposal = securityProposal{}
 }
@@ -847,94 +1009,212 @@ func (session *Session) activateIPSec(
 	ck []byte,
 	ik []byte,
 ) error {
-	if session.securityActive {
+	if session.cFlowSecurityActive() {
 		return errors.New("ims: ipsec-3gpp is already active")
 	}
 	if !session.securityOffered() {
 		return ErrIPSecAgreementRequired
 	}
-	encryptionKey, integrityKey, err := expandIPSecKeys(ck, ik, agreement.selected.encryption, agreement.selected.algorithm)
+	connection, _, _, err := session.currentOutboundFlow()
 	if err != nil {
 		return err
 	}
-	defer zeroBytes(encryptionKey)
-	defer zeroBytes(integrityKey)
-
-	connection, _, _, err := session.currentConnection()
+	previousInstalled := installedIPSecContext{
+		all:   session.ipsecHandle,
+		cFlow: session.clientIPSecHandle,
+		sFlow: session.serverIPSecHandle,
+	}
+	installed, protectedConnection, err := session.installProtectedSecurityContext(
+		ctx, connection, session.securityProposal, agreement, ck, ik,
+		IPSecCFlowPair, IPSecSFlowPair,
+	)
 	if err != nil {
 		return err
+	}
+	_ = connection.Close()
+	if err := session.installOutboundFlow(protectedConnection); err != nil {
+		_ = protectedConnection.Close()
+		_ = installed.close(context.Background())
+		return err
+	}
+	session.endpoint.port = agreement.selected.portServer
+	session.securityAgreement = agreement
+	session.clientSecurityActive = true
+	session.serverSecurityActive = true
+	session.syncSecurityActive()
+	session.securityBootstrap = false
+	session.ipsecHandle = installed.all
+	session.clientIPSecHandle = installed.cFlow
+	session.serverIPSecHandle = installed.sFlow
+	session.retirePreviousSecurityContext(nil, previousInstalled)
+	return nil
+}
+
+// installProtectedSecurityContext installs and connects a candidate protected
+// SIP context without changing the session's active context. This is used by
+// authenticated re-registration so the existing context remains available
+// until the candidate REGISTER succeeds.
+func (session *Session) installProtectedSecurityContext(
+	ctx context.Context,
+	connection net.Conn,
+	proposal securityProposal,
+	agreement securityAgreement,
+	ck []byte,
+	ik []byte,
+	pairs ...IPSecFlowPair,
+) (installedIPSecContext, net.Conn, error) {
+	if connection == nil {
+		return installedIPSecContext{}, nil, errSIPConnectionUnavailable
 	}
 	localIP := addressIP(connection.LocalAddr())
 	remoteIP := addressIP(connection.RemoteAddr())
 	if localIP == nil || remoteIP == nil {
-		return errors.New("ims: protected SIP endpoints are unavailable")
+		return installedIPSecContext{}, nil, errors.New("ims: protected SIP endpoints are unavailable")
 	}
+	encryptionKey, integrityKey, err := expandIPSecKeys(ck, ik, agreement.selected.encryption, agreement.selected.algorithm)
+	if err != nil {
+		return installedIPSecContext{}, nil, err
+	}
+	defer zeroBytes(encryptionKey)
+	defer zeroBytes(integrityKey)
 	selected := agreement.selected
 	config := IPSecSAConfig{
 		LocalIP:             localIP,
 		RemoteIP:            remoteIP,
 		IntegrityAlgorithm:  selected.algorithm,
 		EncryptionAlgorithm: selected.encryption,
-		UEClientSPI:         session.securityProposal.spiClient,
-		UEServerSPI:         session.securityProposal.spiServer,
+		UEClientSPI:         proposal.spiClient,
+		UEServerSPI:         proposal.spiServer,
 		PCSCFClientSPI:      selected.spiClient,
 		PCSCFServerSPI:      selected.spiServer,
-		UEClientPort:        session.securityProposal.portClient,
-		UEServerPort:        session.securityProposal.portServer,
+		UEClientPort:        proposal.portClient,
+		UEServerPort:        proposal.portServer,
 		PCSCFClientPort:     selected.portClient,
 		PCSCFServerPort:     selected.portServer,
 		EncryptionKey:       encryptionKey,
 		IntegrityKey:        integrityKey,
 	}
-	handle, err := session.provider.installer.Install(ctx, config)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrIPSecInstall, err)
+	if len(pairs) == 0 {
+		pairs = []IPSecFlowPair{IPSecCFlowPair, IPSecSFlowPair}
 	}
-	if handle == nil {
-		return fmt.Errorf("%w: installer returned no handle", ErrIPSecInstall)
+	installed := installedIPSecContext{}
+	if pairInstaller, ok := session.provider.installer.(IPSecFlowPairInstaller); ok {
+		for _, pair := range pairs {
+			handle, installErr := pairInstaller.InstallPair(ctx, config, pair)
+			if installErr != nil {
+				_ = installed.close(context.Background())
+				return installedIPSecContext{}, nil, fmt.Errorf("%w: %v", ErrIPSecInstall, installErr)
+			}
+			if handle == nil {
+				_ = installed.close(context.Background())
+				return installedIPSecContext{}, nil, fmt.Errorf("%w: installer returned no handle", ErrIPSecInstall)
+			}
+			switch pair {
+			case IPSecCFlowPair:
+				installed.cFlow = handle
+			case IPSecSFlowPair:
+				installed.sFlow = handle
+			}
+		}
+	} else {
+		if len(pairs) != 2 {
+			return installedIPSecContext{}, nil, fmt.Errorf("%w: installer cannot manage an individual SIP flow pair", ErrIPSecInstall)
+		}
+		handle, installErr := session.provider.installer.Install(ctx, config)
+		if installErr != nil {
+			return installedIPSecContext{}, nil, fmt.Errorf("%w: %v", ErrIPSecInstall, installErr)
+		}
+		if handle == nil {
+			return installedIPSecContext{}, nil, fmt.Errorf("%w: installer returned no handle", ErrIPSecInstall)
+		}
+		installed.all = handle
 	}
-
 	remoteAddress := net.JoinHostPort(remoteIP.String(), strconv.Itoa(selected.portServer))
-	_ = connection.Close()
-	connection, dialErr := dialSIP(
+	protectedConnection, err := dialSIP(
 		ctx,
 		session.transport,
 		localIP.String(),
-		session.securityProposal.portClient,
+		proposal.portClient,
 		remoteAddress,
 	)
-	if dialErr != nil {
-		cleanupErr := handle.Close(context.Background())
+	if err != nil {
+		cleanupErr := installed.close(context.Background())
 		if cleanupErr != nil {
-			return errors.Join(
-				fmt.Errorf("ims: connect protected P-CSCF: %w", dialErr),
+			return installedIPSecContext{}, nil, errors.Join(
+				fmt.Errorf("ims: connect protected P-CSCF: %w", err),
 				fmt.Errorf("ims: roll back ipsec-3gpp: %w", cleanupErr),
 			)
 		}
-		return fmt.Errorf("ims: connect protected P-CSCF: %w", dialErr)
+		return installedIPSecContext{}, nil, fmt.Errorf("ims: connect protected P-CSCF: %w", err)
 	}
+	return installed, protectedConnection, nil
+}
 
-	if err := session.installMainConnection(connection); err != nil {
-		_ = connection.Close()
-		_ = handle.Close(context.Background())
-		return err
+// cFlowSecurityActive and sFlowSecurityActive intentionally use pair state
+// when available. The aggregate field remains a compatibility fallback for
+// older test installers that only implement Install.
+func (session *Session) cFlowSecurityActive() bool {
+	if session.clientIPSecHandle != nil || session.serverIPSecHandle != nil ||
+		session.clientSecurityActive || session.serverSecurityActive {
+		return session.clientSecurityActive
 	}
-	session.endpoint.port = selected.portServer
-	session.securityAgreement = agreement
-	session.securityActive = true
-	session.securityBootstrap = false
-	session.ipsecHandle = handle
-	return nil
+	return session.securityActive
+}
+
+func (session *Session) sFlowSecurityActive() bool {
+	if session.clientIPSecHandle != nil || session.serverIPSecHandle != nil ||
+		session.clientSecurityActive || session.serverSecurityActive {
+		return session.serverSecurityActive
+	}
+	return session.securityActive
+}
+
+func (session *Session) protectedSecurityActive() bool {
+	return session.cFlowSecurityActive() && session.sFlowSecurityActive()
+}
+
+func (session *Session) anySecurityActive() bool {
+	return session.cFlowSecurityActive() || session.sFlowSecurityActive()
+}
+
+func (session *Session) syncSecurityActive() {
+	if session.clientIPSecHandle != nil || session.serverIPSecHandle != nil ||
+		session.clientSecurityActive || session.serverSecurityActive {
+		session.securityActive = session.clientSecurityActive && session.serverSecurityActive
+	}
+}
+
+func (session *Session) closeProtectedSecurity(ctx context.Context) error {
+	installed := installedIPSecContext{
+		all:   session.ipsecHandle,
+		cFlow: session.clientIPSecHandle,
+		sFlow: session.serverIPSecHandle,
+	}
+	err := installed.close(ctx)
+	session.ipsecHandle = nil
+	session.clientIPSecHandle = nil
+	session.serverIPSecHandle = nil
+	session.clientSecurityActive = false
+	session.serverSecurityActive = false
+	session.securityActive = false
+	return err
 }
 
 func (session *Session) contactAddress() string {
-	connection, _, _, err := session.currentConnection()
+	connection, _, _, err := session.currentOutboundFlow()
 	if err != nil {
+		return ""
+	}
+	return session.contactAddressFor(connection, session.securityProposal)
+}
+
+func (session *Session) contactAddressFor(connection net.Conn, proposal securityProposal) string {
+	if connection == nil {
 		return ""
 	}
 	if session.securityOffered() {
 		host := addressHost(connection.LocalAddr())
-		return net.JoinHostPort(host, strconv.Itoa(session.securityProposal.portServer))
+		return net.JoinHostPort(host, strconv.Itoa(proposal.portServer))
 	}
 	return connection.LocalAddr().String()
 }
@@ -952,15 +1232,11 @@ func (session *Session) emptyDigestAuthorization() string {
 	}, ", ")
 }
 
-func (session *Session) validProtectedUDPSource(remote *net.UDPAddr) bool {
-	return session.protectedUDPSourceRejectReason(remote) == ""
-}
-
-func (session *Session) protectedUDPSourceRejectReason(remote *net.UDPAddr) string {
+func (session *Session) inboundUDPSourceRejectReason(remote *net.UDPAddr) string {
 	if remote == nil {
 		return "invalid_remote_address"
 	}
-	if !session.securityActive {
+	if !session.sFlowSecurityActive() {
 		return "security_inactive"
 	}
 	expectedIP := append(net.IP(nil), session.pcscfIP...)
@@ -970,11 +1246,14 @@ func (session *Session) protectedUDPSourceRejectReason(remote *net.UDPAddr) stri
 	if !expectedIP.Equal(remote.IP) {
 		return "unexpected_pcscf_ip"
 	}
+	if remote.Port != session.securityAgreement.selected.portClient {
+		return "unexpected_pcscf_port"
+	}
 	return ""
 }
 
 func (session *Session) effectiveSecurityMode() string {
-	if session.securityActive {
+	if session.anySecurityActive() {
 		return "ipsec-3gpp"
 	}
 	return "none"

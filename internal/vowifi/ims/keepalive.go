@@ -38,14 +38,19 @@ func hasSIPOptionTag(values []string, wanted string) bool {
 	return false
 }
 
-// parseSIPViaKeepalive parses the RFC 6223 keep parameter from the Via
-// header returned with a REGISTER response. A value is the strict response
-// form and a positive value is the peer's recommended interval in seconds.
-// VoCat also treats a bare keep parameter as permission to send keep-alives
-// for compatibility with peers that echo the parameter without an interval.
-// A bare parameter does not make pong reception a requirement: keep-alive
-// probes are advisory, and flow recovery is driven by ordinary I/O failure.
-func parseSIPViaKeepalive(values []string) (bool, time.Duration) {
+type sipViaKeepaliveDetails struct {
+	present    bool
+	negotiated bool
+	rawValue   string
+	interval   time.Duration
+}
+
+// parseSIPViaKeepaliveDetails parses the first RFC 6223 keep parameter from
+// the Via header returned with a REGISTER response. A positive value is the
+// peer's recommended interval in seconds. A zero value means the peer
+// accepted keep-alives without recommending an interval. A bare keep
+// parameter is only the sender's offer and does not complete negotiation.
+func parseSIPViaKeepaliveDetails(values []string) sipViaKeepaliveDetails {
 	for _, value := range values {
 		parameters := strings.Split(value, ";")
 		for _, parameter := range parameters[1:] {
@@ -54,16 +59,44 @@ func parseSIPViaKeepalive(values []string) (bool, time.Duration) {
 				continue
 			}
 			if !hasValue {
-				return true, 0
+				return sipViaKeepaliveDetails{present: true, rawValue: "keep"}
 			}
 			seconds, err := strconv.ParseInt(strings.TrimSpace(rawValue), 10, 32)
-			if err != nil || seconds <= 0 {
-				return true, 0
+			if err != nil || seconds < 0 {
+				return sipViaKeepaliveDetails{
+					present:  true,
+					rawValue: "keep=" + strings.TrimSpace(rawValue),
+				}
 			}
-			return true, time.Duration(seconds) * time.Second
+			return sipViaKeepaliveDetails{
+				present:    true,
+				negotiated: true,
+				rawValue:   "keep=" + strings.TrimSpace(rawValue),
+				interval:   time.Duration(seconds) * time.Second,
+			}
 		}
 	}
-	return false, 0
+	return sipViaKeepaliveDetails{}
+}
+
+// parseSIPViaKeepalive preserves the compact parser API used by the runtime
+// and tests while keeping the raw response value available to diagnostics.
+func parseSIPViaKeepalive(values []string) (bool, time.Duration) {
+	details := parseSIPViaKeepaliveDetails(values)
+	return details.present, details.interval
+}
+
+func effectiveSIPKeepalivePolicy(transport string, negotiated bool, interval time.Duration) (adopted bool, intervalSeconds int, policy string) {
+	if transport != "tcp" {
+		return false, 0, "disabled_for_non_tcp"
+	}
+	if !negotiated {
+		return false, 0, "not_negotiated"
+	}
+	if interval > 0 {
+		return true, int(interval / time.Second), "peer_interval_with_jitter"
+	}
+	return true, 0, "local_default_range"
 }
 
 // negotiateInboundSIPViaKeepalive updates only the topmost Via in an inbound
@@ -185,8 +218,31 @@ func (session *Session) startSIPFlowKeepalive() {
 		session.keepaliveMu.Unlock()
 		return
 	}
+	keepaliveInterval := session.keepaliveInterval
+	keepaliveNegotiated := session.keepaliveNegotiated
+	adopted, intervalSeconds, policy := effectiveSIPKeepalivePolicy(
+		session.transport,
+		keepaliveNegotiated,
+		keepaliveInterval,
+	)
+	session.keepaliveSentCount.Store(0)
+	session.keepalivePeerPingCount.Store(0)
+	session.keepalivePongSentCount.Store(0)
 	session.keepaliveRunning = true
 	session.keepaliveMu.Unlock()
+	session.imsLogger().Debug("IMS SIP CRLF keepalive started",
+		"category", "ims",
+		"subsystem", "sip",
+		"device_id", session.request.DeviceID,
+		"stage", "flow_keepalive",
+		"transport", session.transport,
+		"keepalive_negotiated", adopted,
+		"ue_keep_requested", true,
+		"ue_keep_value", "keep",
+		"peer_interval_seconds", int(keepaliveInterval/time.Second),
+		"keepalive_policy", policy,
+		"effective_interval_seconds", intervalSeconds,
+	)
 	session.receiveDone.Add(1)
 	go session.runSIPFlowKeepalive()
 }
@@ -197,6 +253,19 @@ func (session *Session) runSIPFlowKeepalive() {
 		session.keepaliveMu.Lock()
 		session.keepaliveRunning = false
 		session.keepaliveMu.Unlock()
+		sentCount := session.keepaliveSentCount.Load()
+		peerPingCount := session.keepalivePeerPingCount.Load()
+		pongSentCount := session.keepalivePongSentCount.Load()
+		session.imsLogger().Debug("IMS SIP CRLF keepalive stopped",
+			"category", "ims",
+			"subsystem", "sip",
+			"device_id", session.request.DeviceID,
+			"stage", "flow_keepalive",
+			"transport", session.transport,
+			"sent_count", sentCount,
+			"peer_ping_count", peerPingCount,
+			"pong_sent_count", pongSentCount,
+		)
 	}()
 
 	ctx := session.refreshContext
@@ -207,7 +276,7 @@ func (session *Session) runSIPFlowKeepalive() {
 		if ctx.Err() != nil || session.isClosed() {
 			return
 		}
-		connection, _, changed, err := session.currentConnection()
+		connection, _, changed, err := session.currentOutboundFlow()
 		if err != nil {
 			if !waitForSIPFlowEvent(ctx, changed, time.Second) {
 				return
@@ -232,7 +301,7 @@ func (session *Session) runSIPFlowKeepalive() {
 			continue
 		case <-timer.C:
 		}
-		if !session.isCurrentConnection(connection) {
+		if !session.isCurrentOutboundFlow(connection) {
 			continue
 		}
 		if !session.sipCRLFKeepaliveEnabled() {
@@ -246,9 +315,7 @@ func (session *Session) runSIPFlowKeepalive() {
 			session.failSIPFlow(connection, "keepalive_write", writeErr)
 			continue
 		}
-		session.imsLogger().Debug("IMS SIP CRLF keepalive sent",
-			"category", "ims", "subsystem", "sip", "stage", "flow_keepalive",
-			"transport", session.transport, "keepalive_negotiated", true)
+		session.keepaliveSentCount.Add(1)
 	}
 }
 
@@ -269,15 +336,21 @@ func (session *Session) handleSIPCRLF(connection net.Conn, ping bool) error {
 	if !ping {
 		return nil
 	}
+	session.keepaliveMu.Lock()
+	keepaliveRunning := session.keepaliveRunning
+	session.keepaliveMu.Unlock()
+	if keepaliveRunning {
+		session.keepalivePeerPingCount.Add(1)
+	}
 	session.writeMu.Lock()
 	_, err := connection.Write([]byte("\r\n"))
 	session.writeMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("ims: send SIP CRLF pong: %w", err)
 	}
-	session.imsLogger().Debug("IMS SIP CRLF pong sent",
-		"category", "ims", "subsystem", "sip", "stage", "flow_keepalive",
-		"transport", session.transport)
+	if keepaliveRunning {
+		session.keepalivePongSentCount.Add(1)
+	}
 	return nil
 }
 
@@ -285,11 +358,14 @@ func (session *Session) failSIPFlow(connection net.Conn, reason string, err erro
 	if session == nil || session.isClosed() {
 		return
 	}
-	if session.detachMainConnection(connection) {
-		session.imsLogger().Warn("IMS SIP flow failed; recovery started",
+	if session.detachOutboundFlow(connection) {
+		recoveryScheduled := session.outboundRegistrationConfirmed()
+		session.imsLogger().Warn("IMS SIP flow failed",
 			"category", "ims", "subsystem", "sip", "stage", "flow_keepalive",
-			"reason", reason, "error", err)
-		session.startSIPFlowRecovery()
+			"reason", reason, "error", err, "recovery_scheduled", recoveryScheduled)
+		if recoveryScheduled {
+			session.startSIPFlowRecovery()
+		}
 	}
 }
 

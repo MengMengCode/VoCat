@@ -1,8 +1,10 @@
 package ims
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -54,6 +56,26 @@ func TestIncomingCallCanRingAndAnswerWithMediaOffer(t *testing.T) {
 	}
 	if !strings.Contains(string(responses[1]), "Contact: <sip:subscriber@pipe;transport=udp>") {
 		t.Fatalf("answer omitted dialog Contact: %q", responses[1])
+	}
+}
+
+func TestDialogContactAddsObOnlyAfterOutboundConfirmation(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	session := &Session{
+		conn:       client,
+		identity:   identitySet{user: "subscriber"},
+		transport:  "tcp",
+		instanceID: "urn:uuid:dialog-contact-test",
+	}
+	if contact := session.dialogContactHeader(true); strings.Contains(contact, ";ob") {
+		t.Fatalf("unconfirmed dialog Contact advertised outbound: %q", contact)
+	}
+	session.setOutboundRegistrationState(outboundRegistrationConfirmed)
+	contact := session.dialogContactHeader(true)
+	if !strings.Contains(contact, ">;ob;") {
+		t.Fatalf("confirmed dialog Contact omitted ;ob: %q", contact)
 	}
 }
 
@@ -141,6 +163,30 @@ func TestRejectedOutgoingCallRetainsSIPReason(t *testing.T) {
 	}
 }
 
+func TestFinishedIncomingCallLogIncludesCaller(t *testing.T) {
+	var logs bytes.Buffer
+	session := &Session{
+		provider: &Provider{config: Config{
+			Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		}},
+		request: vowifi.IMSRequest{DeviceID: "ec20-test"},
+		calls: map[string]*imsCall{
+			"incoming-log": {
+				public: vowifi.Call{
+					ID: "incoming-log", Number: "+447700900001", Direction: "incoming",
+					State: "ringing", StartedAt: time.Now().Add(-time.Second),
+				},
+			},
+		},
+	}
+
+	session.finishCall("incoming-log", "ended", 0, "")
+	output := logs.String()
+	if !strings.Contains(output, "IMS call ended") || !strings.Contains(output, "caller=+447700900001") {
+		t.Fatalf("incoming call end log = %q", output)
+	}
+}
+
 func TestCancelledOutgoingInviteDoesNotBecomeFailedOn487(t *testing.T) {
 	call := &imsCall{
 		public:     vowifi.Call{ID: "cancelled", State: "dialing"},
@@ -150,10 +196,10 @@ func TestCancelledOutgoingInviteDoesNotBecomeFailedOn487(t *testing.T) {
 	}
 	session := &Session{
 		calls:          map[string]*imsCall{call.callID: call},
-		transactions:   make(map[sipTransactionKey]chan *sipResponse),
+		transactions:   make(map[sipTransactionKey]sipTransaction),
 		refreshContext: context.Background(),
 	}
-	key := sipTransactionKey{callID: call.callID, cseq: 1, method: "INVITE"}
+	key := sipTransactionKey{branch: "z9hG4bKcancelled", method: "INVITE"}
 	go session.watchOutgoingCall(call, key)
 	call.responses <- &sipResponse{StatusCode: 487, Reason: "Request Terminated"}
 
@@ -201,7 +247,7 @@ func TestOutgoingLocalNumberUsesIMSPhoneContextAndMMTelHeaders(t *testing.T) {
 		fromTag:        "local-tag",
 		instanceID:     "urn:uuid:00000000-0000-4000-8000-000000000001",
 		cseq:           1,
-		transactions:   make(map[sipTransactionKey]chan *sipResponse),
+		transactions:   make(map[sipTransactionKey]sipTransaction),
 		calls:          make(map[string]*imsCall),
 		refreshContext: refreshContext,
 		evidence: vowifi.IMSEvidence{

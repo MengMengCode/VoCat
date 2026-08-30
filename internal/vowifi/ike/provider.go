@@ -383,6 +383,12 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 	if err != nil {
 		return nil, err
 	}
+	if deviceIdentityPending {
+		provider.config.Logger.Debug("IKE DEVICE_IDENTITY request received",
+			"notify_type", notifyDeviceIdentity,
+			"stage", "ike_auth",
+		)
+	}
 	messageID := uint32(1)
 	currentPayloads := authResponsePayloads
 	for round := 0; round < 10; round++ {
@@ -404,9 +410,30 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		cleanupMessageID = messageID + 1
 		requestPayloads := []payload{{Type: payloadEAP, Body: action.Response}}
 		if deviceIdentityPending && responderAUTH == vowifi.ResponderAUTHVerified {
-			deviceIdentity, identityErr := deviceIdentityNotify(request.Identity.IMEI)
+			deviceIMEI, _ := vowifi.ResolveIMSDeviceIdentity(request.Identity)
+			deviceIdentity, identityErr := deviceIdentityNotify(deviceIMEI)
 			if identityErr == nil {
 				requestPayloads = append(requestPayloads, deviceIdentity)
+				identity := strings.TrimSpace(deviceIMEI)
+				identityType := "IMEI"
+				if len(identity) == 16 {
+					identityType = "IMEISV"
+				}
+				provider.config.Logger.Debug("IKE DEVICE_IDENTITY response sent",
+					"notify_type", notifyDeviceIdentity,
+					"identity_type", identityType,
+					"imei", identity,
+					"identity_digits", len(identity),
+					"payload_bytes", len(deviceIdentity.Body),
+					"stage", "ike_auth",
+				)
+			} else {
+				provider.config.Logger.Warn("IKE DEVICE_IDENTITY response unavailable",
+					"notify_type", notifyDeviceIdentity,
+					"identity_source", "SIMIdentity.IMEI",
+					"stage", "ike_auth",
+					"error", identityErr,
+				)
 			}
 		}
 		eapHeader := ikeHeader{
@@ -419,6 +446,12 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		if requested, notifyErr := deviceIdentityRequested(currentPayloads); notifyErr != nil {
 			return nil, notifyErr
 		} else if requested {
+			if !deviceIdentityPending {
+				provider.config.Logger.Debug("IKE DEVICE_IDENTITY request received",
+					"notify_type", notifyDeviceIdentity,
+					"stage", "ike_auth",
+				)
+			}
 			deviceIdentityPending = true
 		}
 		_, currentPayloads, err = sendAndReceiveIKEPayloads(

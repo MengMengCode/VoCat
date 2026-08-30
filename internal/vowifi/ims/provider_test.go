@@ -1,6 +1,7 @@
 package ims
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -54,6 +55,59 @@ func (*registerRetransmitConn) RemoteAddr() net.Addr {
 func (*registerRetransmitConn) SetDeadline(time.Time) error      { return nil }
 func (*registerRetransmitConn) SetReadDeadline(time.Time) error  { return nil }
 func (*registerRetransmitConn) SetWriteDeadline(time.Time) error { return nil }
+
+type refreshResponseConn struct {
+	writes   [][]byte
+	response []byte
+}
+
+func (connection *refreshResponseConn) Read(destination []byte) (int, error) {
+	if len(connection.response) == 0 {
+		return 0, io.EOF
+	}
+	response := connection.response
+	connection.response = nil
+	return copy(destination, response), nil
+}
+
+func (connection *refreshResponseConn) Write(source []byte) (int, error) {
+	connection.writes = append(connection.writes, append([]byte(nil), source...))
+	packet, err := parseSIPPacket(source)
+	if err != nil || packet.Request == nil {
+		return 0, fmt.Errorf("parse refresh REGISTER: %w", err)
+	}
+	connection.response = testResponseForRequest(
+		200,
+		"OK",
+		packet.Request,
+		[]string{
+			"Contact: " + packet.Request.value("Contact") + ";expires=600",
+			"Require: outbound",
+		},
+	)
+	return len(source), nil
+}
+
+func (*refreshResponseConn) Close() error { return nil }
+func (*refreshResponseConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 5060}
+}
+func (*refreshResponseConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("192.0.2.20"), Port: 5060}
+}
+func (*refreshResponseConn) SetDeadline(time.Time) error      { return nil }
+func (*refreshResponseConn) SetReadDeadline(time.Time) error  { return nil }
+func (*refreshResponseConn) SetWriteDeadline(time.Time) error { return nil }
+
+type loopbackRefreshResponseConn struct{ refreshResponseConn }
+
+func (*loopbackRefreshResponseConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 30001}
+}
+
+func (*loopbackRefreshResponseConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 6060}
+}
 
 func (tunnel evidenceTunnel) Evidence() vowifi.TunnelEvidence {
 	return tunnel.evidence
@@ -128,12 +182,34 @@ func TestProviderCachesSuccessfulTransportPerSIM(t *testing.T) {
 	provider := &Provider{transportCache: make(map[string]string)}
 	first := vowifi.SIMIdentity{ICCID: "8901000000000000001", HomeMCC: "001", HomeMNC: "01"}
 	second := vowifi.SIMIdentity{ICCID: "8901000000000000002", HomeMCC: "001", HomeMNC: "01"}
-	provider.rememberTransport(first, "udp")
-	if got := provider.cachedTransport(first); got != "udp" {
+	firstEndpoint := pcscfEndpoint{host: "192.0.2.10", port: 5060}
+	secondEndpoint := pcscfEndpoint{host: "192.0.2.11", port: 5060}
+	provider.rememberTransport(first, firstEndpoint, "udp")
+	if got := provider.cachedTransport(first, firstEndpoint); got != "udp" {
 		t.Fatalf("cached first transport = %q", got)
 	}
-	if got := provider.cachedTransport(second); got != "" {
+	if got := provider.cachedTransport(second, firstEndpoint); got != "" {
 		t.Fatalf("second SIM inherited cached transport %q", got)
+	}
+	if got := provider.cachedTransport(first, secondEndpoint); got != "" {
+		t.Fatalf("second P-CSCF inherited cached transport %q", got)
+	}
+}
+
+func TestExplicitPCSCFTransportOverridesProfileAndCache(t *testing.T) {
+	t.Parallel()
+	identity := vowifi.SIMIdentity{ICCID: "8901000000000000001", HomeMCC: "001", HomeMNC: "01"}
+	endpoint := pcscfEndpoint{host: "192.0.2.10", port: 5060}
+	provider := &Provider{
+		config: Config{
+			Transport:       "udp",
+			TransportByPLMN: map[string]string{"00101": "udp"},
+		},
+		transportCache: make(map[string]string),
+	}
+	provider.rememberTransport(identity, endpoint, "udp")
+	if got := provider.transportForEndpoint(identity, endpoint, "tcp"); got != "tcp" {
+		t.Fatalf("explicit P-CSCF transport = %q, want tcp", got)
 	}
 }
 
@@ -141,6 +217,7 @@ func TestUDPRegisterRetransmitsBeforeTransactionTimeout(t *testing.T) {
 	t.Parallel()
 	connection := &registerRetransmitConn{response: []byte(strings.Join([]string{
 		"SIP/2.0 200 OK",
+		"Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bKretransmit",
 		"Call-ID: register-retransmit-test",
 		"CSeq: 7 REGISTER",
 		"Content-Length: 0",
@@ -157,12 +234,95 @@ func TestUDPRegisterRetransmitsBeforeTransactionTimeout(t *testing.T) {
 		conn:      connection,
 		callID:    "register-retransmit-test",
 	}
-	response, err := session.exchange(context.Background(), []byte("REGISTER test"), 7)
+	request := []byte(strings.Join([]string{
+		"REGISTER sip:ims.example SIP/2.0",
+		"Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bKretransmit",
+		"Call-ID: register-retransmit-test",
+		"CSeq: 7 REGISTER",
+		"Content-Length: 0",
+		"",
+		"",
+	}, "\r\n"))
+	response, err := session.exchange(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if response.StatusCode != 200 || connection.writes != 2 {
 		t.Fatalf("response=%#v writes=%d, want SIP 200 after one retransmission", response, connection.writes)
+	}
+}
+
+func TestProtectedUDPRegisterResponseUsesUEClientFlow(t *testing.T) {
+	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client, err := net.DialUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")}, server.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	inbound, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inbound.Close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		packet := make([]byte, 2048)
+		count, remote, readErr := server.ReadFromUDP(packet)
+		if readErr != nil {
+			serverDone <- readErr
+			return
+		}
+		request, parseErr := parseSIPPacket(packet[:count])
+		if parseErr != nil || request.Request == nil {
+			serverDone <- fmt.Errorf("parse REGISTER = (%#v, %v)", request.Request, parseErr)
+			return
+		}
+		_, writeErr := server.WriteToUDP(testResponse(
+			200,
+			"OK",
+			request.Request.value("Call-ID"),
+			request.Request.value("CSeq"),
+			[]string{"Via: " + request.Request.value("Via")},
+		), remote)
+		serverDone <- writeErr
+	}()
+
+	request := []byte(strings.Join([]string{
+		"REGISTER sip:ims.example SIP/2.0",
+		"Via: SIP/2.0/UDP " + client.LocalAddr().String() + ";branch=z9hG4bKflow2;rport",
+		"From: <sip:user@ims.example>;tag=flow2",
+		"To: <sip:user@ims.example>",
+		"Call-ID: protected-udp-flow2",
+		"CSeq: 7 REGISTER",
+		"Content-Length: 0",
+		"",
+		"",
+	}, "\r\n"))
+	session := &Session{
+		provider: &Provider{config: Config{
+			TransactionTimeout: time.Second,
+			Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}},
+		transport:            "udp",
+		conn:                 client,
+		inboundUDP:           inbound,
+		serverSecurityActive: true,
+		callID:               "protected-udp-flow2",
+	}
+	response, err := session.exchangeWithRuntimeOnFlow(context.Background(), request, false, client)
+	if err != nil {
+		t.Fatalf("exchangeWithRuntimeOnFlow() error = %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("REGISTER response status = %d", response.StatusCode)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -413,11 +573,10 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 				return errors.New("initial REGISTER unexpectedly authenticated")
 			}
 			callID = headers["call-id"]
-			response := testResponse(
+			response := testResponseForHeaders(
 				401,
 				"Unauthorized",
-				callID,
-				headers["cseq"],
+				headers,
 				[]string{
 					`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` +
 						nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
@@ -453,11 +612,10 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 				"Service-Route: <sip:route.ims.example;lr>",
 			}
 			responseHeaders = append(responseHeaders, extraContacts...)
-			response := testResponse(
+			response := testResponseForHeaders(
 				200,
 				"OK",
-				callID,
-				headers["cseq"],
+				headers,
 				responseHeaders,
 			)
 			if _, err := listener.WriteToUDP(response, remote); err != nil {
@@ -469,8 +627,11 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 			if headers["expires"] == "0" {
 				return errors.New("refresh REGISTER used zero expiry")
 			}
-			if headers["authorization"] != "" {
-				return errors.New("refresh reused the one-time AKAv1 RES")
+			if headers["authorization"] == "" {
+				return errors.New("refresh REGISTER omitted cached Authorization")
+			}
+			if err := verifyTestAuthorization(headers["authorization"], nonce); err != nil {
+				return fmt.Errorf("refresh Authorization: %w", err)
 			}
 			contact := headers["contact"]
 			extraContacts := []string(nil)
@@ -487,11 +648,10 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 				"Service-Route: <sip:route.ims.example;lr>",
 			}
 			responseHeaders = append(responseHeaders, extraContacts...)
-			response := testResponse(
+			response := testResponseForHeaders(
 				200,
 				"OK",
-				callID,
-				headers["cseq"],
+				headers,
 				responseHeaders,
 			)
 			if _, err := listener.WriteToUDP(response, remote); err != nil {
@@ -503,7 +663,7 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 			return fmt.Errorf("deregister Expires = %q, want 0", headers["expires"])
 		}
 		if _, err := listener.WriteToUDP(
-			testResponse(200, "OK", callID, headers["cseq"], nil),
+			testResponseForHeaders(200, "OK", headers, nil),
 			remote,
 		); err != nil {
 			return err
@@ -598,7 +758,7 @@ func TestIMSProfileUserAgentUsesUnifiedHeaderValue(t *testing.T) {
 	standard := &Session{request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
 		IMSI: "999010000000001", HomeMCC: "999", HomeMNC: "01",
 	}}}
-	if got := standard.imsUserAgent(); got != "vocat/1" {
+	if got := standard.imsUserAgent(); got != "iOS/18.6.2 iPhone" {
 		t.Fatalf("standard IMS User-Agent fallback = %q", got)
 	}
 }
@@ -620,6 +780,32 @@ func TestIMSUserAgentEnvironmentOverridesOnlyDefaultFallback(t *testing.T) {
 	}
 }
 
+func TestIMSUserAgentProfileOverridesProviderAndEnvironment(t *testing.T) {
+	t.Setenv(imsUserAgentOverrideEnv, "environment-agent")
+	session := &Session{
+		provider: &Provider{config: Config{UserAgent: "device-agent"}},
+		request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
+			IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10", GID1: "508FFFFF",
+		}},
+	}
+	if got := session.imsUserAgent(); got != "iOS/18.6.2 iPhone" {
+		t.Fatalf("profile IMS User-Agent = %q", got)
+	}
+}
+
+func TestIMSUserAgentProviderOverridesEnvironment(t *testing.T) {
+	t.Setenv(imsUserAgentOverrideEnv, "environment-agent")
+	session := &Session{
+		provider: &Provider{config: Config{UserAgent: "device-agent"}},
+		request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{
+			HomeMCC: "999", HomeMNC: "01",
+		}},
+	}
+	if got := session.imsUserAgent(); got != "device-agent" {
+		t.Fatalf("provider IMS User-Agent = %q", got)
+	}
+}
+
 func TestBuildRegisterUsesImplementationCapabilityHeaders(t *testing.T) {
 	session := &Session{
 		provider: &Provider{config: Config{UserAgent: "test-agent"}},
@@ -629,12 +815,13 @@ func TestBuildRegisterUsesImplementationCapabilityHeaders(t *testing.T) {
 			user:   "001010123456789",
 			domain: "ims.example",
 		},
-		transport:         "tcp",
-		conn:              &registerRetransmitConn{},
-		callID:            "capability-test",
-		fromTag:           "capability-tag",
-		instanceID:        "urn:uuid:capability-test",
-		outboundRequested: true,
+		transport:     "tcp",
+		conn:          &registerRetransmitConn{},
+		callID:        "capability-test",
+		fromTag:       "capability-tag",
+		instanceID:    "urn:uuid:capability-test",
+		outboundState: outboundRegistrationRequested,
+		outboundRegID: "1",
 	}
 
 	request, err := session.buildRegister(1, 3600, "", "")
@@ -655,6 +842,200 @@ func TestBuildRegisterUsesImplementationCapabilityHeaders(t *testing.T) {
 	}
 }
 
+func TestOutboundRegistrationStateRequiresRegistrarConfirmation(t *testing.T) {
+	session := &Session{
+		provider: &Provider{config: Config{
+			SecurityMode:       SecurityDisabled,
+			RegistrationExpiry: time.Hour,
+		}},
+		request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{HomeMCC: "001", HomeMNC: "01"}},
+		identity: identitySet{
+			public: "sip:001010123456789@ims.example",
+			user:   "001010123456789",
+			domain: "ims.example",
+		},
+		transport:     "tcp",
+		conn:          &registerRetransmitConn{},
+		instanceID:    "urn:uuid:outbound-test",
+		outboundState: outboundRegistrationRequested,
+		outboundRegID: "1",
+	}
+
+	confirmed, err := session.applyRegistrationEvidence(&sipResponse{
+		StatusCode: 200,
+		Headers: map[string][]string{
+			"contact": {`<sip:001010123456789@192.0.2.10>;expires=600;+sip.instance="<urn:uuid:outbound-test>"`},
+			"require": {"outbound"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("confirmed applyRegistrationEvidence() error = %v", err)
+	}
+	if !confirmed.outboundRequested || !confirmed.outboundConfirmed || confirmed.outboundRegID != "1" ||
+		!session.outboundRegistrationConfirmed() {
+		t.Fatalf("confirmed outbound state = %#v", confirmed)
+	}
+	request, err := session.buildRegister(3, 600, "", "")
+	if err != nil {
+		t.Fatalf("buildRegister() after confirmation error = %v", err)
+	}
+	text := string(request)
+	if !strings.Contains(text, "Supported: path, outbound") || !strings.Contains(text, ";reg-id=1") {
+		t.Fatalf("confirmed REGISTER omitted outbound state: %q", text)
+	}
+
+	session.setOutboundRegistrationState(outboundRegistrationRequested)
+	unconfirmed, err := session.applyRegistrationEvidence(&sipResponse{
+		StatusCode: 200,
+		Headers: map[string][]string{
+			"contact": {`<sip:001010123456789@192.0.2.10>;expires=600;+sip.instance="<urn:uuid:outbound-test>"`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unconfirmed applyRegistrationEvidence() error = %v", err)
+	}
+	if !unconfirmed.outboundRequested || unconfirmed.outboundConfirmed || unconfirmed.outboundRegID != "1" ||
+		session.outboundRegistrationRequested() || session.outboundRegistrationConfirmed() {
+		t.Fatalf("unconfirmed outbound state = %#v", unconfirmed)
+	}
+	request, err = session.buildRegister(3, 600, "", "")
+	if err != nil {
+		t.Fatalf("buildRegister() after fallback error = %v", err)
+	}
+	text = string(request)
+	if strings.Contains(text, "Supported: path, outbound") || strings.Contains(text, ";reg-id=1") {
+		t.Fatalf("fallback REGISTER still advertised outbound: %q", text)
+	}
+}
+
+func TestRefreshDelayUsesTemporaryTwentyMinuteInterval(t *testing.T) {
+	if got := refreshDelay(40 * time.Minute); got != temporaryRegistrationRefreshInterval {
+		t.Fatalf("refreshDelay() = %s, want %s", got, temporaryRegistrationRefreshInterval)
+	}
+	if got, want := refreshDelay(10*time.Minute), 10*time.Minute-registrationSafetyMargin; got != want {
+		t.Fatalf("refreshDelay() near expiry = %s, want %s", got, want)
+	}
+	if got := refreshDelay(3 * time.Second); got != 100*time.Millisecond {
+		t.Fatalf("refreshDelay() at safety margin = %s, want 100ms", got)
+	}
+}
+
+func TestRefreshRegistrationUsesTheCapturedOutboundFlow(t *testing.T) {
+	connection := &refreshResponseConn{}
+	session := &Session{
+		provider: &Provider{config: Config{
+			SecurityMode:       SecurityDisabled,
+			RegistrationExpiry: time.Hour,
+		}},
+		request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{HomeMCC: "001", HomeMNC: "01"}},
+		identity: identitySet{
+			public: "sip:001010123456789@ims.example",
+			user:   "001010123456789",
+			domain: "ims.example",
+		},
+		transport:     "tcp",
+		conn:          connection,
+		reader:        bufio.NewReader(connection),
+		callID:        "refresh-flow-test",
+		fromTag:       "refresh-tag",
+		instanceID:    "urn:uuid:refresh-flow-test",
+		outboundState: outboundRegistrationConfirmed,
+		outboundRegID: "1",
+		evidence: vowifi.IMSEvidence{
+			Registered:        true,
+			RegistrationState: "registered",
+		},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+
+	if err := session.refreshOnce(context.Background()); err != nil {
+		t.Fatalf("refreshOnce() error = %v", err)
+	}
+	if len(connection.writes) != 1 {
+		t.Fatalf("refresh REGISTER writes = %d, want 1", len(connection.writes))
+	}
+	text := string(connection.writes[0])
+	if !strings.Contains(text, "Supported: path, outbound\r\n") ||
+		!strings.Contains(text, ";reg-id=1") {
+		t.Fatalf("refresh REGISTER omitted confirmed outbound state: %q", text)
+	}
+}
+
+func TestProtectedRefreshOffersCandidateSecurityWithoutReplacingActiveSet(t *testing.T) {
+	connection := &loopbackRefreshResponseConn{}
+	activeProposal := securityProposal{
+		spiClient:                1001,
+		spiServer:                1002,
+		portClient:               30001,
+		portServer:               30002,
+		integrityAlgorithms:      []string{"hmac-sha-1-96"},
+		encryptionAlgorithmsList: []string{"aes-cbc"},
+	}
+	session := &Session{
+		provider: &Provider{config: Config{
+			SecurityMode:       SecurityRequired,
+			RegistrationExpiry: time.Hour,
+		}},
+		request: vowifi.IMSRequest{Identity: vowifi.SIMIdentity{HomeMCC: "001", HomeMNC: "01"}},
+		identity: identitySet{
+			public: "sip:001010123456789@ims.example",
+			user:   "001010123456789",
+			domain: "ims.example",
+		},
+		transport:        "tcp",
+		conn:             connection,
+		reader:           bufio.NewReader(connection),
+		sipLocalIP:       net.ParseIP("127.0.0.1"),
+		callID:           "protected-refresh",
+		fromTag:          "protected-refresh-tag",
+		instanceID:       "urn:uuid:protected-refresh",
+		securityProposal: activeProposal,
+		securityAgreement: securityAgreement{
+			selected:    securityMechanism{portServer: 6060},
+			verifyValue: "ipsec-3gpp;alg=hmac-sha-1-96;ealg=aes-cbc",
+		},
+		securityActive: true,
+		evidence: vowifi.IMSEvidence{
+			Registered:        true,
+			RegistrationState: "registered",
+		},
+		expiresAt: time.Now().Add(time.Hour),
+	}
+
+	if err := session.refreshOnce(context.Background()); err != nil {
+		t.Fatalf("refreshOnce() error = %v", err)
+	}
+	if len(connection.writes) != 1 {
+		t.Fatalf("refresh REGISTER writes = %d, want 1", len(connection.writes))
+	}
+	packet, err := parseSIPPacket(connection.writes[0])
+	if err != nil || packet.Request == nil {
+		t.Fatalf("parse refresh REGISTER = (%#v, %v)", packet.Request, err)
+	}
+	offers := splitHeaderValues(packet.Request.values("Security-Client"))
+	if len(offers) == 0 {
+		t.Fatal("protected refresh omitted Security-Client")
+	}
+	candidate, err := parseSecurityMechanism(offers[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.portServer != activeProposal.portServer {
+		t.Fatalf("candidate port-s = %d, want %d", candidate.portServer, activeProposal.portServer)
+	}
+	if candidate.portClient == activeProposal.portClient ||
+		candidate.spiClient == activeProposal.spiClient ||
+		candidate.spiServer == activeProposal.spiServer {
+		t.Fatalf("candidate security values were not rotated: %#v", candidate)
+	}
+	if session.securityProposal.spiClient != activeProposal.spiClient ||
+		session.securityProposal.spiServer != activeProposal.spiServer ||
+		session.securityProposal.portClient != activeProposal.portClient ||
+		session.securityProposal.portServer != activeProposal.portServer {
+		t.Fatalf("direct 200 replaced active proposal: %#v", session.securityProposal)
+	}
+}
+
 func TestSipInstanceIDUsesGSMAFormWhenIMEIIsAvailable(t *testing.T) {
 	identity := vowifi.SIMIdentity{IMEI: "353024112557010"}
 	if got := sipInstanceID(identity, "00000000-0000-4000-8000-000000000001"); got != "urn:gsma:imei:35302411-255701-0" {
@@ -665,19 +1046,21 @@ func TestSipInstanceIDUsesGSMAFormWhenIMEIIsAvailable(t *testing.T) {
 	}
 }
 
-func TestGSMAContactFormatUsesAddressAndDeviceInstance(t *testing.T) {
-	session := &Session{
-		identity:   identitySet{user: "234105776448519"},
-		transport:  "tcp",
-		instanceID: "urn:gsma:imei:35302411-255701-0",
+func TestSipInstanceIDUsesStableUUIDForICCIDFallback(t *testing.T) {
+	identity := vowifi.SIMIdentity{
+		IMEI:  "not-an-imei",
+		ICCID: "89 4410 0000 0000 0000 0",
 	}
-	got := session.buildContact("[2001:db8::1]:49686", vowifi.IMSRegisterOptions{
-		ContactFormat:    vowifi.IMSContactFormatGSMA,
-		ContactExtraTags: []string{"+g.3gpp.mid-call", "+g.3gpp.smsip"},
-	})
-	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:35302411-255701-0>"`
-	if got != want {
-		t.Fatalf("GSMA Contact = %q, want %q", got, want)
+	first := sipInstanceID(identity, "00000000-0000-4000-8000-000000000001")
+	second := sipInstanceID(identity, "00000000-0000-4000-8000-000000000002")
+	if first != second {
+		t.Fatalf("ICCID-derived instance changed with fallback UUID: %q != %q", first, second)
+	}
+	if !strings.HasPrefix(first, "urn:uuid:") || len(first) != len("urn:uuid:")+36 {
+		t.Fatalf("ICCID-derived instance has invalid UUID URN: %q", first)
+	}
+	if other := sipInstanceID(vowifi.SIMIdentity{ICCID: "8944100000000000001"}, ""); other == first {
+		t.Fatalf("different ICCIDs produced the same instance: %q", first)
 	}
 }
 
@@ -722,7 +1105,6 @@ func validateTestPANI(value string) error {
 }
 
 func serveRefreshFailure(listener *net.UDPConn, nonce string, rejectionStatus int) error {
-	var callID string
 	for step := 0; step < 4; step++ {
 		packet := make([]byte, 65535)
 		count, remote, err := listener.ReadFromUDP(packet)
@@ -734,13 +1116,11 @@ func serveRefreshFailure(listener *net.UDPConn, nonce string, rejectionStatus in
 			return err
 		}
 		if step == 0 {
-			callID = headers["call-id"]
 			if _, err := listener.WriteToUDP(
-				testResponse(
+				testResponseForHeaders(
 					401,
 					"Unauthorized",
-					callID,
-					headers["cseq"],
+					headers,
 					[]string{
 						`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` +
 							nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
@@ -757,11 +1137,10 @@ func serveRefreshFailure(listener *net.UDPConn, nonce string, rejectionStatus in
 				return errors.New("authenticated REGISTER omitted Authorization")
 			}
 			if _, err := listener.WriteToUDP(
-				testResponse(
+				testResponseForHeaders(
 					200,
 					"OK",
-					callID,
-					headers["cseq"],
+					headers,
 					[]string{
 						"P-Associated-URI: <tel:+8613800138000>",
 						"Contact: " + headers["contact"] + ";expires=600",
@@ -773,8 +1152,8 @@ func serveRefreshFailure(listener *net.UDPConn, nonce string, rejectionStatus in
 			}
 			continue
 		}
-		if headers["authorization"] != "" {
-			return errors.New("refresh reused the one-time AKAv1 RES")
+		if headers["authorization"] == "" {
+			return errors.New("refresh REGISTER omitted cached Authorization")
 		}
 		if step == 2 {
 			reason := "Service Unavailable"
@@ -782,7 +1161,7 @@ func serveRefreshFailure(listener *net.UDPConn, nonce string, rejectionStatus in
 				reason = "Forbidden"
 			}
 			if _, err := listener.WriteToUDP(
-				testResponse(rejectionStatus, reason, callID, headers["cseq"], nil),
+				testResponseForHeaders(rejectionStatus, reason, headers, nil),
 				remote,
 			); err != nil {
 				return err
@@ -796,7 +1175,7 @@ func serveRefreshFailure(listener *net.UDPConn, nonce string, rejectionStatus in
 			return fmt.Errorf("deregister Expires = %q, want 0", headers["expires"])
 		}
 		if _, err := listener.WriteToUDP(
-			testResponse(200, "OK", callID, headers["cseq"], nil),
+			testResponseForHeaders(200, "OK", headers, nil),
 			remote,
 		); err != nil {
 			return err
@@ -901,4 +1280,36 @@ func testResponse(
 	lines = append(lines, extraHeaders...)
 	lines = append(lines, "Content-Length: 0", "", "")
 	return []byte(strings.Join(lines, "\r\n"))
+}
+
+func testResponseForRequest(
+	status int,
+	reason string,
+	request *sipRequest,
+	extraHeaders []string,
+) []byte {
+	headers := append([]string{"Via: " + request.value("Via")}, extraHeaders...)
+	return testResponse(
+		status,
+		reason,
+		request.value("Call-ID"),
+		request.value("CSeq"),
+		headers,
+	)
+}
+
+func testResponseForHeaders(
+	status int,
+	reason string,
+	requestHeaders map[string]string,
+	extraHeaders []string,
+) []byte {
+	headers := append([]string{"Via: " + requestHeaders["via"]}, extraHeaders...)
+	return testResponse(
+		status,
+		reason,
+		requestHeaders["call-id"],
+		requestHeaders["cseq"],
+		headers,
+	)
 }

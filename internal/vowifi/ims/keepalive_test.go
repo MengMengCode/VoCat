@@ -96,21 +96,22 @@ func TestSIPCRLFKeepaliveRequiresViaNegotiation(t *testing.T) {
 
 func TestParseSIPViaKeepalive(t *testing.T) {
 	tests := []struct {
-		name     string
-		values   []string
-		want     bool
-		interval time.Duration
+		name       string
+		values     []string
+		want       bool
+		negotiated bool
+		interval   time.Duration
 	}{
 		{name: "no parameter", values: []string{"SIP/2.0/TCP pcscf.example.test:5060;rport"}},
-		{name: "bare keep compatibility permission", values: []string{"SIP/2.0/TCP pcscf.example.test:5060;rport;keep"}, want: true},
-		{name: "recommended interval", values: []string{"SIP/2.0/TCP pcscf.example.test:5060;rport;keep=90"}, want: true, interval: 90 * time.Second},
-		{name: "zero chooses local interval", values: []string{"SIP/2.0/TCP pcscf.example.test:5060;rport;keep=0"}, want: true},
+		{name: "bare keep is not negotiated", values: []string{"SIP/2.0/TCP pcscf.example.test:5060;rport;keep"}, want: true},
+		{name: "recommended interval", values: []string{"SIP/2.0/TCP pcscf.example.test:5060;rport;keep=90"}, want: true, negotiated: true, interval: 90 * time.Second},
+		{name: "zero chooses local interval", values: []string{"SIP/2.0/TCP pcscf.example.test:5060;rport;keep=0"}, want: true, negotiated: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, interval := parseSIPViaKeepalive(test.values)
-			if got != test.want || interval != test.interval {
-				t.Fatalf("parseSIPViaKeepalive() = (%t, %s), want (%t, %s)", got, interval, test.want, test.interval)
+			details := parseSIPViaKeepaliveDetails(test.values)
+			if details.present != test.want || details.negotiated != test.negotiated || details.interval != test.interval {
+				t.Fatalf("parseSIPViaKeepaliveDetails() = (present=%t, negotiated=%t, interval=%s), want (present=%t, negotiated=%t, interval=%s)", details.present, details.negotiated, details.interval, test.want, test.negotiated, test.interval)
 			}
 		})
 	}

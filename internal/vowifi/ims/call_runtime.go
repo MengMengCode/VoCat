@@ -75,7 +75,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	if err != nil {
 		return vowifi.Call{}, err
 	}
-	connection, _, err := session.waitForMainConnection(ctx)
+	connection, _, err := session.waitForOutboundFlow(ctx)
 	if err != nil {
 		return vowifi.Call{}, err
 	}
@@ -86,7 +86,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	cseq := session.cseq
 	session.cseq++
 	routes := append([]string(nil), session.evidence.ServiceRoute...)
-	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
+	securityHeaders := runtimeSecurityHeaders(session.cFlowSecurityActive(), session.securityAgreement.verifyValue)
 	fromIdentity, preferredIdentity, identitySource := session.callOriginatingIdentitiesLocked(carrierProfile)
 	session.mu.Unlock()
 	media, err := newRTPMedia(session.localMediaIP())
@@ -115,7 +115,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 		"To: "+to,
 		"Call-ID: "+callID,
 		fmt.Sprintf("CSeq: %d INVITE", cseq),
-		session.dialogContactHeader(),
+		session.dialogContactHeader(true),
 		"P-Preferred-Identity: <"+preferredIdentity+">",
 		"P-Preferred-Service: "+mmtelServiceURN,
 		`Accept-Contact: *;+g.3gpp.icsi-ref="`+mmtelFeatureTag+`"`,
@@ -137,14 +137,20 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	)
 	request := append([]byte(strings.Join(lines, "\r\n")), body...)
 	responses := make(chan *sipResponse, 8)
-	key := sipTransactionKey{callID: callID, cseq: cseq, method: "INVITE"}
+	key, err := sipClientTransactionKeyFromRequest(request, connection)
+	if err != nil {
+		_ = media.Close()
+		return vowifi.Call{}, err
+	}
 	session.transactionsMu.Lock()
 	if _, duplicate := session.transactions[key]; duplicate {
 		session.transactionsMu.Unlock()
 		_ = media.Close()
 		return vowifi.Call{}, errors.New("ims: duplicate call transaction")
 	}
-	session.transactions[key] = responses
+	session.transactions[key] = sipTransaction{
+		responses: responses,
+	}
 	session.transactionsMu.Unlock()
 	call := &imsCall{
 		public: vowifi.Call{ID: callID, Number: number, Direction: "outgoing", State: "dialing", StartedAt: time.Now().UTC()},
@@ -167,7 +173,7 @@ func (session *Session) DialCall(ctx context.Context, number string) (vowifi.Cal
 	_, err = connection.Write(request)
 	session.writeMu.Unlock()
 	if err != nil {
-		session.detachMainConnection(connection)
+		session.detachOutboundFlow(connection)
 		_ = media.Close()
 		session.transactionsMu.Lock()
 		delete(session.transactions, key)
@@ -280,7 +286,7 @@ func (session *Session) AnswerCall(_ context.Context, id string) (vowifi.Call, e
 		200,
 		session.fromTag,
 		call.media.answerSDP(session.localMediaIP()),
-		session.dialogContactHeader(),
+		session.dialogContactHeader(false),
 	)
 	if err != nil {
 		return vowifi.Call{}, err
@@ -384,12 +390,16 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 		session.calls[callID] = call
 		session.callMu.Unlock()
 		if session.provider != nil && session.provider.config.Logger != nil {
-			session.provider.config.Logger.Info("IMS incoming call received",
+			attributes := []any{
 				"category", "call",
 				"device_id", session.request.DeviceID,
 				"caller", call.public.Number,
 				"call_id", call.public.ID,
-			)
+			}
+			if flow := strings.TrimSpace(request.flow); flow != "" {
+				attributes = append(attributes, "flow", flow)
+			}
+			session.provider.config.Logger.Info("IMS incoming call received", attributes...)
 		}
 		if session.provider != nil && session.provider.config.OnIncomingCall != nil {
 			calledNumber := identityNumber(request.value("To"))
@@ -468,7 +478,7 @@ func (session *Session) handleCallRequest(request *sipRequest, respond func([]by
 
 func (session *Session) sendACK(call *imsCall) error {
 	request := session.buildDialogRequest(call, "ACK", call.cseq)
-	connection, _, _, err := session.currentConnection()
+	connection, _, _, err := session.currentOutboundFlow()
 	if err != nil {
 		return err
 	}
@@ -476,7 +486,7 @@ func (session *Session) sendACK(call *imsCall) error {
 	_, err = connection.Write(request)
 	session.writeMu.Unlock()
 	if err != nil {
-		session.detachMainConnection(connection)
+		session.detachOutboundFlow(connection)
 	}
 	return err
 }
@@ -489,7 +499,7 @@ func (session *Session) sendRejectedInviteACK(call *imsCall, response *sipRespon
 	if call == nil || response == nil || response.StatusCode < 300 {
 		return nil
 	}
-	connection, _, _, err := session.currentConnection()
+	connection, _, _, err := session.currentOutboundFlow()
 	if err != nil {
 		return errors.New("ims: SIP connection unavailable for rejected INVITE ACK")
 	}
@@ -507,7 +517,7 @@ func (session *Session) sendRejectedInviteACK(call *imsCall, response *sipRespon
 		"Max-Forwards: 70",
 	}
 	session.mu.Lock()
-	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
+	securityHeaders := runtimeSecurityHeaders(session.cFlowSecurityActive(), session.securityAgreement.verifyValue)
 	session.mu.Unlock()
 	lines = append(lines, securityHeaders...)
 	for _, route := range call.routes {
@@ -529,7 +539,7 @@ func (session *Session) sendRejectedInviteACK(call *imsCall, response *sipRespon
 	_, err = connection.Write([]byte(strings.Join(lines, "\r\n")))
 	session.writeMu.Unlock()
 	if err != nil {
-		session.detachMainConnection(connection)
+		session.detachOutboundFlow(connection)
 	}
 	return err
 }
@@ -593,7 +603,7 @@ func (session *Session) sendPRACK(call *imsCall, response *sipResponse) {
 		"Max-Forwards: 70",
 	}
 	session.mu.Lock()
-	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
+	securityHeaders := runtimeSecurityHeaders(session.cFlowSecurityActive(), session.securityAgreement.verifyValue)
 	session.mu.Unlock()
 	lines = append(lines, securityHeaders...)
 	for _, route := range routes {
@@ -610,7 +620,7 @@ func (session *Session) sendPRACK(call *imsCall, response *sipResponse) {
 	)
 	ctx, cancel := context.WithTimeout(session.refreshContext, 10*time.Second)
 	defer cancel()
-	result, err := session.exchangeRuntime(ctx, []byte(strings.Join(lines, "\r\n")), sipTransactionKey{callID: call.callID, cseq: cseq, method: "PRACK"})
+	result, err := session.exchangeRuntime(ctx, []byte(strings.Join(lines, "\r\n")))
 	if err != nil || result.StatusCode < 200 || result.StatusCode >= 300 {
 		reason := "reliable provisional response could not be acknowledged"
 		if err != nil {
@@ -634,7 +644,7 @@ func (session *Session) handleDialogOffer(request *sipRequest, respond func([]by
 	}
 	extraHeaders := []string(nil)
 	if request.Method == "INVITE" {
-		extraHeaders = append(extraHeaders, session.dialogContactHeader())
+		extraHeaders = append(extraHeaders, session.dialogContactHeader(false))
 	}
 	response, err := buildSIPResponseWithBody(request, 200, session.fromTag, body, extraHeaders...)
 	if err == nil {
@@ -681,7 +691,7 @@ func (session *Session) startSessionTimer(call *imsCall, header string) {
 }
 
 func (session *Session) sendDialogRequest(ctx context.Context, call *imsCall, method string) error {
-	if _, _, err := session.waitForMainConnection(ctx); err != nil {
+	if _, _, err := session.waitForOutboundFlow(ctx); err != nil {
 		return err
 	}
 	cseq := call.cseq
@@ -693,7 +703,7 @@ func (session *Session) sendDialogRequest(ctx context.Context, call *imsCall, me
 	}
 	request := session.buildDialogRequest(call, method, cseq)
 	if method == "ACK" {
-		connection, _, _, err := session.currentConnection()
+		connection, _, _, err := session.currentOutboundFlow()
 		if err != nil {
 			return err
 		}
@@ -701,11 +711,11 @@ func (session *Session) sendDialogRequest(ctx context.Context, call *imsCall, me
 		_, err = connection.Write(request)
 		session.writeMu.Unlock()
 		if err != nil {
-			session.detachMainConnection(connection)
+			session.detachOutboundFlow(connection)
 		}
 		return err
 	}
-	response, err := session.exchangeRuntime(ctx, request, sipTransactionKey{callID: call.callID, cseq: cseq, method: method})
+	response, err := session.exchangeRuntime(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -734,7 +744,7 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 		"Max-Forwards: 70",
 	}
 	session.mu.Lock()
-	securityHeaders := runtimeSecurityHeaders(session.securityActive, session.securityAgreement.verifyValue)
+	securityHeaders := runtimeSecurityHeaders(session.cFlowSecurityActive(), session.securityAgreement.verifyValue)
 	session.mu.Unlock()
 	lines = append(lines, securityHeaders...)
 	for _, route := range call.routes {
@@ -753,7 +763,7 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 		lines = session.appendPAccessNetworkInfoHeader(lines)
 	}
 	if method == "UPDATE" {
-		lines = append(lines, session.dialogContactHeader())
+		lines = append(lines, session.dialogContactHeader(false))
 	}
 	lines = append(lines, "Content-Length: 0", "", "")
 	if method == "UPDATE" && call.sessionExpires > 0 {
@@ -763,7 +773,7 @@ func (session *Session) buildDialogRequest(call *imsCall, method string, cseq ui
 }
 
 func (session *Session) localMediaIP() net.IP {
-	connection, _, _, err := session.currentConnection()
+	connection, _, _, err := session.currentOutboundFlow()
 	if err != nil {
 		return nil
 	}
@@ -771,7 +781,7 @@ func (session *Session) localMediaIP() net.IP {
 }
 
 func (session *Session) localSIPAddress() string {
-	connection, _, _, err := session.currentConnection()
+	connection, _, _, err := session.currentOutboundFlow()
 	if err != nil {
 		return ""
 	}
@@ -813,21 +823,17 @@ func buildSIPResponseWithBody(request *sipRequest, status int, tag string, body 
 	return append([]byte(strings.Join(lines, "\r\n")), body...), nil
 }
 
-func (session *Session) dialogContactHeader() string {
+func (session *Session) dialogContactHeader(includeOutbound bool) string {
 	if session == nil || strings.TrimSpace(session.identity.user) == "" {
 		return ""
 	}
-	if _, _, _, err := session.currentConnection(); err != nil {
+	if _, _, _, err := session.currentOutboundFlow(); err != nil {
 		return ""
 	}
-	if session.imsRegisterOptions().ContactFormat == vowifi.IMSContactFormatGSMA {
-		contact := "Contact: <sip:" + session.contactAddress() + `>;+g.3gpp.icsi-ref="` + mmtelFeatureTag + `"`
-		if strings.TrimSpace(session.instanceID) != "" {
-			contact += `;+sip.instance="<` + session.instanceID + `>"`
-		}
-		return contact
-	}
 	contact := "Contact: <sip:" + session.identity.user + "@" + session.contactAddress() + ";transport=" + session.transport + ">"
+	if includeOutbound && session.outboundRegistrationConfirmed() {
+		contact += ";ob"
+	}
 	if strings.TrimSpace(session.instanceID) != "" {
 		contact += `;+sip.instance="<` + session.instanceID + `>"`
 	}
@@ -1003,6 +1009,9 @@ func (session *Session) finishCall(id, state string, code int, reason string) {
 			"reason", completed.Reason,
 			"media_ready", completed.MediaReady,
 			"codec", completed.Codec,
+		}
+		if strings.TrimSpace(completed.Number) != "" {
+			attributes = append(attributes, "caller", completed.Number)
 		}
 		if !completed.StartedAt.IsZero() {
 			attributes = append(attributes, "duration_ms", time.Since(completed.StartedAt).Milliseconds())

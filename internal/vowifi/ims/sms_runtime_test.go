@@ -25,36 +25,103 @@ func (smsTestAKA) ReadSMSCenter(context.Context, string) (string, error) {
 	return "+447785016005", nil
 }
 
-func TestMainSIPTCPEOFKeepsIPSecSessionAndHandlesReverseAsInbound(t *testing.T) {
-	mainConnection, mainPeer := net.Pipe()
-	defer mainPeer.Close()
+func TestSIPResponseMustArriveOnTransactionConnection(t *testing.T) {
+	expected, expectedPeer := net.Pipe()
+	defer expected.Close()
+	defer expectedPeer.Close()
+	other, otherPeer := net.Pipe()
+	defer other.Close()
+	defer otherPeer.Close()
+
+	key := sipTransactionKey{branch: "z9hG4bKflow-bound", method: "REGISTER", connection: expected}
+	responses := make(chan *sipResponse, 1)
+	session := &Session{
+		transactions: map[sipTransactionKey]sipTransaction{
+			key: {responses: responses},
+		},
+	}
+	packet := sipPacket{Response: &sipResponse{
+		StatusCode: 200,
+		Headers: map[string][]string{
+			"via":  {"SIP/2.0/TCP pcscf.example.test;branch=" + key.branch},
+			"cseq": {"7 REGISTER"},
+		},
+	}}
+	wrongBranch := sipPacket{Response: &sipResponse{
+		StatusCode: 200,
+		Headers: map[string][]string{
+			"via":  {"SIP/2.0/TCP pcscf.example.test;branch=z9hG4bKother"},
+			"cseq": {"7 REGISTER"},
+		},
+	}}
+	wrongMethod := sipPacket{Response: &sipResponse{
+		StatusCode: 200,
+		Headers: map[string][]string{
+			"via":  {"SIP/2.0/TCP pcscf.example.test;branch=" + key.branch},
+			"cseq": {"7 OPTIONS"},
+		},
+	}}
+
+	for name, candidate := range map[string]sipPacket{
+		"branch": wrongBranch,
+		"method": wrongMethod,
+	} {
+		session.dispatchPacketFrom(candidate, outboundFlowName, expected, nil)
+		select {
+		case response := <-responses:
+			t.Fatalf("response with wrong %s completed transaction: %#v", name, response)
+		default:
+		}
+	}
+
+	session.dispatchPacketFrom(packet, inboundFlowName, other, nil)
+	select {
+	case response := <-responses:
+		t.Fatalf("response from another connection completed transaction: %#v", response)
+	default:
+	}
+
+	session.dispatchPacketFrom(packet, outboundFlowName, expected, nil)
+	select {
+	case response := <-responses:
+		if response.StatusCode != 200 {
+			t.Fatalf("matched response status = %d", response.StatusCode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("response from transaction connection was not delivered")
+	}
+}
+
+func TestOutboundFlowTCPEOFKeepsIPSecSessionAndHandlesInboundFlowAsInbound(t *testing.T) {
+	outboundFlowConnection, outboundFlowPeer := net.Pipe()
+	defer outboundFlowPeer.Close()
 	ready := make(chan struct{})
 	close(ready)
 	session := &Session{
-		provider:           &Provider{config: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}},
-		transport:          "tcp",
-		conn:               mainConnection,
-		reader:             bufio.NewReader(mainConnection),
-		mainConnReady:      ready,
-		mainConnChanged:    make(chan struct{}),
-		failures:           make(chan error, 1),
-		securityActive:     true,
-		fromTag:            "reverse-flow-test",
-		inboundConnections: make(map[net.Conn]struct{}),
+		provider:              &Provider{config: Config{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}},
+		transport:             "tcp",
+		conn:                  outboundFlowConnection,
+		reader:                bufio.NewReader(outboundFlowConnection),
+		outboundFlowReady:     ready,
+		outboundFlowChanged:   make(chan struct{}),
+		failures:              make(chan error, 1),
+		securityActive:        true,
+		fromTag:               "inbound-test",
+		inboundTCPConnections: make(map[net.Conn]struct{}),
 	}
 	session.receiveDone.Add(1)
-	go session.readMainConnection(mainConnection, session.reader)
-	_ = mainPeer.Close()
+	go session.readOutboundFlow(outboundFlowConnection, session.reader)
+	_ = outboundFlowPeer.Close()
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if _, _, _, err := session.currentConnection(); errors.Is(err, errSIPConnectionUnavailable) {
+		if _, _, _, err := session.currentOutboundFlow(); errors.Is(err, errSIPConnectionUnavailable) {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, _, _, err := session.currentConnection(); !errors.Is(err, errSIPConnectionUnavailable) {
-		t.Fatal("main SIP TCP connection was not detached after EOF")
+	if _, _, _, err := session.currentOutboundFlow(); !errors.Is(err, errSIPConnectionUnavailable) {
+		t.Fatal("outbound TCP connection was not detached after EOF")
 	}
 	select {
 	case err := <-session.failures:
@@ -62,35 +129,35 @@ func TestMainSIPTCPEOFKeepsIPSecSessionAndHandlesReverseAsInbound(t *testing.T) 
 	case <-time.After(20 * time.Millisecond):
 	}
 
-	reverseConnection, reversePeer := net.Pipe()
-	defer reversePeer.Close()
+	inboundFlowConnection, inboundFlowPeer := net.Pipe()
+	defer inboundFlowPeer.Close()
 	session.inboundMu.Lock()
-	session.inboundConnections[reverseConnection] = struct{}{}
+	session.inboundTCPConnections[inboundFlowConnection] = struct{}{}
 	session.inboundMu.Unlock()
 	session.receiveDone.Add(1)
-	go session.readInboundTCP(reverseConnection)
+	go session.readInboundTCP(inboundFlowConnection)
 
 	request := []byte("OPTIONS sip:ims.example.test SIP/2.0\r\n" +
-		"Via: SIP/2.0/TCP reverse.example.test:5064;branch=z9hG4bKreverse\r\n" +
+		"Via: SIP/2.0/TCP inbound.example.test:5064;branch=z9hG4bKinbound\r\n" +
 		"From: <sip:caller@example.test>;tag=caller\r\n" +
 		"To: <sip:user@example.test>\r\n" +
-		"Call-ID: reverse-flow-test\r\n" +
+		"Call-ID: inbound-test\r\n" +
 		"CSeq: 1 OPTIONS\r\n" +
 		"Content-Length: 0\r\n\r\n")
-	if _, err := reversePeer.Write(request); err != nil {
-		t.Fatal("write reverse SIP request:", err)
+	if _, err := inboundFlowPeer.Write(request); err != nil {
+		t.Fatal("write inbound SIP request:", err)
 	}
-	response, err := readSIPPacket(bufio.NewReader(reversePeer))
+	response, err := readSIPPacket(bufio.NewReader(inboundFlowPeer))
 	if err != nil {
-		t.Fatal("read reverse SIP response:", err)
+		t.Fatal("read inbound SIP response:", err)
 	}
 	if response.Response == nil || response.Response.StatusCode != 200 {
-		t.Fatalf("reverse SIP response = %#v, want 200 response", response)
+		t.Fatalf("inbound SIP response = %#v, want 200 response", response)
 	}
-	if _, _, _, err := session.currentConnection(); !errors.Is(err, errSIPConnectionUnavailable) {
-		t.Fatalf("reverse connection became main SIP flow: %v", err)
+	if _, _, _, err := session.currentOutboundFlow(); !errors.Is(err, errSIPConnectionUnavailable) {
+		t.Fatalf("inbound connection became outbound: %v", err)
 	}
-	_ = reversePeer.Close()
+	_ = inboundFlowPeer.Close()
 	session.receiveDone.Wait()
 }
 
@@ -427,8 +494,7 @@ func serveInboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- s
 	if err := validateTestPANI(registerPANI); err != nil {
 		return fmt.Errorf("initial REGISTER PANI: %w", err)
 	}
-	callID := headers["call-id"]
-	if _, err = listener.WriteToUDP(testResponse(401, "Unauthorized", callID, headers["cseq"], []string{
+	if _, err = listener.WriteToUDP(testResponseForHeaders(401, "Unauthorized", headers, []string{
 		`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` + nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
 	}), remote); err != nil {
 		return err
@@ -444,7 +510,7 @@ func serveInboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- s
 	if headers["p-access-network-info"] != registerPANI {
 		return errors.New("authenticated REGISTER changed PANI")
 	}
-	if _, err = listener.WriteToUDP(testResponse(200, "OK", callID, headers["cseq"], []string{
+	if _, err = listener.WriteToUDP(testResponseForHeaders(200, "OK", headers, []string{
 		"Contact: " + headers["contact"] + ";expires=600",
 	}), remote); err != nil {
 		return err
@@ -514,7 +580,7 @@ func serveInboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- s
 	if report.Request.value("P-Access-Network-Info") != registerPANI {
 		return errors.New("inbound SMS RP-ACK did not reuse REGISTER PANI")
 	}
-	if _, err = listener.WriteToUDP(testResponse(200, "OK", report.Request.value("Call-ID"), report.Request.value("CSeq"), nil), remote); err != nil {
+	if _, err = listener.WriteToUDP(testResponseForRequest(200, "OK", report.Request, nil), remote); err != nil {
 		return err
 	}
 	close(readyForClose)
@@ -533,7 +599,7 @@ func serveInboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- s
 	if headers["p-access-network-info"] != registerPANI {
 		return errors.New("deregistration changed PANI")
 	}
-	_, err = listener.WriteToUDP(testResponse(200, "OK", callID, headers["cseq"], nil), remote)
+	_, err = listener.WriteToUDP(testResponseForHeaders(200, "OK", headers, nil), remote)
 	return err
 }
 
@@ -551,8 +617,7 @@ func serveOutboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	if err := validateTestPANI(registerPANI); err != nil {
 		return fmt.Errorf("initial REGISTER PANI: %w", err)
 	}
-	registerCallID := headers["call-id"]
-	if _, err = listener.WriteToUDP(testResponse(401, "Unauthorized", registerCallID, headers["cseq"], []string{
+	if _, err = listener.WriteToUDP(testResponseForHeaders(401, "Unauthorized", headers, []string{
 		`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` + nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
 	}), remote); err != nil {
 		return err
@@ -568,7 +633,7 @@ func serveOutboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	if headers["p-access-network-info"] != registerPANI {
 		return errors.New("authenticated REGISTER changed PANI")
 	}
-	if _, err = listener.WriteToUDP(testResponse(200, "OK", registerCallID, headers["cseq"], []string{
+	if _, err = listener.WriteToUDP(testResponseForHeaders(200, "OK", headers, []string{
 		"Contact: " + headers["contact"] + ";expires=600",
 	}), remote); err != nil {
 		return err
@@ -623,7 +688,7 @@ func serveOutboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	if len(tpdu) < 2 || tpdu[0]&0x03 != 1 || tpdu[0]&0x20 == 0 || tpdu[1] != body[1] {
 		return fmt.Errorf("SMS-SUBMIT did not request a trackable status report: %x", tpdu)
 	}
-	if _, err = listener.WriteToUDP(testResponse(202, "Accepted", message.Request.value("Call-ID"), message.Request.value("CSeq"), nil), remote); err != nil {
+	if _, err = listener.WriteToUDP(testResponseForRequest(202, "Accepted", message.Request, nil), remote); err != nil {
 		return err
 	}
 
@@ -670,7 +735,7 @@ func serveOutboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	if statusACK.Request.value("P-Access-Network-Info") != registerPANI {
 		return errors.New("status-report RP-ACK did not reuse REGISTER PANI")
 	}
-	if _, err = listener.WriteToUDP(testResponse(200, "OK", statusACK.Request.value("Call-ID"), statusACK.Request.value("CSeq"), nil), remote); err != nil {
+	if _, err = listener.WriteToUDP(testResponseForRequest(200, "OK", statusACK.Request, nil), remote); err != nil {
 		return err
 	}
 	close(readyForClose)
@@ -689,7 +754,7 @@ func serveOutboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	if headers["p-access-network-info"] != registerPANI {
 		return errors.New("deregistration changed PANI")
 	}
-	_, err = listener.WriteToUDP(testResponse(200, "OK", registerCallID, headers["cseq"], nil), remote)
+	_, err = listener.WriteToUDP(testResponseForHeaders(200, "OK", headers, nil), remote)
 	return err
 }
 
@@ -761,8 +826,7 @@ func serveInboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	if err != nil {
 		return err
 	}
-	callID := headers["call-id"]
-	if _, err = listener.WriteToUDP(testResponse(401, "Unauthorized", callID, headers["cseq"], []string{
+	if _, err = listener.WriteToUDP(testResponseForHeaders(401, "Unauthorized", headers, []string{
 		`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` + nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
 	}), remote); err != nil {
 		return err
@@ -775,7 +839,7 @@ func serveInboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	if err != nil {
 		return err
 	}
-	if _, err = listener.WriteToUDP(testResponse(200, "OK", callID, headers["cseq"], []string{
+	if _, err = listener.WriteToUDP(testResponseForHeaders(200, "OK", headers, []string{
 		"Contact: " + headers["contact"] + ";expires=600",
 	}), remote); err != nil {
 		return err
@@ -819,7 +883,7 @@ func serveInboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	if headers["expires"] != "0" {
 		return errors.New("expected deregistration")
 	}
-	_, err = listener.WriteToUDP(testResponse(200, "OK", callID, headers["cseq"], nil), remote)
+	_, err = listener.WriteToUDP(testResponseForHeaders(200, "OK", headers, nil), remote)
 	return err
 }
 
@@ -845,7 +909,7 @@ func TestSessionReceivesMalformedSMSBestEffort(t *testing.T) {
 		}},
 		request:         vowifi.IMSRequest{DeviceID: "ec20", Identity: vowifi.SIMIdentity{IMSI: "001010123456789", HomeMCC: "001", HomeMNC: "01"}},
 		conn:            &fakeConn{},
-		transactions:    make(map[sipTransactionKey]chan *sipResponse),
+		transactions:    make(map[sipTransactionKey]sipTransaction),
 		fromTag:         "tag",
 		nextRPReference: 1,
 	}
@@ -973,8 +1037,7 @@ func serveOutboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<-
 	if err != nil {
 		return err
 	}
-	registerCallID := headers["call-id"]
-	if _, err = listener.WriteToUDP(testResponse(401, "Unauthorized", registerCallID, headers["cseq"], []string{
+	if _, err = listener.WriteToUDP(testResponseForHeaders(401, "Unauthorized", headers, []string{
 		`WWW-Authenticate: Digest realm="ims.mnc001.mcc001.3gppnetwork.org", nonce="` + nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
 	}), remote); err != nil {
 		return err
@@ -987,7 +1050,7 @@ func serveOutboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<-
 	if err != nil {
 		return err
 	}
-	if _, err = listener.WriteToUDP(testResponse(200, "OK", registerCallID, headers["cseq"], []string{
+	if _, err = listener.WriteToUDP(testResponseForHeaders(200, "OK", headers, []string{
 		"Contact: " + headers["contact"] + ";expires=600",
 	}), remote); err != nil {
 		return err
@@ -1015,6 +1078,7 @@ func serveOutboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<-
 	replyBody := buildUSSDBody("Reply")
 	reply := []byte(strings.Join([]string{
 		"SIP/2.0 200 OK",
+		"Via: " + message.Request.value("Via"),
 		"Call-ID: " + message.Request.value("Call-ID"),
 		"CSeq: " + message.Request.value("CSeq"),
 		"Content-Type: application/vnd.3gpp.ussd",
@@ -1038,7 +1102,7 @@ func serveOutboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<-
 	if headers["expires"] != "0" {
 		return errors.New("expected deregistration")
 	}
-	_, err = listener.WriteToUDP(testResponse(200, "OK", registerCallID, headers["cseq"], nil), remote)
+	_, err = listener.WriteToUDP(testResponseForHeaders(200, "OK", headers, nil), remote)
 	return err
 }
 

@@ -1,6 +1,7 @@
 package ims
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 )
@@ -22,6 +23,14 @@ func TestParseSIPResponseAndSplitIdentityHeaders(t *testing.T) {
 	}
 	if response.StatusCode != 200 || string(response.Body) != "body" {
 		t.Fatalf("unexpected response: %#v", response)
+	}
+	headerEnd := bytes.Index(packet, []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		t.Fatal("test SIP response has no header delimiter")
+	}
+	wantRawHeaders := packet[:headerEnd+len("\r\n\r\n")]
+	if string(response.rawHeaders) != string(wantRawHeaders) {
+		t.Fatalf("raw headers changed: got %q, want %q", response.rawHeaders, wantRawHeaders)
 	}
 	identities := splitHeaderValues(response.values("P-Associated-URI"))
 	wantIdentities := []string{
@@ -64,6 +73,10 @@ func TestParseSIPMessageRequestWithBinaryBody(t *testing.T) {
 		message.Request.URI != "sip:user@example.test" ||
 		!reflect.DeepEqual(message.Request.Body, body) {
 		t.Fatalf("message = %#v", message)
+	}
+	headerEnd := bytes.Index(packet, []byte("\r\n\r\n"))
+	if headerEnd < 0 || string(message.Request.rawHeaders) != string(packet[:headerEnd+len("\r\n\r\n")]) {
+		t.Fatalf("raw request headers changed: got %q", message.Request.rawHeaders)
 	}
 }
 

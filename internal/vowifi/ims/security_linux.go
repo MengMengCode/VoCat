@@ -23,6 +23,7 @@ type linuxIPSecHandle struct {
 	mu        sync.Mutex
 	ipCommand string
 	config    IPSecSAConfig
+	pair      IPSecFlowPair
 	closed    bool
 }
 
@@ -55,6 +56,40 @@ func (installer linuxIPSecInstaller) Install(ctx context.Context, config IPSecSA
 	return handle, nil
 }
 
+func (installer linuxIPSecInstaller) InstallPair(
+	ctx context.Context,
+	config IPSecSAConfig,
+	pair IPSecFlowPair,
+) (IPSecSAHandle, error) {
+	command := installer.ipCommand
+	if command == "" {
+		command = "ip"
+	}
+	if _, err := exec.LookPath(command); err != nil {
+		return nil, errors.New("ims: Linux iproute2 is required for ipsec-3gpp")
+	}
+	install, err := buildXFRMFlowPairInstallPlan(config, pair)
+	if err != nil {
+		return nil, err
+	}
+	handle := &linuxIPSecHandle{
+		ipCommand: command,
+		config:    cloneIPSecSAConfig(config),
+		pair:      pair,
+	}
+	for _, operation := range install {
+		if err := runIPCommand(ctx, command, operation); err != nil {
+			_ = handle.cleanup(context.Background())
+			zeroBytes(handle.config.EncryptionKey)
+			zeroBytes(handle.config.IntegrityKey)
+			return nil, fmt.Errorf("%w: %v", ErrIPSecInstall, err)
+		}
+	}
+	zeroBytes(handle.config.EncryptionKey)
+	zeroBytes(handle.config.IntegrityKey)
+	return handle, nil
+}
+
 func (handle *linuxIPSecHandle) Close(ctx context.Context) error {
 	handle.mu.Lock()
 	defer handle.mu.Unlock()
@@ -67,7 +102,11 @@ func (handle *linuxIPSecHandle) Close(ctx context.Context) error {
 
 func (handle *linuxIPSecHandle) cleanup(ctx context.Context) error {
 	var cleanupErrors []error
-	for _, operation := range buildXFRMCleanupPlan(handle.config) {
+	cleanupPlan := buildXFRMCleanupPlan(handle.config)
+	if handle.pair != 0 {
+		cleanupPlan, _ = buildXFRMFlowPairCleanupPlan(handle.config, handle.pair)
+	}
+	for _, operation := range cleanupPlan {
 		if err := runIPCommand(ctx, handle.ipCommand, operation); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 		}

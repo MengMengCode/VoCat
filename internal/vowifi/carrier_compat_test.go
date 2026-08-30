@@ -51,7 +51,7 @@ func TestResolveCarrierProfileGiffgaffIMSHeaders(t *testing.T) {
 		IMSI: "234100000000001", HomeMCC: "234", HomeMNC: "10", GID1: "508FFFFF",
 	})
 	options := profile.IMSRegisterOptions
-	if profile.IMSTransport != "tcp" || options.ContactFormat != IMSContactFormatGSMA {
+	if profile.IMSTransport != "tcp" || options.ContactFormat != "" {
 		t.Fatalf("giffgaff IMS transport/contact profile = %#v", profile)
 	}
 	if profile.IMSUserAgent != "iOS/18.6.2 iPhone" {
@@ -63,8 +63,8 @@ func TestResolveCarrierProfileGiffgaffIMSHeaders(t *testing.T) {
 	if profile.PANIEnabled == nil || !*profile.PANIEnabled || profile.PANICountry != "AUTO" {
 		t.Fatalf("giffgaff PANI behavior = enabled=%v country=%q", profile.PANIEnabled, profile.PANICountry)
 	}
-	if len(options.ContactExtraTags) != 2 || options.ContactExtraTags[0] != "+g.3gpp.mid-call" || options.ContactExtraTags[1] != "+g.3gpp.smsip" {
-		t.Fatalf("giffgaff Contact tags = %#v", options.ContactExtraTags)
+	if len(options.ContactExtraTags) != 0 {
+		t.Fatalf("giffgaff should not use carrier Contact tag overrides: %#v", options.ContactExtraTags)
 	}
 }
 
