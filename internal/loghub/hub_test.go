@@ -33,6 +33,7 @@ func TestHubHistoryFiltersAndBounds(t *testing.T) {
 }
 
 func TestHubRedactsDownstreamAndHistoryAndPreservesErrors(t *testing.T) {
+	t.Setenv(unsafeDisableRedactionEnv, "")
 	var output bytes.Buffer
 	hub := New(slog.NewJSONHandler(&output, nil), 100)
 	logger := slog.New(hub).With("imsi", "234159611634973")
@@ -62,6 +63,7 @@ func TestHubRedactsDownstreamAndHistoryAndPreservesErrors(t *testing.T) {
 }
 
 func TestSanitizeEntryProtectsLegacyNestedFields(t *testing.T) {
+	t.Setenv(unsafeDisableRedactionEnv, "")
 	entry := SanitizeEntry(Entry{
 		Message: "incoming SIP from sip:+447700900123@ims.example",
 		Fields: map[string]any{
@@ -74,6 +76,33 @@ func TestSanitizeEntryProtectsLegacyNestedFields(t *testing.T) {
 	details := entry.Fields["details"].(map[string]any)
 	if strings.Contains(details["associated_number"].(string), "447700900456") {
 		t.Fatalf("nested field leaked: %#v", details)
+	}
+}
+
+func TestDeveloperSwitchDisablesCentralRedaction(t *testing.T) {
+	t.Setenv(unsafeDisableRedactionEnv, "1")
+	const identity = "234159611634973"
+
+	if got := RedactString(identity); got != identity {
+		t.Fatalf("RedactString() = %q, want the original value", got)
+	}
+	entry := SanitizeEntry(Entry{
+		Message: "subscriber " + identity,
+		Fields:  map[string]any{"imsi": identity},
+	})
+	if entry.Message != "subscriber "+identity || entry.Fields["imsi"] != identity {
+		t.Fatalf("SanitizeEntry() = %#v, want unredacted values", entry)
+	}
+
+	var output bytes.Buffer
+	hub := New(slog.NewJSONHandler(&output, nil), 100)
+	slog.New(hub).Warn("subscriber "+identity, "imsi", identity)
+	logged := hub.History(1, slog.LevelDebug, "")[0]
+	if logged.Message != "subscriber "+identity || logged.Fields["imsi"] != identity {
+		t.Fatalf("history entry = %#v, want unredacted values", logged)
+	}
+	if !strings.Contains(output.String(), identity) {
+		t.Fatalf("downstream output did not contain the original identity: %s", output.String())
 	}
 }
 

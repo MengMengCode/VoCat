@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -18,6 +19,20 @@ var (
 	labeledIdentityPattern    = regexp.MustCompile(`(?i)\b(iccid|imsi|msisdn|imei|eid)\s*([=:])\s*([a-z0-9+_-]{7,})`)
 )
 
+// This switch is intentionally undocumented in the CLI and public
+// configuration. It exists only for controlled developer/source audits where
+// the normal identity redaction would hide the value being investigated.
+const unsafeDisableRedactionEnv = "VOCAT_UNSAFE_DISABLE_LOG_REDACTION"
+
+func redactionDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(unsafeDisableRedactionEnv))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // IsHTTPAccessEntry identifies legacy request-traffic entries. Access traffic
 // is intentionally excluded from the user diagnostic log surface.
 func IsHTTPAccessEntry(entry Entry) bool {
@@ -31,6 +46,9 @@ func IsHTTPAccessEntry(entry Entry) bool {
 // SanitizeEntry also protects records that were persisted by an older build
 // before central redaction was introduced.
 func SanitizeEntry(entry Entry) Entry {
+	if redactionDisabled() {
+		return entry
+	}
 	entry.Message = RedactString(entry.Message)
 	entry.Caller = RedactString(entry.Caller)
 	if entry.Fields != nil {
@@ -42,7 +60,7 @@ func SanitizeEntry(entry Entry) Entry {
 // RedactString masks common telecom identities while retaining enough of the
 // suffix to correlate repeated events in an exported diagnostic log.
 func RedactString(value string) string {
-	if value == "" {
+	if value == "" || redactionDisabled() {
 		return value
 	}
 	value = labeledIdentityPattern.ReplaceAllStringFunc(value, func(match string) string {
@@ -59,6 +77,9 @@ func RedactString(value string) string {
 }
 
 func sanitizeRecord(record slog.Record) slog.Record {
+	if redactionDisabled() {
+		return record
+	}
 	clean := slog.NewRecord(record.Time, record.Level, RedactString(record.Message), record.PC)
 	record.Attrs(func(attr slog.Attr) bool {
 		clean.AddAttrs(sanitizeAttr(attr))
@@ -68,6 +89,9 @@ func sanitizeRecord(record slog.Record) slog.Record {
 }
 
 func sanitizeAttrs(attrs []slog.Attr) []slog.Attr {
+	if redactionDisabled() {
+		return append([]slog.Attr(nil), attrs...)
+	}
 	clean := make([]slog.Attr, 0, len(attrs))
 	for _, attr := range attrs {
 		clean = append(clean, sanitizeAttr(attr))
@@ -76,6 +100,9 @@ func sanitizeAttrs(attrs []slog.Attr) []slog.Attr {
 }
 
 func sanitizeAttr(attr slog.Attr) slog.Attr {
+	if redactionDisabled() {
+		return attr
+	}
 	attr.Value = attr.Value.Resolve()
 	if attr.Equal(slog.Attr{}) {
 		return attr
@@ -106,8 +133,8 @@ func attrsToAny(attrs []slog.Attr) []any {
 }
 
 func sanitizeAny(value any, key string) any {
-	if value == nil {
-		return nil
+	if value == nil || redactionDisabled() {
+		return value
 	}
 	if sensitiveKey(key) {
 		return maskToken(valueText(value))
