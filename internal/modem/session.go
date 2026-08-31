@@ -480,7 +480,7 @@ func readTransportContext(
 	}
 	count, err := transport.Read(buffer)
 	if contextErr := ctx.Err(); contextErr != nil {
-		return count, contextErr
+		return 0, contextErr
 	}
 	return count, err
 }

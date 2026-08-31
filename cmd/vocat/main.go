@@ -45,6 +45,7 @@ import (
 const (
 	flightModeTransitionTimeout = 45 * time.Second
 	deviceStartupTimeout        = 4 * time.Minute
+	stableModemWaitTimeout      = 45 * time.Second
 )
 
 func deviceStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -233,14 +234,16 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	// database/configuration deadline for this hardware lifecycle.
 	deviceStartupContext, cancelDeviceStartup := deviceStartupContext(startupContext)
 	defer cancelDeviceStartup()
+	stableModemContext, cancelStableModem := context.WithTimeout(deviceStartupContext, stableModemWaitTimeout)
 	if err := deviceManager.WaitForStableModem(
-		deviceStartupContext,
+		stableModemContext,
 		20*time.Second,
 		time.Second,
 		20*time.Second,
 	); err != nil {
 		logger.Warn("wait for stable modem enumeration", "error", err)
 	}
+	cancelStableModem()
 	if err := deviceManager.Start(deviceStartupContext); err != nil {
 		logger.Warn("device discovery is not available at startup", "error", err)
 	}

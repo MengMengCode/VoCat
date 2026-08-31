@@ -755,9 +755,10 @@ func (manager *Manager) backendFor(state *managedDevice) string {
 // SetESIMTransport selects the control path used for eUICC APDU operations.
 // It is intentionally independent from the registration/data backend: an EC20
 // can use QMI for cellular state while using AT+CSIM for its eUICC.
+// An empty value clears the override and falls back to the selected backend.
 func (manager *Manager) SetESIMTransport(id, transport string) error {
 	transport = strings.ToLower(strings.TrimSpace(transport))
-	if transport != "at" && transport != "qmi" && transport != "pcsc" && transport != "none" {
+	if transport != "" && transport != "at" && transport != "qmi" && transport != "pcsc" && transport != "none" {
 		return fmt.Errorf("unsupported eSIM transport %q", transport)
 	}
 	manager.mu.Lock()

@@ -60,7 +60,7 @@ func configureLinuxSerial(fd int, speed uint32) error {
 		unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON | unix.IXOFF
 	settings.Oflag &^= unix.OPOST
 	settings.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
-	settings.Cflag &^= unix.CSIZE | unix.PARENB | unix.PARODD | unix.CSTOPB | unix.CRTSCTS
+	settings.Cflag &^= unix.CSIZE | unix.PARENB | unix.PARODD | unix.CSTOPB | unix.CRTSCTS | unix.CBAUD
 	settings.Cflag |= unix.CS8 | unix.CREAD | unix.CLOCAL | speed
 	settings.Ispeed = speed
 	settings.Ospeed = speed
@@ -86,6 +86,10 @@ func linuxBaudRate(rate int) (uint32, bool) {
 		return unix.B115200, true
 	case 230400:
 		return unix.B230400, true
+	case 460800:
+		return unix.B460800, true
+	case 921600:
+		return unix.B921600, true
 	default:
 		return 0, false
 	}
