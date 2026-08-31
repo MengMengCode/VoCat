@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-
-	"go.bug.st/serial"
 )
 
 type SerialOpener struct {
@@ -42,12 +40,7 @@ func (opener SerialOpener) Open(ctx context.Context, port Port) (Client, error) 
 	if baudRate <= 0 {
 		baudRate = 115200
 	}
-	rawPort, err := serial.Open(path, &serial.Mode{
-		BaudRate: baudRate,
-		DataBits: 8,
-		Parity:   serial.NoParity,
-		StopBits: serial.OneStopBit,
-	})
+	rawPort, err := openSerialTransport(path, baudRate)
 	if err != nil {
 		return nil, fmt.Errorf("open AT port %s: %w", path, err)
 	}

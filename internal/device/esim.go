@@ -285,7 +285,9 @@ func (manager *Manager) csim(ctx context.Context, id string, apdu []byte) ([]byt
 	if err != nil {
 		return nil, 0, err
 	}
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return nil, 0, err
+	}
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
 		return nil, 0, err
@@ -532,6 +534,17 @@ func isTransientEuiccCME(err error) bool {
 
 // close releases the logical channel (MANAGE CHANNEL close).
 func (channel *euiccChannel) close(ctx context.Context) {
+	// Closing a logical channel is best-effort cleanup. Never let a modem that
+	// stopped answering turn this cleanup into an unbounded wait (the eSIM page
+	// would otherwise remain in its loading state forever).
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+	}
 	if channel.qmiSession != nil {
 		if channel.channel > 0 {
 			_ = channel.qmiSession.CloseLogicalChannel(ctx, channel.qmiSlot, byte(channel.channel))
@@ -759,7 +772,11 @@ func validProfileICCID(iccid string) bool {
 
 // ESIMListProfiles reads the eUICC profile list via ES10c GetProfilesInfo.
 func (manager *Manager) ESIMListProfiles(ctx context.Context, id string) (EsimInfo, error) {
-	manager.lockESIM()
+	ctx, cancel := boundESIMContext(ctx)
+	defer cancel()
+	if err := manager.lockESIMContext(ctx); err != nil {
+		return EsimInfo{}, err
+	}
 	defer manager.unlockESIM()
 	if manager.esimRecoveryActive(id) {
 		if cached, ok := manager.cachedESIMInfo(id); ok {
@@ -788,6 +805,16 @@ func (manager *Manager) ESIMListProfiles(ctx context.Context, id string) (EsimIn
 		return EsimInfo{}, lastErr
 	}
 	return EsimInfo{}, ErrNoEUICC
+}
+
+func boundESIMContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, 10*time.Second)
 }
 
 // ESIMSwitchProfile enables one profile by ICCID via ES10c EnableProfile.

@@ -464,28 +464,23 @@ func (session *Session) readLineLocked(ctx context.Context) (string, error) {
 	}
 }
 
-// readTransportContext turns a context deadline into an fd close. Some Linux
-// USB serial drivers can remain blocked in read(2) despite VMIN/VTIME and the
-// library read timeout; closing the exact transport instance is the only
-// reliable way to wake that syscall. The caller treats the resulting context
-// error as transport-fatal and the manager reopens a fresh session.
+// readTransportContext checks cancellation around one bounded transport read.
+// It must not close a transport from another goroutine: some serial libraries
+// wait in Close for the active reader while that reader is itself stuck in a
+// blocking read(2), deadlocking the session and every caller queued behind it.
+// Linux serial transports therefore keep their fd non-blocking and enforce the
+// configured read timeout with poll(2).
 func readTransportContext(
 	ctx context.Context,
 	transport Transport,
 	buffer []byte,
 ) (int, error) {
-	interruptDone := make(chan struct{})
-	stopInterrupt := context.AfterFunc(ctx, func() {
-		_ = transport.Close()
-		close(interruptDone)
-	})
-
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	count, err := transport.Read(buffer)
-	if !stopInterrupt() {
-		<-interruptDone
-		if contextErr := ctx.Err(); contextErr != nil {
-			return count, contextErr
-		}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return count, contextErr
 	}
 	return count, err
 }

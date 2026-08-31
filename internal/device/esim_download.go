@@ -286,7 +286,11 @@ func readEsimChipInfo(ctx context.Context, channel *euiccChannel, aidHex string)
 // the inserted card. It is entirely read-only: only SELECT, GetProfilesInfo,
 // GetEuiccData, GetEuiccInfo2 and GetEuiccConfiguredAddresses are issued.
 func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInventoryEntry, error) {
-	manager.lockESIM()
+	ctx, cancel := boundESIMContext(ctx)
+	defer cancel()
+	if err := manager.lockESIMContext(ctx); err != nil {
+		return nil, err
+	}
 	defer manager.unlockESIM()
 	if manager.esimRecoveryActive(id) {
 		return nil, errESIMRecovering

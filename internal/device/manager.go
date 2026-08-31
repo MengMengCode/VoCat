@@ -69,6 +69,40 @@ func (manager *Manager) lockESIM() {
 	manager.uiccMu.Lock()
 }
 
+// lockESIMContext keeps HTTP eSIM reads cancellable when another modem
+// operation is slow. A plain Mutex.Lock here used to leave the eSIM page
+// spinning forever behind a wedged refresh transaction.
+func (manager *Manager) lockESIMContext(ctx context.Context) error {
+	if err := lockMutexContext(ctx, &manager.esimMu); err != nil {
+		return err
+	}
+	if err := lockMutexContext(ctx, &manager.uiccMu); err != nil {
+		manager.esimMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func lockMutexContext(ctx context.Context, mutex *sync.Mutex) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		if mutex.TryLock() {
+			return nil
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func (manager *Manager) unlockESIM() {
 	manager.uiccMu.Unlock()
 	manager.esimMu.Unlock()
