@@ -376,7 +376,7 @@ func (manager *Manager) openEuiccOnceAID(ctx context.Context, id, aidHex string)
 	if candidate.HardwareKind == pcsc.HardwareKind {
 		return manager.openPCSCEuiccOnceAID(ctx, id, candidate, aidHex)
 	}
-	if strings.EqualFold(manager.backendFor(state), "qmi") && isNativeQMICandidate(candidate) {
+	if strings.EqualFold(manager.esimTransportFor(state), "qmi") && isNativeQMICandidate(candidate) {
 		return manager.openQMIEuiccOnceAID(ctx, id, candidate, aidHex)
 	}
 	// MANAGE CHANNEL (open): 00 70 00 00 01 -> "<channel> 90 00". This EC20

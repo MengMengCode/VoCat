@@ -286,6 +286,12 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) bool {
 				return true
 			}
 		}
+		if selector, ok := s.devices.(interface{ SetESIMTransport(string, string) error }); ok {
+			if err := selector.SetESIMTransport(selected.ID, config.ESIMTransport); err != nil {
+				s.writeDeviceError(w, err)
+				return true
+			}
+		}
 		if err := s.store.UpsertDevice(r.Context(), config); err != nil {
 			s.writeStoreError(w, err)
 			return true
@@ -532,6 +538,12 @@ func (s *Server) handleDevicePath(
 				}
 				if selector, ok := s.devices.(interface{ SetBackend(string, string) error }); ok {
 					if err := selector.SetBackend(physicalID, next.DeviceBackend); err != nil {
+						s.writeDeviceError(w, err)
+						return true
+					}
+				}
+				if selector, ok := s.devices.(interface{ SetESIMTransport(string, string) error }); ok {
+					if err := selector.SetESIMTransport(physicalID, next.ESIMTransport); err != nil {
 						s.writeDeviceError(w, err)
 						return true
 					}

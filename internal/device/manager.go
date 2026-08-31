@@ -91,6 +91,7 @@ type managedDevice struct {
 	dataEventCancel    context.CancelFunc
 	candidate          modem.Candidate
 	backend            string
+	esimTransport      string
 	lastICCID          string
 	client             modem.Client
 	snapshot           *Snapshot
@@ -243,11 +244,22 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 			events = append(events, discoveryEvent{connected: true, candidate: candidate})
 			continue
 		}
-		if !state.discovered {
+		reconnected := !state.discovered
+		endpointChanged := state.candidate.USBGeneration != candidate.USBGeneration ||
+			state.candidate.ATPort.OpenPath() != candidate.ATPort.OpenPath() ||
+			state.candidate.QMIControl != candidate.QMIControl
+		if reconnected {
 			events = append(events, discoveryEvent{connected: true, candidate: candidate})
+		} else if endpointChanged {
+			// A brief USB reset can disappear and reappear entirely between two
+			// discovery passes. The Linux device number still changes, so publish
+			// a synthetic disconnect/connect pair to restart dependent runtimes.
+			events = append(events,
+				discoveryEvent{candidate: state.candidate},
+				discoveryEvent{connected: true, candidate: candidate},
+			)
 		}
-		if state.candidate.ATPort.OpenPath() != candidate.ATPort.OpenPath() ||
-			state.candidate.QMIControl != candidate.QMIControl {
+		if reconnected || endpointChanged {
 			state.resetClientOnLock = true
 		}
 		state.candidate = candidate
@@ -313,6 +325,90 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		}
 	}
 	return present, nil
+}
+
+// WaitForStableModem prevents cold-boot consumers from opening an EC20 during
+// its provisional first enumeration. Some modules enumerate, reset once while
+// their baseband finishes booting, and then reappear with the same tty names.
+// Once any usable modem has appeared, its complete endpoint signature must stay
+// unchanged for stableFor before startup proceeds. A host with no modem still
+// starts after initialWait so the management UI remains available.
+func (manager *Manager) WaitForStableModem(
+	ctx context.Context,
+	stableFor time.Duration,
+	pollInterval time.Duration,
+	initialWait time.Duration,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if stableFor <= 0 {
+		return nil
+	}
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+	if initialWait < 0 {
+		initialWait = 0
+	}
+	started := time.Now()
+	everSeen := false
+	stableSince := time.Time{}
+	stableSignature := ""
+	for {
+		devices, err := manager.Discover(ctx)
+		if err != nil && ctx.Err() == nil {
+			stableSince = time.Time{}
+			stableSignature = ""
+		} else if err != nil {
+			return err
+		} else {
+			signature := stableModemSignature(devices)
+			if signature == "" {
+				stableSince = time.Time{}
+				stableSignature = ""
+			} else {
+				everSeen = true
+				if signature != stableSignature {
+					stableSignature = signature
+					stableSince = time.Now()
+				} else if time.Since(stableSince) >= stableFor {
+					return nil
+				}
+			}
+		}
+		if !everSeen && time.Since(started) >= initialWait {
+			return nil
+		}
+		timer := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func stableModemSignature(devices []Device) string {
+	parts := make([]string, 0, len(devices))
+	for _, entry := range devices {
+		candidate := entry.Candidate
+		if !entry.Discovered || candidate.HardwareKind == pcsc.HardwareKind ||
+			candidate.DiscoveryIssue != "" || !candidate.HasATPort() {
+			continue
+		}
+		parts = append(parts, strings.Join([]string{
+			entry.ID,
+			candidate.USBGeneration,
+			candidate.ATPort.OpenPath(),
+			candidate.QMIControl,
+		}, "|"))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ";")
 }
 
 func (manager *Manager) resetChangedClients() {
@@ -619,6 +715,33 @@ func (manager *Manager) SetBackend(id, backend string) error {
 func (manager *Manager) backendFor(state *managedDevice) string {
 	manager.mu.RLock()
 	defer manager.mu.RUnlock()
+	return state.backend
+}
+
+// SetESIMTransport selects the control path used for eUICC APDU operations.
+// It is intentionally independent from the registration/data backend: an EC20
+// can use QMI for cellular state while using AT+CSIM for its eUICC.
+func (manager *Manager) SetESIMTransport(id, transport string) error {
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	if transport != "at" && transport != "qmi" && transport != "pcsc" && transport != "none" {
+		return fmt.Errorf("unsupported eSIM transport %q", transport)
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	state := manager.devices[id]
+	if state == nil || !state.discovered {
+		return ErrNotFound
+	}
+	state.esimTransport = transport
+	return nil
+}
+
+func (manager *Manager) esimTransportFor(state *managedDevice) string {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	if state.esimTransport != "" {
+		return state.esimTransport
+	}
 	return state.backend
 }
 

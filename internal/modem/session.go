@@ -55,9 +55,9 @@ type Session struct {
 // PoisonedClient is implemented by Session. A poisoned session has hit a
 // transport-fatal error (a failed write/drain/read or a closed serial line);
 // the underlying fd is wedged and every subsequent command reuses the corpse.
-// AT-level failures (CommandError, command timeout) do NOT poison — the
-// transport is still healthy there, so reopening would only destroy a good
-// session over a transient +CME ERROR.
+// AT-level failures (CommandError) do not poison. A command deadline that has
+// to close a blocked transport does poison, because the fd was wedged and must
+// be reopened before the next operation.
 type PoisonedClient interface {
 	Poisoned() bool
 }
@@ -315,7 +315,7 @@ func (session *Session) waitPromptLocked(
 			return err
 		}
 		buffer := make([]byte, 1024)
-		count, err := session.transport.Read(buffer)
+		count, err := readTransportContext(ctx, session.transport, buffer)
 		if count > 0 {
 			session.readBuf = append(session.readBuf, buffer[:count]...)
 			continue
@@ -449,7 +449,7 @@ func (session *Session) readLineLocked(ctx context.Context) (string, error) {
 			return "", err
 		}
 		buffer := make([]byte, 1024)
-		count, err := session.transport.Read(buffer)
+		count, err := readTransportContext(ctx, session.transport, buffer)
 		if count > 0 {
 			session.readBuf = append(session.readBuf, buffer[:count]...)
 			continue
@@ -462,6 +462,32 @@ func (session *Session) readLineLocked(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("read serial response: %w", err)
 		}
 	}
+}
+
+// readTransportContext turns a context deadline into an fd close. Some Linux
+// USB serial drivers can remain blocked in read(2) despite VMIN/VTIME and the
+// library read timeout; closing the exact transport instance is the only
+// reliable way to wake that syscall. The caller treats the resulting context
+// error as transport-fatal and the manager reopens a fresh session.
+func readTransportContext(
+	ctx context.Context,
+	transport Transport,
+	buffer []byte,
+) (int, error) {
+	interruptDone := make(chan struct{})
+	stopInterrupt := context.AfterFunc(ctx, func() {
+		_ = transport.Close()
+		close(interruptDone)
+	})
+
+	count, err := transport.Read(buffer)
+	if !stopInterrupt() {
+		<-interruptDone
+		if contextErr := ctx.Err(); contextErr != nil {
+			return count, contextErr
+		}
+	}
+	return count, err
 }
 
 func popLine(buffer *[]byte) (string, bool) {

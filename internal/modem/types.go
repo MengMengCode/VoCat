@@ -44,15 +44,19 @@ func (p Port) OpenPath() string {
 }
 
 type Candidate struct {
-	HardwareKind     string `json:"hardwareKind,omitempty"`
-	ReaderName       string `json:"readerName,omitempty"`
-	ID               string `json:"id"`
-	VendorID         string `json:"vendorId"`
-	ProductID        string `json:"productId"`
-	Manufacturer     string `json:"manufacturer,omitempty"`
-	Product          string `json:"product,omitempty"`
-	SerialNumber     string `json:"serialNumber,omitempty"`
-	USBPath          string `json:"usbPath"`
+	HardwareKind string `json:"hardwareKind,omitempty"`
+	ReaderName   string `json:"readerName,omitempty"`
+	ID           string `json:"id"`
+	VendorID     string `json:"vendorId"`
+	ProductID    string `json:"productId"`
+	Manufacturer string `json:"manufacturer,omitempty"`
+	Product      string `json:"product,omitempty"`
+	SerialNumber string `json:"serialNumber,omitempty"`
+	USBPath      string `json:"usbPath"`
+	// USBGeneration changes whenever Linux enumerates the same physical USB
+	// path again (busnum:devnum). It is runtime-only and lets higher layers
+	// discard file descriptors opened against the previous device instance.
+	USBGeneration    string `json:"-"`
 	ATPort           Port   `json:"atPort"`
 	Ports            []Port `json:"ports"`
 	QMIControl       string `json:"qmiControl,omitempty"`

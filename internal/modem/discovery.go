@@ -118,6 +118,10 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 					Product:      product,
 					SerialNumber: serialNumber,
 					USBPath:      devicePath,
+					USBGeneration: strings.TrimSpace(
+						readTrimmed(filepath.Join(resolvedDevice, "busnum")) + ":" +
+							readTrimmed(filepath.Join(resolvedDevice, "devnum")),
+					),
 				},
 				ports: make(map[string]Port),
 			}
