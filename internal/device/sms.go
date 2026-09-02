@@ -406,7 +406,7 @@ func parseCMGLHeader(line string) smsRecordHeader {
 	}
 	var ok bool
 	header.index, ok = parseDecimal(values[0])
-	if !ok || header.index <= 0 {
+	if !ok || header.index < 0 {
 		header.err = errors.New("invalid CMGL message index")
 	}
 	header.status = parseSMSStorageStatus(values[1])

@@ -104,7 +104,7 @@ func (s *Server) runSMSNotificationChannel(ctx context.Context, channel string) 
 				}
 			} else {
 				for _, message := range messages {
-					if !store.ConcatSMSReadyToNotify(message.MessageID, message.Extra) {
+					if !smsMessageReadyToNotify(message) {
 						cursor = message.ID
 						continue
 					}
@@ -125,6 +125,11 @@ func (s *Server) runSMSNotificationChannel(ctx context.Context, channel string) 
 			return
 		}
 	}
+}
+
+func smsMessageReadyToNotify(message store.SMSMessage) bool {
+	return strings.TrimSpace(message.Body) != "" &&
+		store.ConcatSMSReadyToNotify(message.MessageID, message.Extra)
 }
 
 func (s *Server) smsNotificationConfig(ctx context.Context, channel string) (map[string]any, bool, error) {
