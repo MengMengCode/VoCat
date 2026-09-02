@@ -2288,12 +2288,10 @@ func (bot *telegramBot) notifyInboundSMS(ctx context.Context) {
 				bot.warn("list Telegram SMS notifications", listErr)
 			} else {
 				for _, message := range messages {
-					if !store.ConcatSMSReadyToNotify(message.MessageID, message.Extra) {
-						// A carrier-split long SMS still waiting for segments. Hold
-						// the notification but advance the cursor so the partial row
-						// is not reconsidered every poll; when the final segment
-						// merges, the row re-enters with a fresh id and is pushed
-						// here as one complete message.
+					if !smsMessageReadyToNotify(message) {
+						// Empty decoded messages and multipart messages still waiting
+						// for segments are not user-notifiable. Advance the cursor;
+						// a completed multipart row re-enters with a fresh id.
 						cursor = message.ID
 						continue
 					}
