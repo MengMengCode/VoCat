@@ -46,7 +46,272 @@ const (
 	flightModeTransitionTimeout = 45 * time.Second
 	deviceStartupTimeout        = 4 * time.Minute
 	stableModemWaitTimeout      = 45 * time.Second
+	ec20RegistrationGrace       = 2 * time.Minute
+	ec20RegistrationEscalation  = 3 * time.Minute
 )
+
+type registrationRecoveryAction uint8
+
+const (
+	registrationRecoveryNone registrationRecoveryAction = iota
+	registrationRecoveryReregister
+	registrationRecoveryReboot
+)
+
+type registrationRecoveryEpisode struct {
+	iccid       string
+	searchingAt time.Time
+	lastAttempt time.Time
+	attempts    int
+	pending     registrationRecoveryAction
+}
+
+type registrationRecoveryTracker struct {
+	mu         sync.Mutex
+	grace      time.Duration
+	escalation time.Duration
+	episodes   map[string]registrationRecoveryEpisode
+}
+
+type registrationRecoveryDevices interface {
+	Refresh(context.Context, string) (device.Snapshot, error)
+	PrepareRegistration(context.Context, string, string, string) error
+	ReRegisterOperator(context.Context, string) (device.OperatorSelection, error)
+	Reboot(context.Context, string) error
+}
+
+type registrationRecoveryPolicies interface {
+	CardPolicy(context.Context, string) (store.CardPolicy, error)
+}
+
+func explicitRegistrationRecoveryFlightMode(snapshot device.Snapshot) bool {
+	return snapshot.ModeKnown && snapshot.OperatingMode == 4
+}
+
+func newRegistrationRecoveryTracker(grace, escalation time.Duration) *registrationRecoveryTracker {
+	return &registrationRecoveryTracker{
+		grace: grace, escalation: escalation,
+		episodes: make(map[string]registrationRecoveryEpisode),
+	}
+}
+
+func (tracker *registrationRecoveryTracker) observe(
+	deviceID string,
+	snapshot *device.Snapshot,
+	now time.Time,
+) registrationRecoveryAction {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	if snapshot == nil {
+		return registrationRecoveryNone
+	}
+	if explicitRegistrationRecoveryFlightMode(*snapshot) ||
+		snapshot.RegistrationStatus == 1 || snapshot.RegistrationStatus == 5 {
+		delete(tracker.episodes, deviceID)
+		return registrationRecoveryNone
+	}
+	iccid := strings.TrimSpace(snapshot.ICCID)
+	episode, found := tracker.episodes[deviceID]
+	if found && iccid != "" && episode.iccid != iccid {
+		delete(tracker.episodes, deviceID)
+		found = false
+	}
+	// A CFUN reboot temporarily clears the snapshot while the SIM and ICCID are
+	// still initializing. Preserve an existing episode through that interval so
+	// the one-reboot limit cannot be re-armed by the reboot itself.
+	if !snapshot.SIMReady ||
+		!strings.HasPrefix(strings.ToUpper(strings.TrimSpace(snapshot.Model)), "EC20") ||
+		iccid == "" ||
+		(snapshot.RegistrationStatus != 0 && snapshot.RegistrationStatus != 2) {
+		return registrationRecoveryNone
+	}
+	if !found {
+		tracker.episodes[deviceID] = registrationRecoveryEpisode{iccid: iccid, searchingAt: now}
+		return registrationRecoveryNone
+	}
+	if episode.pending != registrationRecoveryNone {
+		return registrationRecoveryNone
+	}
+	if episode.attempts == 0 && now.Sub(episode.searchingAt) >= tracker.grace {
+		episode.pending = registrationRecoveryReregister
+		tracker.episodes[deviceID] = episode
+		return registrationRecoveryReregister
+	}
+	if episode.attempts == 1 && now.Sub(episode.lastAttempt) >= tracker.escalation {
+		episode.pending = registrationRecoveryReboot
+		tracker.episodes[deviceID] = episode
+		return registrationRecoveryReboot
+	}
+	return registrationRecoveryNone
+}
+
+func (tracker *registrationRecoveryTracker) complete(
+	deviceID string,
+	expectedICCID string,
+	action registrationRecoveryAction,
+	issued bool,
+	now time.Time,
+) {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	episode, found := tracker.episodes[deviceID]
+	if !found || episode.iccid != strings.TrimSpace(expectedICCID) || episode.pending != action {
+		return
+	}
+	episode.pending = registrationRecoveryNone
+	if issued {
+		episode.attempts++
+		episode.lastAttempt = now
+	}
+	tracker.episodes[deviceID] = episode
+}
+
+func registrationRecoveryEligible(snapshot device.Snapshot, expectedICCID string) bool {
+	iccid := strings.TrimSpace(snapshot.ICCID)
+	return snapshot.SIMReady && !snapshot.FlightMode && !snapshot.RadioOff &&
+		strings.HasPrefix(strings.ToUpper(strings.TrimSpace(snapshot.Model)), "EC20") &&
+		iccid != "" && iccid == strings.TrimSpace(expectedICCID) &&
+		(snapshot.RegistrationStatus == 0 || snapshot.RegistrationStatus == 2)
+}
+
+func registrationRecoverySuperseded(snapshot device.Snapshot, expectedICCID string) bool {
+	iccid := strings.TrimSpace(snapshot.ICCID)
+	model := strings.ToUpper(strings.TrimSpace(snapshot.Model))
+	if explicitRegistrationRecoveryFlightMode(snapshot) || (model != "" && !strings.HasPrefix(model, "EC20")) {
+		return true
+	}
+	if iccid != "" && iccid != strings.TrimSpace(expectedICCID) {
+		return true
+	}
+	if snapshot.RegistrationStatus == 1 || snapshot.RegistrationStatus == 5 {
+		return true
+	}
+	return snapshot.SIMReady && iccid != "" &&
+		snapshot.RegistrationStatus != 0 && snapshot.RegistrationStatus != 2
+}
+
+func revalidateRegistrationRecovery(
+	ctx context.Context,
+	devices registrationRecoveryDevices,
+	deviceID string,
+	expectedICCID string,
+) (device.Snapshot, bool, error) {
+	snapshot, err := devices.Refresh(ctx, deviceID)
+	if err != nil {
+		return device.Snapshot{}, false, err
+	}
+	return snapshot, registrationRecoveryEligible(snapshot, expectedICCID), nil
+}
+
+func runRegistrationRecovery(
+	ctx context.Context,
+	logger *slog.Logger,
+	policies registrationRecoveryPolicies,
+	devices registrationRecoveryDevices,
+	deviceID string,
+	expectedICCID string,
+	action registrationRecoveryAction,
+) bool {
+	issued := false
+	current, eligible, err := revalidateRegistrationRecovery(ctx, devices, deviceID, expectedICCID)
+	if err != nil || !eligible {
+		return false
+	}
+	if action == registrationRecoveryReboot {
+		// Revalidate immediately before the destructive operation so a recovered
+		// modem, SIM swap, or flight-mode transition cannot inherit a stale action.
+		if _, eligible, err = revalidateRegistrationRecovery(ctx, devices, deviceID, expectedICCID); err != nil || !eligible {
+			return false
+		}
+		if err = devices.Reboot(ctx, deviceID); err != nil {
+			logger.Warn("EC20 registration recovery reboot failed", "device_id", deviceID, "error", err)
+			return true
+		}
+		// CFUN reboot resets EC20 CID 1 on affected firmware. Wait for the AT
+		// transport to return, then reload the current card policy and revalidate
+		// before every modem operation.
+		for attempt := 0; attempt < 12 && ctx.Err() == nil; attempt++ {
+			timer := time.NewTimer(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return true
+			case <-timer.C:
+			}
+			current, eligible, err = revalidateRegistrationRecovery(ctx, devices, deviceID, expectedICCID)
+			if err != nil {
+				continue
+			}
+			if !eligible {
+				if registrationRecoverySuperseded(current, expectedICCID) {
+					return true
+				}
+				continue
+			}
+			policy, policyErr := policies.CardPolicy(ctx, strings.TrimSpace(current.ICCID))
+			if policyErr == nil && strings.TrimSpace(policy.APN) != "" {
+				current, eligible, err = revalidateRegistrationRecovery(ctx, devices, deviceID, expectedICCID)
+				if err != nil {
+					continue
+				}
+				if !eligible {
+					if registrationRecoverySuperseded(current, expectedICCID) {
+						return true
+					}
+					continue
+				}
+				ipVersion := policy.IPVersion
+				if ipVersion == "" {
+					ipVersion = "IPV4V6"
+				}
+				if err = devices.PrepareRegistration(ctx, deviceID, policy.APN, ipVersion); err != nil {
+					continue
+				}
+			}
+			current, eligible, err = revalidateRegistrationRecovery(ctx, devices, deviceID, expectedICCID)
+			if err != nil {
+				continue
+			}
+			if !eligible {
+				if registrationRecoverySuperseded(current, expectedICCID) {
+					return true
+				}
+				continue
+			}
+			if _, err = devices.ReRegisterOperator(ctx, deviceID); err == nil {
+				logger.Info("EC20 registration recovery rebooted modem", "device_id", deviceID)
+				return true
+			}
+		}
+		logger.Warn("EC20 registration recovery could not resume after reboot", "device_id", deviceID)
+		return true
+	}
+
+	policy, policyErr := policies.CardPolicy(ctx, strings.TrimSpace(current.ICCID))
+	if policyErr == nil && strings.TrimSpace(policy.APN) != "" {
+		if _, eligible, err = revalidateRegistrationRecovery(ctx, devices, deviceID, expectedICCID); err != nil || !eligible {
+			return issued
+		}
+		ipVersion := policy.IPVersion
+		if ipVersion == "" {
+			ipVersion = "IPV4V6"
+		}
+		issued = true
+		if err = devices.PrepareRegistration(ctx, deviceID, policy.APN, ipVersion); err != nil {
+			logger.Warn("EC20 registration recovery could not prepare PDP context", "device_id", deviceID, "error", err)
+		}
+	}
+	if _, eligible, err = revalidateRegistrationRecovery(ctx, devices, deviceID, expectedICCID); err != nil || !eligible {
+		return issued
+	}
+	issued = true
+	if _, err = devices.ReRegisterOperator(ctx, deviceID); err != nil {
+		logger.Warn("EC20 registration recovery failed", "device_id", deviceID, "error", err)
+		return true
+	}
+	logger.Info("EC20 registration recovery requested", "device_id", deviceID)
+	return issued
+}
 
 func deviceStartupContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), deviceStartupTimeout)
@@ -1128,6 +1393,27 @@ func pollDeviceSnapshots(
 	database *store.Store,
 	manager *device.Manager,
 ) {
+	recoveryTracker := newRegistrationRecoveryTracker(ec20RegistrationGrace, ec20RegistrationEscalation)
+	recoverRegistration := func(entry device.Device, snapshot device.Snapshot, action registrationRecoveryAction) {
+		if action == registrationRecoveryNone {
+			return
+		}
+		go func() {
+			recoveryContext, cancel := context.WithTimeout(ctx, 3*time.Minute)
+			defer cancel()
+			expectedICCID := strings.TrimSpace(snapshot.ICCID)
+			issued := runRegistrationRecovery(
+				recoveryContext,
+				logger,
+				database,
+				manager,
+				entry.ID,
+				expectedICCID,
+				action,
+			)
+			recoveryTracker.complete(entry.ID, expectedICCID, action, issued, time.Now())
+		}()
+	}
 	refresh := func() {
 		discoveryContext, cancelDiscovery := context.WithTimeout(ctx, 10*time.Second)
 		_, err := manager.Discover(discoveryContext)
@@ -1168,6 +1454,7 @@ func pollDeviceSnapshots(
 				if refreshErr == nil && ctx.Err() == nil {
 					enforceCardRegion(ctx, logger, database, manager, entry.ID, &snapshot)
 					enforceDefaultSafeCardPolicy(ctx, logger, database, manager, entry.ID, &snapshot)
+					recoverRegistration(entry, snapshot, recoveryTracker.observe(entry.ID, &snapshot, time.Now()))
 				}
 			}()
 		}

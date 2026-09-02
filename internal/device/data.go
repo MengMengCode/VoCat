@@ -368,6 +368,46 @@ func normalizeIPVersion(value string) string {
 	}
 }
 
+// PrepareRegistration writes the PDP context that the modem will use during
+// the next EPS attach without starting a host data session. Some roaming SIMs
+// are rejected during registration when EC20 firmware restores a stale APN
+// after a baseband reboot, even when cellular data is disabled in VoCat.
+func (manager *Manager) PrepareRegistration(
+	ctx context.Context,
+	id string,
+	apn string,
+	ipVersion string,
+) error {
+	apn = strings.TrimSpace(apn)
+	if apn == "" {
+		return nil
+	}
+	if !ValidAPN(apn) {
+		return ErrInvalidNetworkAPN
+	}
+	ipVersion = normalizeIPVersion(ipVersion)
+	if ipVersion == "" {
+		return errors.New("IP version must be IP, IPV6, or IPV4V6")
+	}
+	state, err := manager.lookup(id)
+	if err != nil {
+		return err
+	}
+	state.opMu.Lock()
+	defer state.opMu.Unlock()
+	if err := manager.validateActive(id, state); err != nil {
+		return err
+	}
+	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
+	if err != nil {
+		manager.setResult(id, state, nil, err)
+		return err
+	}
+	_, err = manager.command(ctx, client, fmt.Sprintf(`AT+CGDCONT=1,"%s","%s"`, ipVersion, apn))
+	manager.setResult(id, state, nil, err)
+	return err
+}
+
 func (manager *Manager) USBNetMode(ctx context.Context, id string) (USBNetMode, error) {
 	response, err := manager.ExecuteAT(ctx, id, `AT+QCFG="usbnet"`)
 	if err != nil {
