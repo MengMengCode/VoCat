@@ -386,6 +386,12 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 	messageID := uint32(1)
 	currentPayloads := authResponsePayloads
 	for round := 0; round < 10; round++ {
+		// A responder may terminate EAP with an IKEv2 error Notify instead of
+		// another EAP payload. Preserve that protocol result rather than masking
+		// it as a missing payload type 48 parse error.
+		if err := rejectFatalNotifications(currentPayloads); err != nil {
+			return nil, fmt.Errorf("ike: IKE_AUTH EAP round %d: %w", round+1, err)
+		}
 		eapPayload, err := onePayload(currentPayloads, payloadEAP)
 		if err != nil {
 			return nil, fmt.Errorf("ike: IKE_AUTH EAP round %d: %w", round+1, err)
@@ -884,6 +890,11 @@ func rejectFatalNotifications(payloads []payload) error {
 				return &invalidKEPayloadError{group: binary.BigEndian.Uint16(data)}
 			}
 			return &invalidKEPayloadError{}
+		case notifyAuthenticationFailed:
+			return fmt.Errorf(
+				"%w: responder reported AUTHENTICATION_FAILED (Notify 24)",
+				vowifi.ErrEAPAuthenticationRejected,
+			)
 		}
 		if kind < 16384 {
 			return fmt.Errorf("ike: responder reported fatal notification %d", kind)

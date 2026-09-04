@@ -39,6 +39,16 @@ func TestLegacyProposalFallbackIsLimitedToNegotiationFailures(t *testing.T) {
 	}
 }
 
+func TestRejectFatalNotificationsClassifiesAuthenticationFailed(t *testing.T) {
+	err := rejectFatalNotifications([]payload{makeNotify(notifyAuthenticationFailed, nil)})
+	if !errors.Is(err, vowifi.ErrEAPAuthenticationRejected) {
+		t.Fatalf("rejectFatalNotifications() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "AUTHENTICATION_FAILED (Notify 24)") {
+		t.Fatalf("rejectFatalNotifications() error = %q", err)
+	}
+}
+
 func (reader constantReader) Read(destination []byte) (int, error) {
 	for index := range destination {
 		destination[index] = reader.value
