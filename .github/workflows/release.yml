@@ -14,9 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: npm
@@ -27,7 +27,7 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
       - name: Upload embedded web UI
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: web-dist
           path: web/dist
@@ -39,14 +39,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
       - name: Download embedded web UI
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: web-dist
           path: web/dist
@@ -82,20 +82,22 @@ jobs:
             filename: vocat-linux-armv7
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
       - name: Download embedded web UI
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: web-dist
           path: web/dist
       - name: Set up QEMU for ARM64 runtime smoke test
         if: matrix.goarch == 'arm64'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
       - name: Build ${{ matrix.target }}
         env:
           GOOS: linux
@@ -122,7 +124,7 @@ jobs:
             amd64|arm64) "$OUTPUT" version ;;
           esac
       - name: Upload ${{ matrix.target }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: binary-${{ matrix.target }}
           path: dist/${{ matrix.filename }}
@@ -137,7 +139,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: binary-*
           path: dist
