@@ -950,11 +950,16 @@ func (session *Session) sendDeliveryReport(request *sipRequest, report []byte) e
 	if target == "" {
 		return errors.New("ims: SMS MESSAGE omitted a delivery-report target")
 	}
-	response, err := session.sendSIPMessage(
+	// TS 24.341 5.3.2.4 uses a public identity of the SMS receiver.
+	// Prefer the called identity only if the registrar associated it with us.
+	response, err := session.sendSIPMessageWithIdentity(
 		context.Background(),
 		target,
 		report,
 		strings.TrimSpace(request.value("Call-ID")),
+		smsContentType,
+		"smsip",
+		request.value("P-Called-Party-ID"),
 	)
 	if err != nil {
 		return err
@@ -1139,6 +1144,18 @@ func (session *Session) sendSIPMessageWith(
 	contentType string,
 	acceptContactTag string,
 ) (*sipResponse, error) {
+	return session.sendSIPMessageWithIdentity(ctx, target, body, inReplyTo, contentType, acceptContactTag, "")
+}
+
+func (session *Session) sendSIPMessageWithIdentity(
+	ctx context.Context,
+	target string,
+	body []byte,
+	inReplyTo string,
+	contentType string,
+	acceptContactTag string,
+	preferredIdentity string,
+) (*sipResponse, error) {
 	callToken, err := randomHex(18)
 	if err != nil {
 		return nil, err
@@ -1151,6 +1168,7 @@ func (session *Session) sendSIPMessageWith(
 	session.mu.Lock()
 	cseq := session.cseq
 	session.cseq++
+	identity, identitySource := messagePublicIdentity(session.identity.public, preferredIdentity, session.evidence.AssociatedIdentities)
 	serviceRoutes := append([]string(nil), session.evidence.ServiceRoute...)
 	securityHeaders := runtimeSecurityHeaders(
 		session.securityActive,
@@ -1172,11 +1190,11 @@ func (session *Session) sendSIPMessageWith(
 		}
 	}
 	lines = append(lines,
-		"From: <"+session.identity.public+">;tag="+session.fromTag,
+		"From: <"+identity+">;tag="+session.fromTag,
 		"To: <"+target+">",
 		"Call-ID: "+callID,
 		fmt.Sprintf("CSeq: %d MESSAGE", cseq),
-		"P-Preferred-Identity: <"+session.identity.public+">",
+		"P-Preferred-Identity: <"+identity+">",
 	)
 	if pani := session.pAccessNetworkInfo(); pani != "" {
 		lines = append(lines, "P-Access-Network-Info: "+pani)
@@ -1201,6 +1219,7 @@ func (session *Session) sendSIPMessageWith(
 	request := append([]byte(strings.Join(lines, "\r\n")), body...)
 	session.logOutboundSMS(slog.LevelDebug, "IMS SIP MESSAGE transaction started",
 		"stage", "sip_send", "call_id", callID, "cseq", cseq,
+		"identity_source", identitySource,
 		"body_bytes", len(body), "service_routes", len(serviceRoutes))
 	response, exchangeErr := session.exchangeRuntime(
 		ctx,
