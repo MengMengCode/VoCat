@@ -68,6 +68,8 @@ const (
 	notifyNoProposal             = 14
 )
 
+const notifyAuthenticationFailed = 24
+
 var (
 	errMalformedPacket   = errors.New("ike: malformed packet")
 	errUnexpectedPacket  = errors.New("ike: unexpected packet")
