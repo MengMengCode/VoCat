@@ -92,6 +92,13 @@ sudo bash install.sh 0.0.2
 
 VoWiFi IMS には Linux XFRM/IPsec が必要です。OpenWrt/Kwrt では、インストーラーはファームウェア自身のフィードから、一致する `ip-full`、`kmod-ipsec`、`kmod-ipsec4/6`、`kmod-crypto-authenc`、AES-CBC、SHA1 パッケージのインストールを試みます。一致するカーネルモジュールが利用できない場合は、それらを含むファームウェアを使用してください。別のカーネル向けにビルドされた kmod を強制的にインストールしてはいけません。
 
+カーネルが XFRM/IPsec を提供できず、セルラー SMS やデータ通信など VoWiFi 以外の機能のみが必要な場合は、`--skip-vowifi-check` を指定してインストールしてください：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
+sudo bash install.sh --skip-vowifi-check
+```
+
 インストーラーは次を行います:
 
 - `amd64`、`386`、`arm64`、`aarch64`、`armv7` を検出します;
@@ -105,7 +112,7 @@ VoWiFi IMS には Linux XFRM/IPsec が必要です。OpenWrt/Kwrt では、イ�
 インストール後、次を開きます:
 
 ```text
-http://<サーバーアドレス>:7575
+http://<server-address>:7575
 ```
 
 ### 手動バイナリインストール
@@ -163,16 +170,26 @@ docker run -d \
   ghcr.io/mengmengcode/vocat:latest
 ```
 
-コンテナの起動後に `http://<サーバーアドレス>:7575` を開きます。QMI ネットワークインターフェースが Vocat から見えるようにするにはホストネットワークが必要であり、シリアルポート、QMI 制御ノード、TUN インターフェース、ネットワーク設定、コンテナ起動後に追加されたデバイスには特権デバイスアクセスが必要です。`/dev` バインドマウントにより、コンテナを再作成せずに新しい `ttyUSB*`、`ttyACM*`、`cdc-wdm*` ノードが見えるようになります。
+コンテナの起動後に `http://<server-address>:7575` を開きます。QMI ネットワークインターフェースを Vocat から引き続き認識できるようにするにはホストネットワークが必要です。また、シリアルポート、QMI 制御ノード、TUN インターフェース、ネットワーク設定、コンテナ起動後に追加されたデバイスへのアクセスには特権が必要です。`/dev` のバインドマウントにより、コンテナを再作成せずに新しい `ttyUSB*`、`ttyACM*`、`cdc-wdm*` および MHI の `wwan*` ノードを認識できます。
 
-このモードは意図的に Vocat にホストのデバイスとネットワークスタックへの広範なアクセスを付与します。信頼できる Linux ホストでのみ使用してください。自動検出は現在、サポート対象の Quectel USB モデム(USB ベンダー ID `2c7c`)のみを識別し、任意のモデムブランドは識別しません。`--device` で `/dev/ttyUSB2` や `/dev/cdc-wdm0` などの個別ノードのみをマッピングすると、コンテナはそれらの固定ノードに限定され、完全なマルチデバイスまたはホットプラグ検出は提供されません。
+このモードは意図的に Vocat にホストのデバイスとネットワークスタックへの広範なアクセス権を与えます。信頼できる Linux ホストでのみ使用してください。自動検出は、サポート対象の Quectel USB モデム（USB ベンダー ID `2c7c`）と、Linux WWAN サブシステムを通じて公開される PCIe/MHI モデムを識別します。任意のモデム構成を識別するものではありません。`--device` で `/dev/ttyUSB2`、`/dev/cdc-wdm0`、`/dev/wwan0qmi0` などの個別ノードのみをマッピングすると、コンテナはそれらの固定ノードに限定され、複数デバイスやホットプラグを完全には検出できません。
 
 GHCR イメージは `linux/amd64` と `linux/arm64` 向けに公開されています。
 
 > [!TIP]
-> **NAS / QNAP Container Station デプロイ時の注意点**:
-> QNAP QTS / QuTS hero (Container Station) などの NAS 環境では、非 root カスタム管理者権限とボリューム分離メカニズムにより、Docker の名前付きボリューム（例: `-v vocat-data:/opt/vocat/data`）を使用すると、初回の `bootstrap-admin` 初期化時とデーモン起動時で異なる隔離パスに書き込まれ、Web ログイン時にパスワードエラーとなる場合があります。
-> NAS 環境では、初期化と常駐コンテナの両方で名前付きボリュームの代わりにホストの絶対パスバインドマウント（例: QNAP の `-v /share/Container/vocat/data:/opt/vocat/data`）を使用することを推奨します。
+> **NAS / QNAP Container Station へのデプロイに関する注意**：
+> QNAP QTS / QuTS hero（Container Station）などの NAS OS では、root 以外のカスタム管理者アカウントとボリューム分離の仕組みにより、Docker の名前付きボリューム（例：`-v vocat-data:/opt/vocat/data`）が、1 回限りの `bootstrap-admin` 初期化時と常駐サービスコンテナで異なる隔離パスに解決され、Web ログイン時に「パスワードが正しくありません」というエラーが発生する場合があります。
+> NAS 環境では、SQLite データベースの永続化の一貫性を確保するため、初期化時と実行時の両方で、名前付きボリュームをホストの絶対パスによるバインドマウント（例：QNAP では `-v /share/Container/vocat/data:/opt/vocat/data`）に置き換えることを強く推奨します。
+
+### USB SIM リーダー
+
+USB SIM リーダーは Linux の PC/SC サービスを使用します。ワンクリックインストーラーは、対応するパッケージマネージャーで `pcscd` と CCID ドライバーを自動インストールし、サービスを起動します。Debian/Ubuntu での同等の手動セットアップは `apt install pcscd libccid` です。USB が CCID リーダーを認識していても PC/SC が利用できない場合、VoCat はデバイス追加ダイアログでリーダーを非表示にせず、そのまま表示し、不足しているサービスまたはドライバーを報告します。
+
+### QMI コマンドラインユーティリティ
+
+VoCat は `qmicli` を使って QMI 制御チャネルの準備ができていることを確認し、`qmi-proxy` を使ってそのアクセスを多重化します。パケットデータセッションは、`qmi-network` の CID/PDH 状態ファイルではなく、組み込みの QMI WDS クライアントが管理します。ワンクリックインストーラーは対応するユーティリティをインストールして検証します。手動デプロイの場合、Debian/Ubuntu では `apt install libqmi-utils`、Arch Linux では `pacman -S libqmi`、Alpine では `apk add qmi-utils`、OpenWrt では `opkg install qmi-utils` を使用します。
+
+`vocat doctor --repair-dji-qmi` は、USB ドライバーの関連付けを変更したり、DTR 信号をアサートしたりする前に、`qmicli` の有無を確認します。ユーティリティが利用できない場合、コマンドはインストール方法を案内して停止し、デバイスの現在の状態を変更しません。
 
 ## 設定
 
@@ -189,6 +206,10 @@ Vocat は `VOCAT_CONFIG` からオプションの JSON 設定ファイルを読�
 | `VOCAT_REPO` | `MengMengCode/VoCat` | 自己更新機能が使用する信頼された GitHub リポジトリ(`owner/name` 形式)。 |
 | `GITHUB_TOKEN` | 空 | プライベートリポジトリやより高い API レート制限のためのオプションの GitHub トークン。 |
 
+ユーザーが提供する Apple キャリアバンドルは、`vocat carrier import-ipcc` で、内容を確認可能で許可リストに準拠したキャリアプロファイルに変換できます。[docs/CARRIER_IPCC_IMPORT.md](CARRIER_IPCC_IMPORT.md) を参照してください。
+
+管理者の認証情報は SQLite にのみ保存されます。空のデータベースを `vocat bootstrap-admin` で一度初期化してください。環境変数や JSON 設定では、管理者のユーザー名やパスワードを設定または上書きできません。
+
 Telegram トークン、SMTP パスワード、Webhook シークレット、SIM 認証情報、その他のプライベートデータをリポジトリに保存しないでください。アプリケーション設定または保護された環境ファイルを通じて設定してください。
 
 ## Telegram ボット
@@ -196,11 +217,11 @@ Telegram トークン、SMTP パスワード、Webhook シークレット、SIM 
 Telegram 通知が有効で、Chat ID と Admin ID の両方が設定されている場合、ボットは以下をサポートします:
 
 ```text
-/status [デバイス]
-/esim <デバイス>
-/switch <デバイス> <iccid>
-/wfc <デバイス> <status|on|off|reconnect>
-/sms <デバイス> <番号> <メッセージ>
+/status [device]
+/esim <device>
+/switch <device> <iccid>
+/wfc <device> <status|on|off|reconnect>
+/sms <device> <number> <message>
 ```
 
 プロファイルの切り替えと SMS の送信には、ワンタイム確認ボタンが使用されます。ボットは eSIM のダウンロード、削除、名前変更コマンドを公開しません。
@@ -319,12 +340,18 @@ cd web && npm run build
 
 | ネットワーク | アドレス |
 | ------- | ------- |
-| USDT-TRON (TRC20) | `TQQAbboBoU8h5xX4YCA1rqWJU2WjK3seSg` |
-| USDT-BSC (BEP20) | `0xdbfcd4a462550d6ff06d09cbd89026c6b145d9c4` |
-| USDT-Polygon | `0xdbfcd4a462550d6ff06d09cbd89026c6b145d9c4` |
+| USDT-TRON (TRC20) | `TWSAkvzVsFc7KqncDLmUfRxpPQbpV5CgTB` |
+| USDT-BSC (BEP20) | `0xb43031387342ebb1ff536fb9ad6440b9e6377139` |
+| USDT-Polygon | `0xb43031387342ebb1ff536fb9ad6440b9e6377139` |
 
 ## ライセンス
 
 [LICENSE](../LICENSE) を参照してください。
 
-[![MengMengCode/VoCat Star History](https://mengmeng.meteor-history.com/api/embed/MengMengCode/VoCat.svg?sig=sdeXRVxAoY3yLWgXL7JViY2USYIN3t9neJ6ScPvgUAo&theme=light&style=xkcd&color=dd4528&background=ffffff&textColor=000000&width=900&height=600&lineWidth=3&showTitle=true&showLegend=true&showDots=false&v=0.0.14)](https://meteor-history.com)
+<a href="https://star-history.dera.page/#MengMengCode/VoCat">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=MengMengCode/VoCat&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=MengMengCode/VoCat" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=MengMengCode/VoCat" />
+ </picture>
+</a>

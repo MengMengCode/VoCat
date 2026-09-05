@@ -96,6 +96,13 @@ sudo bash install.sh 0.0.2
 إذا لم تكن وحدات النواة المطابقة متاحة، فاستخدم برنامجًا ثابتًا يتضمنها؛
 ولا تفرض أبدًا تثبيت kmods مبنية لنواة مختلفة.
 
+إذا كانت النواة لا تستطيع توفير XFRM/IPsec وكنت تحتاج فقط إلى ميزات لا تعتمد على VoWiFi، مثل الرسائل القصيرة الخلوية أو البيانات، فثبّت باستخدام `--skip-vowifi-check`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
+sudo bash install.sh --skip-vowifi-check
+```
+
 المثبّت:
 
 - يكتشف `amd64` أو `386` أو `arm64` أو `aarch64` أو `armv7`؛
@@ -109,7 +116,7 @@ sudo bash install.sh 0.0.2
 بعد التثبيت، افتح:
 
 ```text
-http://<عنوان-الخادم>:7575
+http://<server-address>:7575
 ```
 
 ### التثبيت اليدوي للملف الثنائي
@@ -139,7 +146,7 @@ sudo env \
 ```
 
 يشغّل هذا الأمر اليدوي Vocat في المقدمة. استخدم `vocat serve` حتى
-يبدأ العملية الخادم مباشرةً؛ إن تشغيل `vocat` دون وسائط بصفتك root
+تبدأ العملية تشغيل الخادم مباشرةً؛ إن تشغيل `vocat` دون وسائط بصفتك root
 على TTY يفتح بدلاً من ذلك قائمة الإدارة التفاعلية. استخدم المثبّت بنقرة
 واحدة عند الحاجة إلى خدمة systemd مُدارة وإعادة تشغيل تلقائية.
 
@@ -171,24 +178,26 @@ docker run -d \
   ghcr.io/mengmengcode/vocat:latest
 ```
 
-افتح `http://<عنوان-الخادم>:7575` بعد بدء الحاوية. شبكة المضيف
-مطلوبة حتى تبقى واجهات شبكة QMI مرئية لـ Vocat، بينما الوصول المميّز إلى الأجهزة
-مطلوب للمنافذ التسلسلية، وعقد تحكم QMI، وواجهات TUN، وإعدادات الشبكة، والأجهزة
-المضافة بعد بدء الحاوية. يجعل تركيب `/dev` العقد الجديدة `ttyUSB*` و`ttyACM*` و`cdc-wdm*`
-مرئية دون إعادة إنشاء الحاوية.
+افتح `http://<server-address>:7575` بعد بدء الحاوية. يلزم استخدام شبكة المضيف حتى تبقى واجهات شبكة QMI مرئية لـ Vocat، كما يلزم الوصول بصلاحيات مرتفعة إلى الأجهزة لاستخدام المنافذ التسلسلية وعقد تحكم QMI وواجهات TUN وإعدادات الشبكة والأجهزة المضافة بعد بدء الحاوية. يتيح الربط المباشر لـ `/dev` ظهور عقد `ttyUSB*` و`ttyACM*` و`cdc-wdm*` الجديدة وعقد MHI من نمط `wwan*` دون إعادة إنشاء الحاوية.
 
-يمنح هذا الوضع عمدًا Vocat وصولاً واسعًا إلى أجهزة المضيف ومكدس الشبكة.
-استخدمه فقط على مضيف Linux موثوق. يتعرف الاكتشاف التلقائي حاليًا على مودمات
-Quectel USB المدعومة (معرّف الشركة المصنعة USB `2c7c`)، وليس على ماركات مودم عشوائية.
-إن تركيب العقد الفردية فقط باستخدام `--device`، مثل `/dev/ttyUSB2` و`/dev/cdc-wdm0`،
-يحصر الحاوية في تلك العقد الثابتة ولا يوفر اكتشافًا كاملاً متعدد الأجهزة أو بالتوصيل الساخن.
+يمنح هذا الوضع Vocat عمدًا وصولًا واسعًا إلى أجهزة المضيف ومكدس الشبكة. استخدمه فقط على مضيف Linux موثوق. يتعرّف الاكتشاف التلقائي على مودمات Quectel USB المدعومة (معرّف مورّد USB هو `2c7c`) ومودمات PCIe/MHI التي يتيحها نظام Linux WWAN الفرعي؛ ولا يتعرّف على جميع ترتيبات المودمات الممكنة. إن تعيين عقد فردية فقط باستخدام `--device`، مثل `/dev/ttyUSB2` أو `/dev/cdc-wdm0` أو `/dev/wwan0qmi0`، يحصر الحاوية في تلك العقد الثابتة ولا يوفّر اكتشافًا كاملًا لعدة أجهزة أو للأجهزة الموصولة أثناء التشغيل.
 
 تُنشر صورة GHCR لـ `linux/amd64` و`linux/arm64`.
 
 > [!TIP]
-> **ملاحظة حول النشر على NAS / QNAP Container Station**:
-> في أنظمة NAS مثل QNAP QTS / QuTS hero (Container Station)، قد تؤدي حسابات المشرفين المخصصة وآليات عزل وحدات التخزين إلى توجيه وحدات تخزين Docker المسماة (مثل `-v vocat-data:/opt/vocat/data`) إلى مسارات معزولة مختلفة بين أمر التهيئة `bootstrap-admin` وحاوية الخدمة الرئيسية، مما يتسبب في ظهور خطأ في كلمة المرور عند تسجيل الدخول عبر الويب.
-> بالنسبة لبيئات NAS، يوصى بشدة باستبدال وحدات التخزين المسماة بربط مسار مطلق على المضيف (مثل `-v /share/Container/vocat/data:/opt/vocat/data` على QNAP) لكل من التهيئة والتشغيل لضمان استمرارية متسقة لقاعدة بيانات SQLite.
+> **ملاحظة النشر على NAS / QNAP Container Station**:
+> في أنظمة تشغيل NAS مثل QNAP QTS / QuTS hero (Container Station)، قد تؤدي حسابات المسؤولين المخصصة التي لا تعمل بصلاحيات root وآليات عزل وحدات التخزين إلى إسناد وحدات تخزين Docker المسماة (مثل `-v vocat-data:/opt/vocat/data`) إلى مسارات معزولة مختلفة بين التهيئة لمرة واحدة باستخدام `bootstrap-admin` وحاوية الخدمة العاملة في الخلفية، مما يسبب أخطاء «كلمة المرور غير صحيحة» عند تسجيل الدخول عبر الويب.
+> في بيئات NAS، يوصى بشدة باستبدال وحدات التخزين المسماة بربط مباشر لمسار مطلق على المضيف (مثل `-v /share/Container/vocat/data:/opt/vocat/data` على QNAP) لكل من التهيئة والتشغيل، لضمان اتساق التخزين الدائم لقاعدة بيانات SQLite.
+
+### قارئات SIM عبر USB
+
+تستخدم قارئات SIM عبر USB خدمة Linux PC/SC. عند استخدام مدير حزم مدعوم، يثبّت برنامج التثبيت بنقرة واحدة `pcscd` ويشغّله تلقائيًا، كما يثبّت برنامج تشغيل CCID. على Debian/Ubuntu، يكون الإعداد اليدوي المكافئ هو `apt install pcscd libccid`. إذا اكتشف USB قارئ CCID ولكن PC/SC غير متاح، يُبقي VoCat القارئ ظاهرًا في مربع حوار إضافة جهاز ويبلّغ عن الخدمة أو برنامج التشغيل المفقود بدلًا من إخفائه بصمت.
+
+### أدوات سطر أوامر QMI
+
+يستخدم VoCat الأداة `qmicli` للتحقق من جاهزية قناة تحكم QMI، و`qmi-proxy` لتعدد الإرسال في الوصول إليها. تُدار جلسات بيانات الحزم بواسطة عميل QMI WDS المدمج بدلًا من ملفات حالة CID/PDH الخاصة بـ `qmi-network`. يثبّت برنامج التثبيت بنقرة واحدة الأدوات المقابلة ويتحقق منها. للنشر اليدوي، يستخدم Debian/Ubuntu الأمر `apt install libqmi-utils`، ويستخدم Arch Linux الأمر `pacman -S libqmi`، ويستخدم Alpine الأمر `apk add qmi-utils`، ويستخدم OpenWrt الأمر `opkg install qmi-utils`.
+
+يتحقق `vocat doctor --repair-dji-qmi` من وجود `qmicli` قبل تغيير أي ربط لبرنامج تشغيل USB أو تفعيل إشارة DTR. إذا كانت الأداة غير متاحة، يتوقف الأمر مع إرشاد لتثبيتها ويترك حالة الجهاز الحالية دون تغيير.
 
 ## الإعدادات
 
@@ -205,6 +214,10 @@ Quectel USB المدعومة (معرّف الشركة المصنعة USB `2c7c`)
 | `VOCAT_REPO` | `MengMengCode/VoCat` | مستودع GitHub الموثوق الذي يستخدمه المحدّث الذاتي، بصيغة `owner/name`. |
 | `GITHUB_TOKEN` | فارغ | رمز GitHub اختياري للمستودعات الخاصة أو حدود API أعلى. |
 
+يمكن تحويل حزم إعدادات مشغّلي Apple التي يوفّرها المستخدم باستخدام `vocat carrier import-ipcc` إلى ملفات إعداد مشغّلين قابلة للمراجعة ومقيّدة بقائمة عناصر مسموح بها؛ انظر [docs/CARRIER_IPCC_IMPORT.md](CARRIER_IPCC_IMPORT.md).
+
+تُخزَّن بيانات اعتماد المسؤول في SQLite فقط. هيّئ قاعدة بيانات فارغة مرة واحدة باستخدام `vocat bootstrap-admin`؛ لا يمكن لمتغيرات البيئة أو إعدادات JSON تعيين اسم مستخدم المسؤول أو كلمة مروره أو الكتابة فوقهما.
+
 لا تخزّن رموز Telegram، أو كلمات مرور SMTP، أو أسرار webhook، أو بيانات اعتماد SIM، أو بيانات خاصة أخرى في المستودع. قم بإعدادها عبر إعدادات التطبيق أو ملفات البيئة المحمية.
 
 ## بوت Telegram
@@ -212,11 +225,11 @@ Quectel USB المدعومة (معرّف الشركة المصنعة USB `2c7c`)
 عند تفعيل إشعارات Telegram وإعداد كلٍّ من Chat ID وAdmin ID، يدعم البوت:
 
 ```text
-/status [الجهاز]
-/esim <الجهاز>
-/switch <الجهاز> <iccid>
-/wfc <الجهاز> <status|on|off|reconnect>
-/sms <الجهاز> <الرقم> <الرسالة>
+/status [device]
+/esim <device>
+/switch <device> <iccid>
+/wfc <device> <status|on|off|reconnect>
+/sms <device> <number> <message>
 ```
 
 تستخدم عمليتا تبديل الملفات الشخصية وإرسال الرسائل القصيرة أزرار تأكيد لمرة واحدة. لا يعرض البوت أوامر تنزيل أو حذف أو إعادة تسمية eSIM.
@@ -335,12 +348,18 @@ cd web && npm run build
 
 | الشبكة | العنوان |
 | ------- | ------- |
-| USDT-TRON (TRC20) | `TQQAbboBoU8h5xX4YCA1rqWJU2WjK3seSg` |
-| USDT-BSC (BEP20) | `0xdbfcd4a462550d6ff06d09cbd89026c6b145d9c4` |
-| USDT-Polygon | `0xdbfcd4a462550d6ff06d09cbd89026c6b145d9c4` |
+| USDT-TRON (TRC20) | `TWSAkvzVsFc7KqncDLmUfRxpPQbpV5CgTB` |
+| USDT-BSC (BEP20) | `0xb43031387342ebb1ff536fb9ad6440b9e6377139` |
+| USDT-Polygon | `0xb43031387342ebb1ff536fb9ad6440b9e6377139` |
 
 ## الرخصة
 
 انظر [LICENSE](../LICENSE).
 
-[![MengMengCode/VoCat Star History](https://mengmeng.meteor-history.com/api/embed/MengMengCode/VoCat.svg?sig=sdeXRVxAoY3yLWgXL7JViY2USYIN3t9neJ6ScPvgUAo&theme=light&style=xkcd&color=dd4528&background=ffffff&textColor=000000&width=900&height=600&lineWidth=3&showTitle=true&showLegend=true&showDots=false&v=0.0.14)](https://meteor-history.com)
+<a href="https://star-history.dera.page/#MengMengCode/VoCat">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=MengMengCode/VoCat&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=MengMengCode/VoCat" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=MengMengCode/VoCat" />
+ </picture>
+</a>

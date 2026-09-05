@@ -24,7 +24,7 @@
 
 [English](../README.md) | [العربية](README.ar.md) | [简体中文](README.zh-CN.md) | [繁體中文](README.zh-TW.md) | **Français** | [Русский](README.ru.md) | [Español](README.es.md) | [日本語](README.ja.md)
 
-Vocat est un panneau de contrôle web open-source et une boîte à outils d'ingénierie pour les modems cellulaires Quectel de classe EC20/EC25. Il réunit, dans un service autonome unique, la découverte de modems, l'état radio en direct, les terminaux AT et USSD, les SMS, la WiFi Calling, la gestion eSIM, la sélection de réseau, le routage par proxy, les notifications, les journaux d'audit et l'automatisation des versions.
+Vocat est un panneau de contrôle web open-source et une boîte à outils d'ingénierie pour les modems cellulaires Quectel de classe EC20/EC25. Il réunit, dans un service autonome unique, la découverte de modems, l'état radio en direct, les terminaux AT et USSD, les SMS, les appels WiFi (WiFi Calling), la gestion eSIM, la sélection de réseau, le routage par proxy, les notifications, les journaux d'audit et l'automatisation des versions.
 
 Le backend est écrit en Go, l'interface est construite avec React et TypeScript, et le frontend de production est intégré dans le binaire Go. Un seul exécutable contient l'application web et utilise SQLite pour l'état persistant.
 
@@ -96,6 +96,13 @@ d'installer les paquets correspondants `ip-full`, `kmod-ipsec`, `kmod-ipsec4/6`,
 Si des modules noyau correspondants ne sont pas disponibles, utilisez un firmware qui les inclut ;
 ne forcez jamais l'installation de kmods compilés pour un noyau différent.
 
+Si votre noyau ne peut pas fournir XFRM/IPsec et que vous avez uniquement besoin de fonctionnalités sans VoWiFi, comme les SMS cellulaires ou les données, installez avec `--skip-vowifi-check` :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MengMengCode/VoCat/master/scripts/install.sh -o install.sh
+sudo bash install.sh --skip-vowifi-check
+```
+
 Le programme d'installation :
 
 - détecte `amd64`, `386`, `arm64`, `aarch64` ou `armv7` ;
@@ -109,7 +116,7 @@ Le programme d'installation :
 Après l'installation, ouvrez :
 
 ```text
-http://<adresse-du-serveur>:7575
+http://<server-address>:7575
 ```
 
 ### Installation manuelle du binaire
@@ -171,26 +178,26 @@ docker run -d \
   ghcr.io/mengmengcode/vocat:latest
 ```
 
-Ouvrez `http://<adresse-du-serveur>:7575` après le démarrage du conteneur. Le réseau de l'hôte
-est requis pour que les interfaces réseau QMI restent visibles par Vocat, tandis que l'accès
-privilégié aux périphériques est requis pour les ports série, les nœuds de contrôle QMI, les
-interfaces TUN, la configuration réseau et les périphériques ajoutés après le démarrage du
-conteneur. Le montage bind de `/dev` rend les nouveaux nœuds `ttyUSB*`, `ttyACM*` et `cdc-wdm*`
-visibles sans recréer le conteneur.
+Ouvrez `http://<server-address>:7575` après le démarrage du conteneur. Le réseau de l'hôte est nécessaire pour que les interfaces réseau QMI restent visibles par Vocat, tandis que l'accès privilégié aux périphériques est nécessaire pour les ports série, les nœuds de contrôle QMI, les interfaces TUN, la configuration réseau et les périphériques ajoutés après le démarrage du conteneur. Le montage bind de `/dev` rend les nouveaux nœuds `ttyUSB*`, `ttyACM*`, `cdc-wdm*` et MHI `wwan*` visibles sans recréer le conteneur.
 
-Ce mode donne intentionnellement à Vocat un large accès aux périphériques et à la pile réseau
-de l'hôte. Ne l'utilisez que sur un hôte Linux de confiance. La découverte automatique
-identifie actuellement les modems USB Quectel pris en charge (ID fabricant USB `2c7c`), et non
-des marques de modems arbitraires. Le mappage de nœuds individuels uniquement avec `--device`,
-comme `/dev/ttyUSB2` et `/dev/cdc-wdm0`, limite le conteneur à ces nœuds fixes et ne fournit
-pas une découverte multi-périphériques ou à chaud complète.
+Ce mode donne intentionnellement à Vocat un large accès aux périphériques et à la pile réseau de l'hôte. Ne l'utilisez que sur un hôte Linux de confiance. La découverte automatique identifie les modems USB Quectel pris en charge (identifiant de fabricant USB `2c7c`) et les modems PCIe/MHI exposés par le sous-système Linux WWAN ; elle ne reconnaît pas toutes les configurations de modems. Le mappage de nœuds individuels uniquement avec `--device`, comme `/dev/ttyUSB2`, `/dev/cdc-wdm0` ou `/dev/wwan0qmi0`, limite le conteneur à ces nœuds fixes et ne permet pas une découverte complète de plusieurs périphériques ou des branchements à chaud.
 
 L'image GHCR est publiée pour `linux/amd64` et `linux/arm64`.
 
 > [!TIP]
 > **Note de déploiement NAS / QNAP Container Station** :
-> Sur les systèmes NAS tels que QNAP QTS / QuTS hero (Container Station), les comptes administrateurs personnalisés et les mécanismes d'isolation de volumes peuvent faire en sorte que les volumes nommés Docker (ex. `-v vocat-data:/opt/vocat/data`) soient résolus vers des chemins isolés différents entre l'initialisation unique `bootstrap-admin` et le conteneur de service principal, entraînant des erreurs de mot de passe incorrect sur l'interface Web.
-> Pour les environnements NAS, il est fortement recommandé de remplacer les volumes nommés par un montage bind avec chemin absolu de l'hôte (ex. `-v /share/Container/vocat/data:/opt/vocat/data` sur QNAP) pour l'initialisation et l'exécution afin de garantir une persistance cohérente de la base de données SQLite.
+> Sur les systèmes d'exploitation NAS tels que QNAP QTS / QuTS hero (Container Station), les comptes administrateur personnalisés non root et les mécanismes d'isolation des volumes peuvent faire pointer les volumes nommés Docker (par exemple `-v vocat-data:/opt/vocat/data`) vers des chemins isolés différents entre l'initialisation unique `bootstrap-admin` et le conteneur du service en arrière-plan, entraînant des erreurs « Mot de passe incorrect » lors de la connexion web.
+> Pour les environnements NAS, il est fortement recommandé de remplacer les volumes nommés par un montage bind utilisant un chemin absolu de l'hôte (par exemple `-v /share/Container/vocat/data:/opt/vocat/data` sur QNAP), aussi bien pour l'initialisation que pour l'exécution, afin de garantir une persistance cohérente de la base de données SQLite.
+
+### Lecteurs de cartes SIM USB
+
+Les lecteurs de cartes SIM USB utilisent le service Linux PC/SC. Avec les gestionnaires de paquets pris en charge, le programme d'installation en un clic installe et démarre automatiquement `pcscd`, et installe le pilote CCID. Sur Debian/Ubuntu, la commande manuelle équivalente est `apt install pcscd libccid`. Si USB détecte un lecteur CCID mais que PC/SC est indisponible, VoCat laisse le lecteur visible dans la boîte de dialogue d'ajout d'appareil et signale le service ou le pilote manquant au lieu de le masquer silencieusement.
+
+### Utilitaires QMI en ligne de commande
+
+VoCat utilise `qmicli` pour vérifier qu'un canal de contrôle QMI est prêt et `qmi-proxy` pour en multiplexer l'accès. Les sessions de données par paquets sont gérées par le client QMI WDS intégré, plutôt que par les fichiers d'état CID/PDH de `qmi-network`. Le programme d'installation en un clic installe et vérifie les utilitaires correspondants. Pour un déploiement manuel, Debian/Ubuntu utilise `apt install libqmi-utils` ; Arch Linux utilise `pacman -S libqmi`, Alpine utilise `apk add qmi-utils` et OpenWrt utilise `opkg install qmi-utils`.
+
+`vocat doctor --repair-dji-qmi` vérifie la présence de `qmicli` avant de modifier toute association de pilote USB ou d'activer le signal DTR. Si l'utilitaire est indisponible, la commande s'arrête avec une indication d'installation et laisse l'état actuel de l'appareil inchangé.
 
 ## Configuration
 
@@ -207,6 +214,10 @@ Vocat lit un fichier de configuration JSON optionnel depuis `VOCAT_CONFIG`, puis
 | `VOCAT_REPO` | `MengMengCode/VoCat` | Dépôt GitHub de confiance utilisé par l'auto-updater, au format `owner/name`. |
 | `GITHUB_TOKEN` | vide | Jeton GitHub optionnel pour les dépôts privés ou des limites d'API plus élevées. |
 
+Les bundles opérateur Apple fournis par l'utilisateur peuvent être convertis avec `vocat carrier import-ipcc` en profils opérateur vérifiables et limités à une liste d'éléments autorisés ; voir [docs/CARRIER_IPCC_IMPORT.md](CARRIER_IPCC_IMPORT.md).
+
+Les identifiants de l'administrateur sont stockés uniquement dans SQLite. Initialisez une base de données vide une seule fois avec `vocat bootstrap-admin` ; les variables d'environnement et la configuration JSON ne peuvent ni définir ni remplacer le nom d'utilisateur ou le mot de passe de l'administrateur.
+
 Ne stockez pas de jetons Telegram, mots de passe SMTP, secrets de webhook, identifiants SIM ou autres données privées dans le dépôt. Configurez-les via les paramètres de l'application ou des fichiers d'environnement protégés.
 
 ## Bot Telegram
@@ -214,11 +225,11 @@ Ne stockez pas de jetons Telegram, mots de passe SMTP, secrets de webhook, ident
 Lorsque les notifications Telegram sont activées et que le Chat ID et l'Admin ID sont configurés, le bot prend en charge :
 
 ```text
-/status [appareil]
-/esim <appareil>
-/switch <appareil> <iccid>
-/wfc <appareil> <status|on|off|reconnect>
-/sms <appareil> <numéro> <message>
+/status [device]
+/esim <device>
+/switch <device> <iccid>
+/wfc <device> <status|on|off|reconnect>
+/sms <device> <number> <message>
 ```
 
 La commutation de profil et l'envoi de SMS utilisent des boutons de confirmation à usage unique. Le bot n'expose pas les commandes de téléchargement, de suppression ou de renommage eSIM.
@@ -337,12 +348,18 @@ cd web && npm run build
 
 | Réseau | Adresse |
 | ------- | ------- |
-| USDT-TRON (TRC20) | `TQQAbboBoU8h5xX4YCA1rqWJU2WjK3seSg` |
-| USDT-BSC (BEP20) | `0xdbfcd4a462550d6ff06d09cbd89026c6b145d9c4` |
-| USDT-Polygon | `0xdbfcd4a462550d6ff06d09cbd89026c6b145d9c4` |
+| USDT-TRON (TRC20) | `TWSAkvzVsFc7KqncDLmUfRxpPQbpV5CgTB` |
+| USDT-BSC (BEP20) | `0xb43031387342ebb1ff536fb9ad6440b9e6377139` |
+| USDT-Polygon | `0xb43031387342ebb1ff536fb9ad6440b9e6377139` |
 
 ## Licence
 
 Voir [LICENSE](../LICENSE).
 
-[![MengMengCode/VoCat Star History](https://mengmeng.meteor-history.com/api/embed/MengMengCode/VoCat.svg?sig=sdeXRVxAoY3yLWgXL7JViY2USYIN3t9neJ6ScPvgUAo&theme=light&style=xkcd&color=dd4528&background=ffffff&textColor=000000&width=900&height=600&lineWidth=3&showTitle=true&showLegend=true&showDots=false&v=0.0.14)](https://meteor-history.com)
+<a href="https://star-history.dera.page/#MengMengCode/VoCat">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=MengMengCode/VoCat&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=MengMengCode/VoCat" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=MengMengCode/VoCat" />
+ </picture>
+</a>
