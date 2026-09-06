@@ -43,15 +43,14 @@ func (adapter *EC20Adapter) ReadSMSCenterPSI(ctx context.Context, deviceID strin
 	if count != 1 {
 		return "", errors.New("vocat: EC20 SMS center PSI read requires exactly one CRSM response")
 	}
-	record, err := parseCRSMData(response)
-	if err != nil {
-		return "", fmt.Errorf("vocat: read EC20 SMS center PSI: %w", err)
-	}
-	// This single-command path requires a completed 9000 response, not a
-	// pending 9Fxx GET RESPONSE. Do not return data from incomplete reads.
+	// Require completed data, not 9Fxx pending GET RESPONSE.
 	fields := parseCSV(valueAfterATPrefix(response, "+CRSM:"))
 	if len(fields) != 3 || fields[0] != "144" || fields[1] != "0" {
 		return "", errors.New("vocat: EC20 SMS center PSI read requires a complete 9000 data response")
+	}
+	record, err := parseCRSMData(response)
+	if err != nil {
+		return "", err
 	}
 	return parseEC20SMSCenterPSIRecord(record)
 }
@@ -63,29 +62,15 @@ func parseEC20SMSCenterPSIRecord(record []byte) (string, error) {
 	if len(record) < 2 || record[0] != 0x80 {
 		return "", errors.New("vocat: SMS center PSI record has no URI TLV")
 	}
-	offset, n := 2, int(record[1])
-	if n&0x80 != 0 {
-		// Definite BER lengths only, with at most two length octets (a UICC
-		// record cannot need more). Accept non-minimal 81/82 card encodings.
-		octets := n & 0x7f
-		if octets == 0 || octets > 2 || octets > len(record)-offset {
-			return "", errors.New("vocat: SMS center PSI record has invalid BER length")
-		}
-		n = 0
-		for i := 0; i < octets; i++ {
-			n = n<<8 | int(record[offset])
-			offset++
-		}
-	}
-	if n == 0 || n > len(record)-offset {
+	value, consumed, err := decodeBERTLVValue(record[1:])
+	if err != nil || len(value) == 0 {
 		return "", errors.New("vocat: SMS center PSI record has invalid URI length")
 	}
-	for _, b := range record[offset+n:] {
+	for _, b := range record[1+consumed:] {
 		if b != 0xff {
 			return "", errors.New("vocat: SMS center PSI record has ambiguous or unexpected trailing data")
 		}
 	}
-	value := record[offset : offset+n]
 	for _, b := range value {
 		if b < 0x21 || b > 0x7e {
 			return "", errors.New("vocat: SMS center PSI record URI is not visible ASCII")

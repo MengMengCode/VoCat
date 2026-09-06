@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/url"
-	"strconv"
 	"strings"
 )
 
@@ -15,32 +14,26 @@ type smsCenterPSIReader interface {
 	ReadSMSCenterPSI(context.Context, string) (string, error)
 }
 
-func (session *Session) smsTarget(ctx context.Context, smsc string) (target, source, reason string, err error) {
+func (session *Session) smsTarget(ctx context.Context, smsc string) (string, error) {
 	fallback := "tel:" + normalizeE164(smsc)
 	if err := ctx.Err(); err != nil {
-		return "", "", "", err
+		return "", err
 	}
 	reader, ok := session.provider.aka.(smsCenterPSIReader)
 	if !ok {
-		return fallback, "smsc_fallback", "reader_unsupported", nil
+		return fallback, nil
 	}
-	psi, readErr := reader.ReadSMSCenterPSI(ctx, session.request.DeviceID)
-	if err := ctx.Err(); err != nil {
-		return "", "", "", err
+	psi, err := reader.ReadSMSCenterPSI(ctx, session.request.DeviceID)
+	if ctx.Err() != nil {
+		return "", ctx.Err()
 	}
-	if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
-		return "", "", "", readErr
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "", err
 	}
-	if readErr != nil {
-		return fallback, "smsc_fallback", "read_failed", nil
+	if err != nil || !validSMSPSI(psi) {
+		return fallback, nil
 	}
-	if psi == "" {
-		return fallback, "smsc_fallback", "psi_absent", nil
-	}
-	if !validSMSPSI(psi) {
-		return fallback, "smsc_fallback", "invalid_uri", nil
-	}
-	return psi, "sim_psi", "valid_psi", nil
+	return psi, nil
 }
 
 // validSMSPSI accepts a conservative bare SIP/SIPS/TEL routing URI. Unlike the
@@ -80,36 +73,22 @@ func validSMSPSI(uri string) bool {
 			return false
 		}
 		host := address
-		port := ""
-		hasPort := false
-		if strings.HasPrefix(address, "[") {
-			end := strings.IndexByte(address, ']')
-			if end < 0 || !strings.Contains(address[1:end], ":") || net.ParseIP(address[1:end]) == nil {
+		if strings.HasPrefix(address, "[") && strings.HasSuffix(address, "]") {
+			host = address[1 : len(address)-1]
+		} else if strings.Contains(address, ":") {
+			var port string
+			host, port, err = net.SplitHostPort(address)
+			if err != nil || !smsPSIChars(port, "0123456789") {
 				return false
 			}
-			host = address[:end+1]
-			if suffix := address[end+1:]; suffix != "" {
-				if !strings.HasPrefix(suffix, ":") {
-					return false
-				}
-				port, hasPort = suffix[1:], true
-			}
-		} else {
-			host, port, hasPort = strings.Cut(address, ":")
-			if !smsPSIHost(host) {
+			if _, err := decimalPort(port); err != nil {
 				return false
 			}
 		}
-		if hasPort {
-			if !smsPSIChars(port, "0123456789") {
-				return false
-			}
-			number, err := strconv.Atoi(port)
-			if err != nil || number < 1 || number > 65535 {
-				return false
-			}
+		if strings.ContainsAny(address, "[]") {
+			return strings.Contains(host, ":") && net.ParseIP(host) != nil
 		}
-		return host != ""
+		return smsPSIHost(host)
 	case "tel":
 		number, params, hasParams := strings.Cut(rest, ";")
 		if hasParams && !smsPSIParameters(params) {

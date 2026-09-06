@@ -1033,7 +1033,7 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 	session.logOutboundSMS(slog.LevelInfo, "IMS outbound SMS submission started",
 		"stage", "prepare", "parts", len(parts), "smsc_source", smscSource,
 		"recipient_type", smsRecipientType(parts[0].To))
-	psi, _, _, err := session.smsTarget(ctx, smsc)
+	psi, err := session.smsTarget(ctx, smsc)
 	if err != nil {
 		return result, err
 	}
@@ -1195,13 +1195,15 @@ func (session *Session) sendSIPMessageWithIdentity(
 	session.mu.Lock()
 	cseq := session.cseq
 	session.cseq++
-	identity, identitySource := messagePublicIdentity(session.identity.public, preferredIdentity, session.evidence.AssociatedIdentities)
+	var identity, identitySource string
 	if session.identity.temporaryPublic && contentType == smsContentType && inReplyTo == "" {
 		identity, identitySource, err = originatingSMSPublicIdentity(session.identity.public, session.evidence.AssociatedIdentities)
 		if err != nil {
 			session.mu.Unlock()
 			return nil, err
 		}
+	} else {
+		identity, identitySource = messagePublicIdentity(session.identity.public, preferredIdentity, session.evidence.AssociatedIdentities)
 	}
 	serviceRoutes := append([]string(nil), session.evidence.ServiceRoute...)
 	securityHeaders := runtimeSecurityHeaders(

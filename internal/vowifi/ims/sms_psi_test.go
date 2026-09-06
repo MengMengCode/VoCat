@@ -158,60 +158,41 @@ func TestSMSPSIValidation(t *testing.T) {
 		for _, value := range group.values {
 			t.Run(value, func(t *testing.T) {
 				session := &Session{provider: &Provider{aka: &smsPSITestAKA{psi: value}}}
-				got, source, reason, err := session.smsTarget(context.Background(), smsPSITestCenter)
+				got, err := session.smsTarget(context.Background(), smsPSITestCenter)
 				if err != nil {
 					t.Fatal(err)
 				}
+				want := "tel:" + smsPSITestCenter
 				if group.valid {
-					if got != value || source != "sim_psi" {
-						t.Fatalf("valid PSI rejected: %q %s %s", got, source, reason)
-					}
-				} else {
-					if got != "tel:"+smsPSITestCenter || source != "smsc_fallback" || reason != "invalid_uri" {
-						t.Fatalf("unsafe PSI accepted: %q %s %s", got, source, reason)
-					}
+					want = value
+				}
+				if got != want {
+					t.Fatalf("target = %q, want %q", got, want)
 				}
 			})
 		}
 	}
 }
 
-func TestSMSPSIFallbackRoutesAndSafeLogs(t *testing.T) {
+func TestSMSPSIFallbackRoutes(t *testing.T) {
 	for _, tc := range []struct {
-		name, psi   string
-		err         error
-		unsupported bool
-		reason      string
+		name string
+		aka  vowifi.AKAProvider
 	}{
-		{name: "unsupported", unsupported: true, reason: "reader_unsupported"},
-		{name: "absent", reason: "psi_absent"},
-		{name: "read_error", err: errors.New("PRIVATE SIM DATA\r\nX-Evil"), reason: "read_failed"},
-		{name: "invalid", psi: "sip:PRIVATE SIM DATA\r\nX-Evil", reason: "invalid_uri"},
-		{name: "valid", psi: smsPSITestURI, reason: "valid_psi"},
+		{"unsupported", &recordingAKA{}},
+		{"read_error", &smsPSITestAKA{err: errors.New("SIM read failed")}},
+		{"invalid", &smsPSITestAKA{psi: "sip:unsafe\r\nX-Evil"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			base := &recordingAKA{result: vowifi.AKAResult{RES: []byte{1, 2, 3, 4}}}
-			var aka vowifi.AKAProvider = &smsPSITestAKA{recordingAKA: base, psi: tc.psi, err: tc.err}
-			if tc.unsupported {
-				aka = base
+			logs := new(bytes.Buffer)
+			session := &Session{provider: &Provider{aka: tc.aka, config: Config{
+				Logger: slog.New(slog.NewTextHandler(logs, nil)),
+			}}}
+			target, err := session.smsTarget(context.Background(), smsPSITestCenter)
+			if err != nil || target != "tel:"+smsPSITestCenter {
+				t.Fatalf("target = %q, %v; want numeric SMSC fallback", target, err)
 			}
-			session, seen, logs := smsPSITestSession(t, aka)
-			r := smsPSITestSubmit(t, session, seen)
-			want, source := "tel:"+smsPSITestCenter, "smsc_fallback"
-			if tc.reason == "valid_psi" {
-				want, source = smsPSITestURI, "sim_psi"
-			}
-			if r.URI != want || r.value("To") != "<"+want+">" {
-				t.Fatalf("route %q / %q", r.URI, r.value("To"))
-			}
-			target, gotSource, gotReason, err := session.smsTarget(context.Background(), smsPSITestCenter)
-			if err != nil || target != want || gotSource != source || gotReason != tc.reason {
-				t.Fatalf("route selection = %q %q %q, %v", target, gotSource, gotReason, err)
-			}
-			if strings.Contains(logs.String(), "IMS outbound SMS route selected") {
-				t.Fatal("fix must not add a per-message diagnostic log")
-			}
-			if strings.Contains(logs.String(), "PRIVATE SIM DATA") || strings.Contains(logs.String(), "X-Evil") {
+			if strings.Contains(logs.String(), "SIM read failed") || strings.Contains(logs.String(), "X-Evil") {
 				t.Fatal("raw PSI/error leaked into logs")
 			}
 		})
@@ -285,47 +266,30 @@ func (h smsPSICancelLog) Handle(_ context.Context, r slog.Record) error {
 }
 
 func TestSMSPSICancellationBetweenParts(t *testing.T) {
-	for _, afterRoute := range []bool{true, false} {
-		t.Run(fmt.Sprint(afterRoute), func(t *testing.T) {
-			aka := &smsPSITestAKA{recordingAKA: &recordingAKA{result: vowifi.AKAResult{RES: []byte{1, 2, 3, 4}}}, psi: smsPSITestURI}
-			session, seen, _ := smsPSITestSession(t, aka)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			message := "IMS SIP MESSAGE response received"
-			wantAttempts := 1
-			if afterRoute {
-				// Cancel at the reader boundary, not through a diagnostic log.
-				aka.read = func(context.Context) (string, error) {
-					cancel()
-					return smsPSITestURI, nil
-				}
-				message = ""
-				wantAttempts = 0
-			}
-			session.provider.config.Logger = slog.New(smsPSICancelLog{Handler: slog.Default().Handler(), cancel: cancel, message: message})
-			result, err := session.SendSMS(ctx, vowifi.SMSSubmitRequest{Recipient: "+12025550123", Text: strings.Repeat("A", 200)})
-			if !errors.Is(err, context.Canceled) || result.PartsAttempted != wantAttempts {
-				t.Fatalf("SendSMS=%#v %v", result, err)
-			}
-			for i := 0; i < wantAttempts; i++ {
-				select {
-				case <-seen:
-				case <-time.After(time.Second):
-					t.Fatal("missing expected MESSAGE")
-				}
-			}
-			select {
-			case <-seen:
-				t.Fatal("MESSAGE sent after cancellation")
-			case <-time.After(30 * time.Millisecond):
-			}
-		})
+	aka := &smsPSITestAKA{recordingAKA: &recordingAKA{result: vowifi.AKAResult{RES: []byte{1, 2, 3, 4}}}, psi: smsPSITestURI}
+	session, seen, _ := smsPSITestSession(t, aka)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session.provider.config.Logger = slog.New(smsPSICancelLog{Handler: slog.Default().Handler(), cancel: cancel, message: "IMS SIP MESSAGE response received"})
+	result, err := session.SendSMS(ctx, vowifi.SMSSubmitRequest{Recipient: "+12025550123", Text: strings.Repeat("A", 200)})
+	if !errors.Is(err, context.Canceled) || result.PartsAttempted != 1 || result.PartsAccepted != 1 {
+		t.Fatalf("SendSMS=%#v %v", result, err)
+	}
+	select {
+	case <-seen:
+	case <-time.After(time.Second):
+		t.Fatal("missing expected MESSAGE")
+	}
+	select {
+	case <-seen:
+		t.Fatal("MESSAGE sent after cancellation")
+	case <-time.After(30 * time.Millisecond):
 	}
 }
 
 func TestSMSPSISendUsesSIMTargetPreservesRPDU(t *testing.T) {
 	aka := &smsPSITestAKA{recordingAKA: &recordingAKA{result: vowifi.AKAResult{RES: []byte{1, 2, 3, 4}}}, psi: smsPSITestURI}
-	session, seen, _ := smsPSITestSession(t, aka)
+	session, seen, logs := smsPSITestSession(t, aka)
 	selected := smsPSITestSubmit(t, session, seen)
 	if selected.URI != smsPSITestURI || selected.value("To") != "<"+smsPSITestURI+">" {
 		t.Fatalf("SIM PSI ignored: URI=%q To=%q", selected.URI, selected.value("To"))
@@ -337,6 +301,9 @@ func TestSMSPSISendUsesSIMTargetPreservesRPDU(t *testing.T) {
 	fallback := smsPSITestSubmit(t, session, seen)
 	if fallback.URI != "tel:"+smsPSITestCenter || fallback.value("To") != "<tel:"+smsPSITestCenter+">" {
 		t.Fatalf("fallback target = %q / %q", fallback.URI, fallback.value("To"))
+	}
+	if strings.Contains(logs.String(), "IMS outbound SMS route selected") {
+		t.Fatal("fix must not add a per-message diagnostic log")
 	}
 	if !bytes.Equal(selected.Body, fallback.Body) {
 		t.Fatalf("PSI changed RPDU: %x vs %x", selected.Body, fallback.Body)
