@@ -499,6 +499,7 @@ func serveOutboundSMS(listener *net.UDPConn, nonce string, readyForClose chan<- 
 	}
 	if _, err = listener.WriteToUDP(testResponse(200, "OK", registerCallID, headers["cseq"], []string{
 		"Contact: " + headers["contact"] + ";expires=600",
+		"P-Associated-URI: <sip:12025550100@msg.example.test>",
 	}), remote); err != nil {
 		return err
 	}

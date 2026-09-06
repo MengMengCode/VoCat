@@ -388,6 +388,9 @@ type identitySet struct {
 	private string
 	public  string
 	user    string
+	// Set only when deriveIdentities generates the REGISTER-only identity.
+	// The zero value preserves legacy behavior for explicitly supplied identities.
+	temporaryPublic bool
 }
 
 func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, error) {
@@ -439,7 +442,7 @@ func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, 
 	if user == "" || strings.ContainsAny(user, "<>\" \t;") {
 		return identitySet{}, errors.New("ims: public identity user is invalid")
 	}
-	return identitySet{domain: domain, private: privateIdentity, public: publicIdentity, user: user}, nil
+	return identitySet{domain: domain, private: privateIdentity, public: publicIdentity, user: user, temporaryPublic: config.PublicIdentity == ""}, nil
 }
 
 type pcscfEndpoint struct {
@@ -645,7 +648,7 @@ func newSession(
 	if err != nil {
 		return nil, err
 	}
-	instanceID, err := randomUUID()
+	instanceID, err := stableInstanceUUID(request)
 	if err != nil {
 		return nil, err
 	}
@@ -1043,8 +1046,12 @@ func (session *Session) buildRegister(
 			authorization += ", integrity-protected=" + integrity
 		}
 		lines = append(lines, authorizationHeader+": "+authorization)
-	} else if cseq == 1 && session.securityOffered() {
-		lines = append(lines, "Authorization: "+session.emptyDigestAuthorization())
+	} else if session.securityOffered() && (cseq == 1 || session.securityActive) {
+		identityAuthorization := session.emptyDigestAuthorization()
+		if session.securityActive {
+			identityAuthorization = strings.Replace(identityAuthorization, "integrity-protected=no", "integrity-protected=yes", 1)
+		}
+		lines = append(lines, "Authorization: "+identityAuthorization)
 	}
 	lines = append(lines, "Content-Length: 0", "", "")
 	return []byte(strings.Join(lines, "\r\n")), nil
@@ -1384,7 +1391,9 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 			}
 		}
 	}
-	expiry := registrationExpiry(response, contacts, session.provider.config.RegistrationExpiry)
+	// Other registered devices may have longer grants; only our selected
+	// Contact determines this session's renewal deadline.
+	expiry := registrationExpiry(response, []string{registeredContact}, session.provider.config.RegistrationExpiry)
 	if expiry <= 0 {
 		session.evidence.Registered = false
 		session.evidence.RegistrationState = "rejected_zero_expiry"
