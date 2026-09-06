@@ -242,6 +242,9 @@ func TestSMSPSICancellationNeverSends(t *testing.T) {
 			if result.PartsAttempted != 0 {
 				t.Errorf("attempted %d parts after cancellation", result.PartsAttempted)
 			}
+			if (name == "during_read" || name == "reader_canceled" || name == "reader_deadline") && result.SubmissionStatus != "failed" {
+				t.Errorf("submission status=%q, want failed", result.SubmissionStatus)
+			}
 			select {
 			case r := <-seen:
 				t.Fatalf("sent MESSAGE after cancellation: %s", r.URI)

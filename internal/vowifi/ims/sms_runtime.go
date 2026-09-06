@@ -1035,6 +1035,7 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 		"recipient_type", smsRecipientType(parts[0].To))
 	psi, err := session.smsTarget(ctx, smsc)
 	if err != nil {
+		result.SubmissionStatus = "failed"
 		return result, err
 	}
 	// Preflight before attempting any part. The MESSAGE builder rechecks the
