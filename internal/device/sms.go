@@ -278,7 +278,7 @@ func (manager *Manager) DeleteSMSFromStorage(
 	storage string,
 	index int,
 ) error {
-	if index <= 0 {
+	if index < 0 {
 		return ErrSMSInvalidMessageIndex
 	}
 	storage = strings.ToUpper(strings.TrimSpace(storage))
