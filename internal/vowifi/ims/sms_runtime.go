@@ -977,6 +977,9 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 	session.smsMu.Lock()
 	defer session.smsMu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return vowifi.SMSSubmitResult{}, err
+	}
 	session.mu.Lock()
 	if session.closed || !session.evidence.Registered || !session.smsCapabilityReady() {
 		session.mu.Unlock()
@@ -991,6 +994,12 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 		var readErr error
 		if ok {
 			smsc, readErr = reader.ReadSMSCenter(ctx, session.request.DeviceID)
+		}
+		if err := ctx.Err(); err != nil {
+			return vowifi.SMSSubmitResult{}, err
+		}
+		if errors.Is(readErr, context.Canceled) || errors.Is(readErr, context.DeadlineExceeded) {
+			return vowifi.SMSSubmitResult{}, readErr
 		}
 		if strings.TrimSpace(smsc) == "" {
 			smsc = smsCenterForIdentity(session.provider.config, session.request.Identity)
@@ -1024,8 +1033,27 @@ func (session *Session) SendSMS(ctx context.Context, request vowifi.SMSSubmitReq
 	session.logOutboundSMS(slog.LevelInfo, "IMS outbound SMS submission started",
 		"stage", "prepare", "parts", len(parts), "smsc_source", smscSource,
 		"recipient_type", smsRecipientType(parts[0].To))
-	psi := "tel:" + normalizeE164(smsc)
+	psi, err := session.smsTarget(ctx, smsc)
+	if err != nil {
+		result.SubmissionStatus = "failed"
+		return result, err
+	}
+	// Preflight before attempting any part. The MESSAGE builder rechecks the
+	// current registration evidence under mu immediately before constructing it.
+	session.mu.Lock()
+	if session.identity.temporaryPublic {
+		_, _, err = originatingSMSPublicIdentity(session.identity.public, session.evidence.AssociatedIdentities)
+	}
+	session.mu.Unlock()
+	if err != nil {
+		result.SubmissionStatus = "failed"
+		return result, err
+	}
 	for _, part := range parts {
+		if err := ctx.Err(); err != nil {
+			result.SubmissionStatus = "failed"
+			return result, err
+		}
 		reference := session.allocateRPReference()
 		if len(part.TPDU) < 2 {
 			return result, errors.New("ims: SMS-SUBMIT TPDU is truncated")
@@ -1168,7 +1196,16 @@ func (session *Session) sendSIPMessageWithIdentity(
 	session.mu.Lock()
 	cseq := session.cseq
 	session.cseq++
-	identity, identitySource := messagePublicIdentity(session.identity.public, preferredIdentity, session.evidence.AssociatedIdentities)
+	var identity, identitySource string
+	if session.identity.temporaryPublic && contentType == smsContentType && inReplyTo == "" {
+		identity, identitySource, err = originatingSMSPublicIdentity(session.identity.public, session.evidence.AssociatedIdentities)
+		if err != nil {
+			session.mu.Unlock()
+			return nil, err
+		}
+	} else {
+		identity, identitySource = messagePublicIdentity(session.identity.public, preferredIdentity, session.evidence.AssociatedIdentities)
+	}
 	serviceRoutes := append([]string(nil), session.evidence.ServiceRoute...)
 	securityHeaders := runtimeSecurityHeaders(
 		session.securityActive,
