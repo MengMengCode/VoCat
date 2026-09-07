@@ -324,11 +324,22 @@ func encryptPayloadsFragmented(
 		chunks = append(chunks, plaintext[:take])
 		plaintext = plaintext[take:]
 	}
-	totalFragments := uint16(len(chunks))
-	if totalFragments == 0 {
-		totalFragments = 1
-		chunks = [][]byte{nil}
+	if len(chunks) <= 1 {
+		packet, err := encryptPayloads(
+			header,
+			inner,
+			suite,
+			encryptionKey,
+			integrityKey,
+			random,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return [][]byte{packet}, nil
 	}
+
+	totalFragments := uint16(len(chunks))
 
 	var packets [][]byte
 	for index, chunk := range chunks {
