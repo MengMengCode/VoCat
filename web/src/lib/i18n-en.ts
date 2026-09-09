@@ -1270,4 +1270,5 @@ export const EN_DICT: Record<string, string> = {
   "已关闭模组短信自动清理": "Modem SMS auto-clear is off",
   "模组短信存储已满，新短信可能无法接收": "Modem SMS storage is full; new messages may not be received",
   "SIM 短信存储已满，新短信可能无法接收": "SIM SMS storage is full; new messages may not be received",
+  "模组和 SIM 短信存储已满，新短信可能无法接收": "Modem and SIM SMS storage are full; new messages may not be received",
 };

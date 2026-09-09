@@ -737,8 +737,10 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 					DischargeTime:     message.DischargeTimestamp,
 					ReceivedAt:        time.Now().UTC(),
 				})
-				if applyErr != nil && !errors.Is(applyErr, store.ErrNotFound) {
-					s.logger.Warn("apply modem SMS delivery report failed", "device_id", config.ID, "error", applyErr)
+				if applyErr != nil {
+					if !errors.Is(applyErr, store.ErrNotFound) {
+						s.logger.Warn("apply modem SMS delivery report failed", "device_id", config.ID, "error", applyErr)
+					}
 					continue
 				}
 				if autoClear {

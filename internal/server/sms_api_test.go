@@ -559,6 +559,99 @@ func TestSyncModemSMSDoesNotClearUnpersistedMessages(t *testing.T) {
 	}
 }
 
+func TestSyncModemSMSKeepsUnmatchedDeliveryReports(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	const (
+		deviceID = "ec20-1"
+		imei     = "867394042309830"
+	)
+	if err := database.UpsertDevice(ctx, store.Device{
+		ID: deviceID, Name: "EC20", DeviceType: store.DeviceTypePCIeEC20EC25,
+		ModemIMEI: imei, SMSEnabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reference := 42
+	status := 0
+	controller := &smsDeletionController{
+		fakeDeviceController: fakeDeviceController{entry: device.Device{
+			ID: deviceID, Discovered: true,
+			Snapshot: &device.Snapshot{DeviceID: deviceID, IMEI: imei, IMSI: "23433"},
+		}},
+		storedMessages: []device.SMSMessage{{
+			Index: 8, Storage: "ME", StorageStatus: device.SMSStatusReceivedUnread,
+			Direction: device.SMSDirectionStatusReport, To: "+447700900123",
+			MessageReference: &reference, StatusCode: &status, DeliveryStatus: "delivered",
+			Encoding: device.SMSEncodingGSM7PDU, RawPDU: "report-unmatched",
+		}},
+	}
+	server := &Server{store: database, logger: regionTestLogger(), devices: controller}
+	server.syncModemSMS(ctx, deviceID)
+	controller.mu.Lock()
+	remaining := len(controller.storedMessages)
+	deleted := len(controller.deleted)
+	controller.mu.Unlock()
+	if remaining != 1 || deleted != 0 {
+		t.Fatalf("remaining = %d, deleted = %d", remaining, deleted)
+	}
+}
+
+func TestSyncModemSMSClearsMatchedDeliveryReports(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	const (
+		deviceID = "ec20-1"
+		imei     = "867394042309830"
+		imsi     = "23433"
+		peer     = "+447700900123"
+	)
+	if err := database.UpsertDevice(ctx, store.Device{
+		ID: deviceID, Name: "EC20", DeviceType: store.DeviceTypePCIeEC20EC25,
+		ModemIMEI: imei, SMSEnabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SaveSMSMessage(ctx, store.SMSMessage{
+		MessageID: "outbound-1", DeviceID: deviceID, ModemIMEI: imei, IMSI: imsi,
+		Peer: peer, Direction: "outbound", Body: "ping", Source: "cellular_at",
+		Timestamp: time.Unix(1_700_000_000, 0).UTC(), Extra: json.RawMessage(`{"message_reference":42}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reference := 42
+	status := 0
+	controller := &smsDeletionController{
+		fakeDeviceController: fakeDeviceController{entry: device.Device{
+			ID: deviceID, Discovered: true,
+			Snapshot: &device.Snapshot{DeviceID: deviceID, IMEI: imei, IMSI: imsi},
+		}},
+		storedMessages: []device.SMSMessage{{
+			Index: 8, Storage: "ME", StorageStatus: device.SMSStatusReceivedUnread,
+			Direction: device.SMSDirectionStatusReport, To: peer,
+			MessageReference: &reference, StatusCode: &status, DeliveryStatus: "delivered",
+			Encoding: device.SMSEncodingGSM7PDU, RawPDU: "report-matched",
+		}},
+	}
+	server := &Server{store: database, logger: regionTestLogger(), devices: controller}
+	server.syncModemSMS(ctx, deviceID)
+	controller.mu.Lock()
+	remaining := len(controller.storedMessages)
+	deleted := append([]string(nil), controller.deleted...)
+	controller.mu.Unlock()
+	if remaining != 0 || strings.Join(deleted, ",") != "ME:8" {
+		t.Fatalf("remaining = %d, deleted = %v", remaining, deleted)
+	}
+}
+
 func TestSMSSettingsAPITogglesAutoClear(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, ":memory:")

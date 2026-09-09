@@ -29,7 +29,15 @@ export function OverviewSimPanel({ device, simOperatorDisplay, customPhoneNumber
   const backendLabel =
     device.backendMode === "qmi" ? "QMI" : device.backendMode === "mbim" ? "MBIM" : device.backendMode === "at" ? "AT" : "Auto";
   const storage = device.smsStorage;
-  const storageFull = storageAreaFull(storage?.me) || storageAreaFull(storage?.sm);
+  const meFull = storageAreaFull(storage?.me);
+  const smFull = storageAreaFull(storage?.sm);
+  const storageWarning = meFull && smFull
+    ? t("模组和 SIM 短信存储已满，新短信可能无法接收")
+    : smFull
+      ? t("SIM 短信存储已满，新短信可能无法接收")
+      : meFull
+        ? t("模组短信存储已满，新短信可能无法接收")
+        : "";
 
   return (
     <div className="ui-panel-muted relative min-w-0 overflow-hidden p-4">
@@ -70,9 +78,9 @@ export function OverviewSimPanel({ device, simOperatorDisplay, customPhoneNumber
         <FieldRow label={t("运行模式")} value={backendLabel} monospace />
         <SMSStorageRow label="ME" area={storage?.me} warningLabel={t("模组短信存储已满，新短信可能无法接收")} />
         <SMSStorageRow label="SM" area={storage?.sm} warningLabel={t("SIM 短信存储已满，新短信可能无法接收")} />
-        {storageFull ? (
+        {storageWarning ? (
           <div className="pt-1 text-xs leading-5 text-amber-600 dark:text-amber-400">
-            {t("模组短信存储已满，新短信可能无法接收")}
+            {storageWarning}
           </div>
         ) : null}
       </div>

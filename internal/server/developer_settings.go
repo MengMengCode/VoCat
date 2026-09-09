@@ -52,7 +52,7 @@ func (s *Server) handleDeveloperSettings(w http.ResponseWriter, r *http.Request)
 		}
 		if request.AutoClearModemStorage != nil {
 			if err := developer.SetAutoClearModemStorage(r.Context(), s.store, *request.AutoClearModemStorage); err != nil {
-				writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+				s.writeStoreError(w, err)
 				return
 			}
 			s.recordAudit(r.Context(), "admin", "settings.sms.auto_clear_modem_storage", "settings", "sms", "success", "modem SMS auto-clear updated")
