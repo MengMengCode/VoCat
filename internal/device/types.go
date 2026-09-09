@@ -165,6 +165,25 @@ const (
 	SMSEncodingUnknown  SMSEncoding = "unknown"
 )
 
+type SMSStorageArea struct {
+	Used  int `json:"used"`
+	Total int `json:"total"`
+}
+
+type SMSStorageUsage struct {
+	SM SMSStorageArea `json:"sm"`
+	ME SMSStorageArea `json:"me"`
+}
+
+func (usage SMSStorageUsage) Known() bool {
+	return usage.SM.Total > 0 || usage.ME.Total > 0
+}
+
+type SMSListing struct {
+	Messages []SMSMessage
+	Storage  SMSStorageUsage
+}
+
 type SMSStorageStatus string
 
 const (

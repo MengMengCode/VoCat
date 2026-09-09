@@ -50,3 +50,27 @@ func TestDeveloperSettingsUpdatesGlobalSMSLimit(t *testing.T) {
 		t.Fatalf("SMS hourly limit = %d, want 17", got)
 	}
 }
+
+func TestDeveloperSettingsUpdatesAutoClearModemStorage(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	enabled, _ := json.Marshal(map[string]bool{"enabled": true})
+	if err := database.UpsertAppSetting(ctx, store.AppSetting{Key: developer.EnabledSettingKey, Value: enabled}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: database, developerEnabled: true, logger: regionTestLogger(), maxRequestBodyBytes: 4096}
+	request := httptest.NewRequest(http.MethodPut, "/api/settings/developer", strings.NewReader(`{"auto_clear_modem_storage":false}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.handleDeveloperSettings(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if developer.AutoClearModemStorage(ctx, database) {
+		t.Fatal("auto-clear should be disabled")
+	}
+}

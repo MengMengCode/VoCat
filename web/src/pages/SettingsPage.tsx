@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertRegular, CheckmarkRegular } from "@fluentui/react-icons";
 import { api, apiMessage, getSecuritySettings, updateSecuritySettings } from "../api";
-import type { DeveloperSettings, HTTPSSettings, NotificationSettings, SecuritySettings, SystemInfo } from "../types";
+import type { DeveloperSettings, HTTPSSettings, NotificationSettings, SecuritySettings, SMSSettings, SystemInfo } from "../types";
 import { Button, PageHeader, confirmDialog, message } from "../components/ui";
 import { CardDecor, CardIcon, CardTitle, SecurityCard, SystemInfoCard } from "../components/settings/Cards";
 import type { PasswordForm, UpdateInfo } from "../components/settings/Cards";
@@ -27,6 +27,7 @@ import { PluginsCard } from "../components/settings/PluginsCard";
 import { HTTPSCard } from "../components/settings/HTTPSCard";
 import { DeviceQuotaCard } from "../components/settings/DeviceQuotaCard";
 import { SMSRateLimitCard } from "../components/settings/SMSRateLimitCard";
+import { SMSAutoClearCard } from "../components/settings/SMSAutoClearCard";
 
 const EMPTY_PASSWORD: PasswordForm = { oldPassword: "", newPassword: "", confirmPassword: "" };
 
@@ -75,6 +76,9 @@ export default function SettingsPage() {
   const [loadingDeveloper, setLoadingDeveloper] = useState(false);
   const [savingDeveloper, setSavingDeveloper] = useState(false);
   const [savingSMSLimit, setSavingSMSLimit] = useState(false);
+  const [smsAutoClear, setSMSAutoClear] = useState(true);
+  const [loadingSMSSettings, setLoadingSMSSettings] = useState(false);
+  const [savingSMSSettings, setSavingSMSSettings] = useState(false);
 
   const updateChannel = useCallback(<K extends keyof NotifyForms>(key: K, patch: Partial<NotifyForms[K]>) => {
     setForms((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
@@ -110,6 +114,18 @@ export default function SettingsPage() {
     setClientIp(data.clientIp ?? "");
     setClientAllowed(!!data.clientAllowed);
   }, []);
+
+  const fetchSMSSettings = useCallback(async () => {
+    setLoadingSMSSettings(true);
+    try {
+      const data = await api<SMSSettings>("/settings/sms");
+      setSMSAutoClear(data.autoClearModemStorage !== false);
+    } catch {
+      message.error(t("短信存储设置加载失败"));
+    } finally {
+      setLoadingSMSSettings(false);
+    }
+  }, [t]);
 
   const fetchSecurity = useCallback(async () => {
     setLoadingSecurity(true);
@@ -151,7 +167,8 @@ export default function SettingsPage() {
     void fetchSystemInfo();
     void fetchNotifications();
     void fetchSecurity();
-  }, [fetchSystemInfo, fetchNotifications, fetchSecurity]);
+    void fetchSMSSettings();
+  }, [fetchSystemInfo, fetchNotifications, fetchSecurity, fetchSMSSettings]);
 
   useEffect(() => {
     if (systemInfo.developer) {
@@ -216,6 +233,19 @@ export default function SettingsPage() {
       setSavingSMSLimit(false);
     }
   }, [developerSettings, smsHourlyLimit, lang]);
+
+  const onToggleSMSAutoClear = useCallback(async (enabled: boolean) => {
+    setSavingSMSSettings(true);
+    try {
+      const data = await api<SMSSettings>("/settings/sms", { method: "PUT", body: { autoClearModemStorage: enabled } });
+      setSMSAutoClear(data.autoClearModemStorage !== false);
+      message.success(enabled ? t("已开启模组短信自动清理") : t("已关闭模组短信自动清理"));
+    } catch (error) {
+      message.error(apiMessage(error) || t("短信存储设置保存失败"));
+    } finally {
+      setSavingSMSSettings(false);
+    }
+  }, [t]);
 
   const onSaveSecurity = useCallback(async () => {
     setSavingSecurity(true);
@@ -448,6 +478,12 @@ export default function SettingsPage() {
           saving={savingSecurity}
           onChange={(patch) => setSecurity((prev) => ({ ...prev, ...patch }))}
           onSave={onSaveSecurity}
+        />
+        <SMSAutoClearCard
+          enabled={smsAutoClear}
+          loading={loadingSMSSettings}
+          saving={savingSMSSettings}
+          onToggle={onToggleSMSAutoClear}
         />
 
         {systemInfo.developer ? (

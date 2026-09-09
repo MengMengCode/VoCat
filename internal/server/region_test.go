@@ -93,8 +93,8 @@ func (f fakeDeviceController) ScanOperators(context.Context, string) (device.Ope
 func (f fakeDeviceController) SendSMS(context.Context, string, string, string) (device.SMSSendResult, error) {
 	return device.SMSSendResult{}, nil
 }
-func (f fakeDeviceController) ListSMS(context.Context, string) ([]device.SMSMessage, error) {
-	return append([]device.SMSMessage(nil), f.smsMessages...), f.smsErr
+func (f fakeDeviceController) ListSMS(context.Context, string) (device.SMSListing, error) {
+	return device.SMSListing{Messages: append([]device.SMSMessage(nil), f.smsMessages...)}, f.smsErr
 }
 func (f fakeDeviceController) ReadSMS(context.Context, string, int) (device.SMSMessage, error) {
 	return device.SMSMessage{}, nil

@@ -102,6 +102,20 @@ export interface PublicIPInfo {
   organization?: string;
 }
 
+export interface SMSStorageArea {
+  used?: number;
+  total?: number;
+}
+
+export interface SMSStorageUsage {
+  sm?: SMSStorageArea;
+  me?: SMSStorageArea;
+}
+
+export interface SMSSettings {
+  autoClearModemStorage: boolean;
+}
+
 export interface DeviceListItem {
   id: string;
   name: string;
@@ -120,6 +134,7 @@ export interface DeviceListItem {
   interface: string;
   esimTransport: string;
   smsEnabled: boolean;
+  smsStorage?: SMSStorageUsage;
 	  networkEnabled: boolean;
   vowifiEnabled: boolean;
   vowifiActive?: boolean;
@@ -481,6 +496,7 @@ export interface DeveloperSettings {
   smsHourlyLimit: number;
   defaultSmsHourlyLimit: number;
   maxSmsHourlyLimit: number;
+  autoClearModemStorage?: boolean;
 }
 
 export type Notice = {

@@ -44,7 +44,7 @@ type DeviceController interface {
 	ReRegisterOperator(context.Context, string) (device.OperatorSelection, error)
 	ScanOperators(context.Context, string) (device.OperatorScanResult, error)
 	SendSMS(context.Context, string, string, string) (device.SMSSendResult, error)
-	ListSMS(context.Context, string) ([]device.SMSMessage, error)
+	ListSMS(context.Context, string) (device.SMSListing, error)
 	ReadSMS(context.Context, string, int) (device.SMSMessage, error)
 	DeleteSMS(context.Context, string, int) error
 	DeleteSMSFromStorage(context.Context, string, string, int) error
@@ -1972,6 +1972,9 @@ func (s *Server) configuredDeviceSummary(
 	result["proxy_port"] = config.ProxyPort
 	result["esim_transport"] = config.ESIMTransport
 	result["sms_enabled"] = config.SMSEnabled
+	if usage, ok := s.smsStorageUsage(config.ID); ok {
+		result["sms_storage"] = usage
+	}
 	result["network_enabled"] = config.NetworkEnabled
 	result["developer_enabled"] = s.developerActive(context.Background())
 	dataRuntime := s.cellularDataRuntime().status(config.ID, config.NetworkEnabled)

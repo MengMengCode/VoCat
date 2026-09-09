@@ -82,6 +82,30 @@ func TestSetDeviceLimitValidatesRange(t *testing.T) {
 	}
 }
 
+func TestAutoClearModemStorageDefaultsEnabled(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "vocat.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if !AutoClearModemStorage(ctx, database) {
+		t.Fatal("missing setting should default to enabled")
+	}
+	if err := SetAutoClearModemStorage(ctx, database, false); err != nil {
+		t.Fatal(err)
+	}
+	if AutoClearModemStorage(ctx, database) {
+		t.Fatal("explicit false should disable auto-clear")
+	}
+	if err := SetAutoClearModemStorage(ctx, database, true); err != nil {
+		t.Fatal(err)
+	}
+	if !AutoClearModemStorage(ctx, database) {
+		t.Fatal("explicit true should enable auto-clear")
+	}
+}
+
 func TestSetSMSHourlyLimitValidatesRange(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "vocat.db"))
