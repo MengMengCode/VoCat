@@ -16,14 +16,15 @@ func (s *Server) handleDeveloperSettings(w http.ResponseWriter, r *http.Request)
 		s.writeDeveloperSettings(w, r)
 	case http.MethodPut:
 		var request struct {
-			DeviceLimit    *int `json:"device_limit"`
-			SMSHourlyLimit *int `json:"sms_hourly_limit"`
+			DeviceLimit           *int  `json:"device_limit"`
+			SMSHourlyLimit        *int  `json:"sms_hourly_limit"`
+			AutoClearModemStorage *bool `json:"auto_clear_modem_storage"`
 		}
 		if err := s.decodeJSON(w, r, &request); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		if request.DeviceLimit == nil && request.SMSHourlyLimit == nil {
+		if request.DeviceLimit == nil && request.SMSHourlyLimit == nil && request.AutoClearModemStorage == nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", "at least one developer setting is required")
 			return
 		}
@@ -49,6 +50,13 @@ func (s *Server) handleDeveloperSettings(w http.ResponseWriter, r *http.Request)
 			}
 			s.recordAudit(r.Context(), "admin", "settings.developer.sms_hourly_limit", "settings", "developer", "success", "global SMS hourly limit updated")
 		}
+		if request.AutoClearModemStorage != nil {
+			if err := developer.SetAutoClearModemStorage(r.Context(), s.store, *request.AutoClearModemStorage); err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+			s.recordAudit(r.Context(), "admin", "settings.sms.auto_clear_modem_storage", "settings", "sms", "success", "modem SMS auto-clear updated")
+		}
 		s.writeDeveloperSettings(w, r)
 	default:
 		w.Header().Set("Allow", "GET, PUT")
@@ -64,5 +72,6 @@ func (s *Server) writeDeveloperSettings(w http.ResponseWriter, r *http.Request) 
 		"sms_hourly_limit":         developer.SMSHourlyLimit(r.Context(), s.store),
 		"default_sms_hourly_limit": developer.DefaultSMSHourlyLimit,
 		"max_sms_hourly_limit":     developer.MaxSMSHourlyLimit,
+		"auto_clear_modem_storage": developer.AutoClearModemStorage(r.Context(), s.store),
 	}})
 }

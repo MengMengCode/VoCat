@@ -1259,4 +1259,16 @@ export const EN_DICT: Record<string, string> = {
   "VoLTE 可用": "VoLTE available",
   "VoLTE 未就绪": "VoLTE not ready",
   "设备离线，无法读取或修改模组 IMS 配置。": "The device is offline; its modem IMS configuration cannot be read or changed.",
+  "自动清理模组短信存储": "Auto-clear modem SMS storage",
+  "入库成功后删除模组 SM/ME 副本，网页记录保留":
+    "Delete the modem SM/ME copy after VoCat saves the message; the web inbox is kept",
+  "模组 ME 存储通常只有二十多格。关闭后 VoCat 仍会同步到数据库，但不再删除模组原件，存满后可能收不到新短信。":
+    "Modem ME storage is often only about twenty slots. Turning this off still syncs into the database but leaves the modem copies, so a full mailbox can block new SMS.",
+  "短信存储设置加载失败": "Failed to load SMS storage settings",
+  "短信存储设置保存失败": "Failed to save SMS storage settings",
+  "已开启模组短信自动清理": "Modem SMS auto-clear is on",
+  "已关闭模组短信自动清理": "Modem SMS auto-clear is off",
+  "模组短信存储已满，新短信可能无法接收": "Modem SMS storage is full; new messages may not be received",
+  "SIM 短信存储已满，新短信可能无法接收": "SIM SMS storage is full; new messages may not be received",
+  "模组和 SIM 短信存储已满，新短信可能无法接收": "Modem and SIM SMS storage are full; new messages may not be received",
 };

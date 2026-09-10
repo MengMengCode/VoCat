@@ -23,13 +23,14 @@ func Enabled(ctx context.Context, database *store.Store) bool {
 }
 
 const (
-	EnabledSettingKey     = "developer.enabled"
-	DeviceLimitSettingKey = "developer.device_limit"
-	SMSHourlyLimitKey     = "developer.sms_hourly_limit"
-	DefaultDeviceLimit    = 5
-	MaxDeviceLimit        = 10
-	DefaultSMSHourlyLimit = 10
-	MaxSMSHourlyLimit     = 20
+	EnabledSettingKey        = "developer.enabled"
+	DeviceLimitSettingKey    = "developer.device_limit"
+	SMSHourlyLimitKey        = "developer.sms_hourly_limit"
+	AutoClearModemStorageKey = "sms.auto_clear_modem_storage"
+	DefaultDeviceLimit       = 5
+	MaxDeviceLimit           = 10
+	DefaultSMSHourlyLimit    = 10
+	MaxSMSHourlyLimit        = 20
 )
 
 func DeviceLimit(ctx context.Context, database *store.Store, enabled bool) int {
@@ -91,6 +92,34 @@ func SetSMSHourlyLimit(ctx context.Context, database *store.Store, limit int) er
 		return err
 	}
 	return database.UpsertAppSetting(ctx, store.AppSetting{Key: SMSHourlyLimitKey, Value: value})
+}
+
+// AutoClearModemStorage reports whether a successful SMS ingest should delete
+// the modem SM/ME copy. A missing setting is treated as enabled so existing
+// deployments start reclaiming the small ME mailbox after upgrade.
+func AutoClearModemStorage(ctx context.Context, database *store.Store) bool {
+	if database == nil {
+		return true
+	}
+	setting, err := database.AppSetting(ctx, AutoClearModemStorageKey)
+	if err != nil {
+		return true
+	}
+	var document struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if json.Unmarshal(setting.Value, &document) != nil || document.Enabled == nil {
+		return true
+	}
+	return *document.Enabled
+}
+
+func SetAutoClearModemStorage(ctx context.Context, database *store.Store, enabled bool) error {
+	value, err := json.Marshal(map[string]bool{"enabled": enabled})
+	if err != nil {
+		return err
+	}
+	return database.UpsertAppSetting(ctx, store.AppSetting{Key: AutoClearModemStorageKey, Value: value})
 }
 
 // ResetExperimental restores every mutable developer-only setting. It is

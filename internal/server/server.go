@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"vocat/internal/auth"
+	"vocat/internal/device"
 	"vocat/internal/exportproxy"
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
@@ -89,6 +90,8 @@ type Server struct {
 	lookupPublicIP            func(context.Context, string) (exportproxy.PublicIPInfo, error)
 	automaticTasks            *automaticTaskScheduler
 	smsSyncMu                 sync.Mutex
+	smsStorageMu              sync.Mutex
+	smsStorage                map[string]device.SMSStorageUsage
 	cellularDataOnce          sync.Once
 	cellularDataMonitorOnce   sync.Once
 	cellularDataEventOnce     sync.Once
@@ -145,6 +148,7 @@ func New(options Options) (*Server, error) {
 		netTraffic:          newLiveNetTracker(),
 		hostStats:           newHostStatsSampler(),
 		publicIPs:           make(map[string]cachedPublicIP),
+		smsStorage:          make(map[string]device.SMSStorageUsage),
 		lookupPublicIP:      exportproxy.LookupPublicIP,
 		updateCheck:         update.CheckLatest,
 		updateApply:         update.ApplyLatest,

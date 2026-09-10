@@ -168,41 +168,50 @@ var smsListStorages = []string{"SM", "ME"}
 func (manager *Manager) ListSMS(
 	ctx context.Context,
 	id string,
-) ([]SMSMessage, error) {
+) (SMSListing, error) {
 	state, err := manager.lookup(id)
 	if err != nil {
-		return nil, err
+		return SMSListing{}, err
 	}
 	state.opMu.Lock()
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
-		return nil, err
+		return SMSListing{}, err
 	}
 	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
 	if err != nil {
 		manager.setResult(id, state, nil, err)
-		return nil, err
+		return SMSListing{}, err
 	}
 	if _, err := manager.command(ctx, client, "AT+CMGF=0"); err != nil {
 		manager.setResult(id, state, nil, err)
-		return nil, err
+		return SMSListing{}, err
 	}
-	var messages []SMSMessage
+	listing := SMSListing{}
 	var lastErr error
 	listed := false
 	for _, storage := range smsListStorages {
 		// Select this storage for reading (mem1 only, so send/receive routing is
 		// untouched). An unsupported storage reports an error; skip it rather than
 		// fail the whole listing.
-		if _, err := manager.command(
+		response, err := manager.command(
 			ctx,
 			client,
 			fmt.Sprintf("AT+CPMS=%q", storage),
-		); err != nil {
+		)
+		if err != nil {
 			lastErr = err
 			continue
 		}
-		response, err := manager.command(ctx, client, "AT+CMGL=4")
+		if area, ok := parseSelectedCPMSUsage(response); ok {
+			switch storage {
+			case "SM":
+				listing.Storage.SM = area
+			case "ME":
+				listing.Storage.ME = area
+			}
+		}
+		response, err = manager.command(ctx, client, "AT+CMGL=4")
 		if err != nil {
 			lastErr = err
 			continue
@@ -210,15 +219,22 @@ func (manager *Manager) ListSMS(
 		listed = true
 		for _, message := range parseCMGL(response) {
 			message.Storage = storage
-			messages = append(messages, message)
+			listing.Messages = append(listing.Messages, message)
 		}
 	}
 	if !listed && lastErr != nil {
 		manager.setResult(id, state, nil, lastErr)
-		return nil, lastErr
+		return SMSListing{}, lastErr
+	}
+	// New MT SMS follows mem1. Leave SM selected so a burst between scans
+	// lands in the larger SIM mailbox instead of the 23-slot ME area.
+	if restore, restoreErr := manager.command(ctx, client, `AT+CPMS="SM"`); restoreErr == nil {
+		if area, ok := parseSelectedCPMSUsage(restore); ok {
+			listing.Storage.SM = area
+		}
 	}
 	manager.setResult(id, state, nil, nil)
-	return messages, nil
+	return listing, nil
 }
 
 func (manager *Manager) ReadSMS(
@@ -447,6 +463,28 @@ func parseCMGR(index int, response modem.Response) (SMSMessage, error) {
 		return message, nil
 	}
 	return SMSMessage{}, errors.New("modem did not return a CMGR record")
+}
+
+func parseSelectedCPMSUsage(response modem.Response) (SMSStorageArea, bool) {
+	fields := csvValues(valueAfterPrefix(response, "+CPMS:"))
+	start := 0
+	if len(fields) >= 3 && !decimalField(fields[0]) {
+		start = 1
+	}
+	if start+1 >= len(fields) {
+		return SMSStorageArea{}, false
+	}
+	used, usedOK := parseDecimal(fields[start])
+	total, totalOK := parseDecimal(fields[start+1])
+	if !usedOK || !totalOK || used < 0 || total < 0 {
+		return SMSStorageArea{}, false
+	}
+	return SMSStorageArea{Used: used, Total: total}, true
+}
+
+func decimalField(value string) bool {
+	_, ok := parseDecimal(value)
+	return ok
 }
 
 func parseSMSStorageStatus(value string) SMSStorageStatus {

@@ -23,6 +23,38 @@ type imsSMSController interface {
 	SendSMS(context.Context, string, vowifi.SMSSubmitRequest) (vowifi.SMSSubmitResult, error)
 }
 
+func (s *Server) handleSMSSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+			"auto_clear_modem_storage": developer.AutoClearModemStorage(r.Context(), s.store),
+		}})
+	case http.MethodPut:
+		var request struct {
+			AutoClearModemStorage *bool `json:"auto_clear_modem_storage"`
+		}
+		if err := s.decodeJSON(w, r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if request.AutoClearModemStorage == nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", "auto_clear_modem_storage is required")
+			return
+		}
+		if err := developer.SetAutoClearModemStorage(r.Context(), s.store, *request.AutoClearModemStorage); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		s.recordAudit(r.Context(), "admin", "settings.sms.auto_clear_modem_storage", "settings", "sms", "success", "modem SMS auto-clear updated")
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+			"auto_clear_modem_storage": developer.AutoClearModemStorage(r.Context(), s.store),
+		}})
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	}
+}
+
 func (s *Server) routeSMSAPI(w http.ResponseWriter, r *http.Request, cleanPath string) bool {
 	switch cleanPath {
 	case "sms/contacts":
@@ -659,12 +691,14 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 			}
 		}
 		listContext, cancelList := context.WithTimeout(ctx, 30*time.Second)
-		messages, err := s.devices.ListSMS(listContext, physicalID)
+		listing, err := s.devices.ListSMS(listContext, physicalID)
 		cancelList()
 		if err != nil {
 			s.logger.Debug("modem SMS synchronization skipped", "device_id", config.ID, "error", err)
 			continue
 		}
+		s.rememberSMSStorage(config.ID, listing.Storage)
+		messages := listing.Messages
 		currentEntry, currentErr := s.devices.Get(physicalID)
 		if currentErr != nil || !currentEntry.Discovered {
 			s.logger.Debug("modem SMS synchronization lost device identity", "device_id", config.ID, "error", currentErr)
@@ -685,6 +719,8 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 			config.ModemIMEI,
 		)
 		concatSources := modemSMSConcatSources(messages)
+		autoClear := developer.AutoClearModemStorage(ctx, s.store)
+		var clearSlots []modemSMSSlot
 		for _, message := range messages {
 			if message.Direction == device.SMSDirectionStatusReport &&
 				message.MessageReference != nil && message.StatusCode != nil {
@@ -701,8 +737,14 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 					DischargeTime:     message.DischargeTimestamp,
 					ReceivedAt:        time.Now().UTC(),
 				})
-				if applyErr != nil && !errors.Is(applyErr, store.ErrNotFound) {
-					s.logger.Warn("apply modem SMS delivery report failed", "device_id", config.ID, "error", applyErr)
+				if applyErr != nil {
+					if !errors.Is(applyErr, store.ErrNotFound) {
+						s.logger.Warn("apply modem SMS delivery report failed", "device_id", config.ID, "error", applyErr)
+					}
+					continue
+				}
+				if autoClear {
+					clearSlots = appendModemSMSSlot(clearSlots, message)
 				}
 				continue
 			}
@@ -758,7 +800,12 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 			})
 			if saveErr != nil {
 				s.logger.Warn("persist modem SMS failed", "category", "sms", "device_id", config.ID, "raw_error", saveErr)
-			} else if saved := saveResult.Message; saveResult.Inserted && saved.Direction == "inbound" &&
+				continue
+			}
+			if autoClear {
+				clearSlots = appendModemSMSSlot(clearSlots, message)
+			}
+			if saved := saveResult.Message; saveResult.Inserted && saved.Direction == "inbound" &&
 				store.ConcatSMSReadyToNotify(saved.MessageID, saved.Extra) {
 				s.logger.Info("cellular SMS received",
 					"category", "sms", "event", "sms.received",
@@ -768,6 +815,59 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 				)
 			}
 		}
+		if autoClear {
+			s.clearPersistedModemSMS(ctx, physicalID, config.ID, clearSlots)
+		}
+	}
+}
+
+type modemSMSSlot struct {
+	storage string
+	index   int
+}
+
+func appendModemSMSSlot(slots []modemSMSSlot, message device.SMSMessage) []modemSMSSlot {
+	storage := strings.ToUpper(strings.TrimSpace(message.Storage))
+	if (storage != "SM" && storage != "ME") || message.Index < 0 {
+		return slots
+	}
+	for _, existing := range slots {
+		if existing.storage == storage && existing.index == message.Index {
+			return slots
+		}
+	}
+	return append(slots, modemSMSSlot{storage: storage, index: message.Index})
+}
+
+func sortModemSMSSlotsDescending(slots []modemSMSSlot) {
+	sort.SliceStable(slots, func(i, j int) bool {
+		if slots[i].storage != slots[j].storage {
+			return slots[i].storage > slots[j].storage
+		}
+		return slots[i].index > slots[j].index
+	})
+}
+
+func (s *Server) clearPersistedModemSMS(ctx context.Context, physicalID, configID string, slots []modemSMSSlot) {
+	if len(slots) == 0 || s.devices == nil {
+		return
+	}
+	sortModemSMSSlotsDescending(slots)
+	for _, slot := range slots {
+		deleteContext, cancelDelete := context.WithTimeout(ctx, 10*time.Second)
+		err := s.devices.DeleteSMSFromStorage(deleteContext, physicalID, slot.storage, slot.index)
+		cancelDelete()
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Warn(
+					"clear persisted modem SMS failed",
+					"category", "sms", "device_id", configID,
+					"storage", slot.storage, "index", slot.index, "error", err,
+				)
+			}
+			continue
+		}
+		s.noteSMSStorageFreed(configID, slot.storage)
 	}
 }
 
@@ -942,11 +1042,13 @@ func (s *Server) deleteModemSMS(ctx context.Context, stored store.SMSMessage) er
 		return device.ErrNotFound
 	}
 	listContext, cancelList := context.WithTimeout(ctx, 30*time.Second)
-	modemMessages, err := s.devices.ListSMS(listContext, physicalID)
+	listing, err := s.devices.ListSMS(listContext, physicalID)
 	cancelList()
 	if err != nil {
 		return fmt.Errorf("list modem SMS before deletion: %w", err)
 	}
+	s.rememberSMSStorage(config.ID, listing.Storage)
+	modemMessages := listing.Messages
 	concatSources := modemSMSConcatSources(modemMessages)
 	locations := make(map[string]device.SMSMessage)
 	for _, message := range modemMessages {
@@ -1075,4 +1177,51 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	}
 	s.logger.Error("database operation failed", "category", "system", "event", "store.operation_failed", "raw_error", err)
 	writeError(w, http.StatusInternalServerError, "database_error", "the database operation failed")
+}
+
+func (s *Server) rememberSMSStorage(configID string, usage device.SMSStorageUsage) {
+	if s == nil || !usage.Known() {
+		return
+	}
+	s.smsStorageMu.Lock()
+	defer s.smsStorageMu.Unlock()
+	if s.smsStorage == nil {
+		s.smsStorage = make(map[string]device.SMSStorageUsage)
+	}
+	s.smsStorage[configID] = usage
+}
+
+func (s *Server) smsStorageUsage(configID string) (device.SMSStorageUsage, bool) {
+	if s == nil {
+		return device.SMSStorageUsage{}, false
+	}
+	s.smsStorageMu.Lock()
+	defer s.smsStorageMu.Unlock()
+	usage, ok := s.smsStorage[configID]
+	return usage, ok && usage.Known()
+}
+
+func (s *Server) noteSMSStorageFreed(configID, storage string) {
+	if s == nil {
+		return
+	}
+	s.smsStorageMu.Lock()
+	defer s.smsStorageMu.Unlock()
+	usage, ok := s.smsStorage[configID]
+	if !ok {
+		return
+	}
+	switch strings.ToUpper(strings.TrimSpace(storage)) {
+	case "SM":
+		if usage.SM.Used > 0 {
+			usage.SM.Used--
+		}
+	case "ME":
+		if usage.ME.Used > 0 {
+			usage.ME.Used--
+		}
+	default:
+		return
+	}
+	s.smsStorage[configID] = usage
 }

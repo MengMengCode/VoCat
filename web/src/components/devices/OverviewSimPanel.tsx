@@ -3,7 +3,9 @@ import { Button } from "../ui";
 import { FieldRow } from "./FieldRow";
 import { useShowSensitive } from "./shared";
 import type { DeviceDetail } from "./types";
+import type { SMSStorageArea } from "../../types";
 import { useI18n } from "../../lib/i18n";
+import { cx } from "../../lib/utils";
 import { carrierIso } from "../../lib/carrier";
 import { CountryFlag } from "../CountryFlag";
 
@@ -26,6 +28,16 @@ export function OverviewSimPanel({ device, simOperatorDisplay, customPhoneNumber
   const displayedPhoneNumber = customPhoneNumber?.trim() || device.localPhone || "--";
   const backendLabel =
     device.backendMode === "qmi" ? "QMI" : device.backendMode === "mbim" ? "MBIM" : device.backendMode === "at" ? "AT" : "Auto";
+  const storage = device.smsStorage;
+  const meFull = storageAreaFull(storage?.me);
+  const smFull = storageAreaFull(storage?.sm);
+  const storageWarning = meFull && smFull
+    ? t("模组和 SIM 短信存储已满，新短信可能无法接收")
+    : smFull
+      ? t("SIM 短信存储已满，新短信可能无法接收")
+      : meFull
+        ? t("模组短信存储已满，新短信可能无法接收")
+        : "";
 
   return (
     <div className="ui-panel-muted relative min-w-0 overflow-hidden p-4">
@@ -64,7 +76,47 @@ export function OverviewSimPanel({ device, simOperatorDisplay, customPhoneNumber
           <span>{flightOn ? t("是") : t("否")}</span>
         </div>
         <FieldRow label={t("运行模式")} value={backendLabel} monospace />
+        <SMSStorageRow label="ME" area={storage?.me} warningLabel={t("模组短信存储已满，新短信可能无法接收")} />
+        <SMSStorageRow label="SM" area={storage?.sm} warningLabel={t("SIM 短信存储已满，新短信可能无法接收")} />
+        {storageWarning ? (
+          <div className="pt-1 text-xs leading-5 text-amber-600 dark:text-amber-400">
+            {storageWarning}
+          </div>
+        ) : null}
       </div>
+    </div>
+  );
+}
+
+function storageAreaFull(area?: SMSStorageArea) {
+  const used = area?.used ?? 0;
+  const total = area?.total ?? 0;
+  if (total <= 0) return false;
+  return used >= total || used / total >= 0.9;
+}
+
+function SMSStorageRow({
+  label,
+  area,
+  warningLabel,
+}: {
+  label: string;
+  area?: SMSStorageArea;
+  warningLabel: string;
+}) {
+  const total = area?.total ?? 0;
+  if (total <= 0) return null;
+  const used = area?.used ?? 0;
+  const full = storageAreaFull(area);
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="text-gray-500">{label}</span>
+      <span
+        className={cx("font-mono", full && "text-amber-600 dark:text-amber-400")}
+        title={full ? warningLabel : undefined}
+      >
+        {used}/{total}
+      </span>
     </div>
   );
 }

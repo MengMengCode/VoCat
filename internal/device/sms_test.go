@@ -271,7 +271,7 @@ func TestManagerListReadAndDeleteSMS(t *testing.T) {
 	const ucs2PDU = "000405912143F5000842102030405000044F60597D"
 	client := &transcriptClient{steps: []clientStep{
 		{command: "AT+CMGF=0", response: okResponse()},
-		{command: `AT+CPMS="SM"`, response: okResponse()},
+		{command: `AT+CPMS="SM"`, response: okResponse("+CPMS: 2,40,0,23,2,40")},
 		{
 			command: "AT+CMGL=4",
 			response: okResponse(
@@ -281,8 +281,9 @@ func TestManagerListReadAndDeleteSMS(t *testing.T) {
 				ucs2PDU,
 			),
 		},
-		{command: `AT+CPMS="ME"`, response: okResponse()},
+		{command: `AT+CPMS="ME"`, response: okResponse("+CPMS: 0,23,2,40,2,40")},
 		{command: "AT+CMGL=4", response: okResponse()},
+		{command: `AT+CPMS="SM"`, response: okResponse("+CPMS: 2,40,0,23,2,40")},
 		{command: "AT+CMGF=0", response: okResponse()},
 		{
 			command: "AT+CMGR=7",
@@ -295,9 +296,14 @@ func TestManagerListReadAndDeleteSMS(t *testing.T) {
 	}}
 	manager, id := newStartedTestManager(t, client)
 
-	messages, err := manager.ListSMS(context.Background(), id)
+	listing, err := manager.ListSMS(context.Background(), id)
 	if err != nil {
 		t.Fatalf("ListSMS: %v", err)
+	}
+	messages := listing.Messages
+	if listing.Storage.SM != (SMSStorageArea{Used: 2, Total: 40}) ||
+		listing.Storage.ME != (SMSStorageArea{Used: 0, Total: 23}) {
+		t.Fatalf("storage = %#v", listing.Storage)
 	}
 	if len(messages) != 2 ||
 		messages[0].Index != 7 ||
@@ -370,4 +376,18 @@ func TestManagerSendSMSRequiresMessageReference(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 	client.assertDone(t)
+}
+
+func TestParseSelectedCPMSUsage(t *testing.T) {
+	area, ok := parseSelectedCPMSUsage(okResponse("+CPMS: 23,23,23,23,23,23"))
+	if !ok || area != (SMSStorageArea{Used: 23, Total: 23}) {
+		t.Fatalf("select form = %#v, %v", area, ok)
+	}
+	area, ok = parseSelectedCPMSUsage(okResponse(`+CPMS: "SM",0,40,"ME",23,23,"MT",23,23`))
+	if !ok || area != (SMSStorageArea{Used: 0, Total: 40}) {
+		t.Fatalf("named form = %#v, %v", area, ok)
+	}
+	if _, ok = parseSelectedCPMSUsage(okResponse()); ok {
+		t.Fatal("empty CPMS response should not parse")
+	}
 }
