@@ -39,6 +39,7 @@ import (
 	"vocat/internal/vowifi/ims"
 	"vocat/internal/vowifi/integration"
 	vowifiruntime "vocat/internal/vowifi/runtime"
+	"vocat/internal/vowifisettings"
 	"vocat/web"
 )
 
@@ -1149,6 +1150,9 @@ func newVoWiFiOrchestrator(
 		return nil, fmt.Errorf("device %q IKE provider: %w", deviceConfig.ID, err)
 	}
 	imsProvider, err := ims.NewProvider(adapter, ims.Config{
+		MTUCompatibility: func(ctx context.Context) bool {
+			return vowifisettings.MTUCompatibility(ctx, database)
+		},
 		Logger: vowifiLogger,
 		// Carrier-specific transport and SMSC defaults live in the shared data
 		// profile. Prefer network-provided P-CSCF hints, then safely try the

@@ -38,10 +38,13 @@ var (
 // LocalAddress is empty, Provider uses the corresponding value proven by the
 // TunnelSession. The default transport is TCP and the default port is 5060.
 type Config struct {
-	PCSCF           string
-	LocalAddress    string
-	Transport       string
-	TransportByPLMN map[string]string
+	// MTUCompatibility opts new protected TCP connections into conservative MSS.
+	// Nil disables it. The callback is evaluated on connection establishment.
+	MTUCompatibility func(context.Context) bool
+	PCSCF            string
+	LocalAddress     string
+	Transport        string
+	TransportByPLMN  map[string]string
 	// AutoTransportFallback tries the alternate TCP/UDP transport only when
 	// the initial P-CSCF attempt produced no SIP response at all. A challenge
 	// or rejection is authoritative and is never retried as another transport.
@@ -559,7 +562,7 @@ func dialSIP(
 	localAddress string,
 	localPort int,
 	remoteAddress string,
-	protected bool,
+	mtuCompatibility bool,
 ) (net.Conn, error) {
 	var local net.Addr
 	var err error
@@ -575,7 +578,7 @@ func dialSIP(
 		return nil, fmt.Errorf("resolve tunnel local address: %w", err)
 	}
 	dialer := net.Dialer{LocalAddr: local}
-	if protected && transport == "tcp" {
+	if mtuCompatibility && transport == "tcp" {
 		configureProtectedTCPDialer(&dialer)
 	}
 	return dialer.DialContext(ctx, transport, remoteAddress)
