@@ -299,7 +299,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 			transports = append(transports, alternate)
 		}
 		for attempt, candidate := range transports {
-			connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address())
+			connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address(), false)
 			if dialErr != nil {
 				lastErr = fmt.Errorf("ims: connect to P-CSCF over %s: %w", candidate, dialErr)
 				if attempt+1 < len(transports) && ctx.Err() == nil {
@@ -559,6 +559,7 @@ func dialSIP(
 	localAddress string,
 	localPort int,
 	remoteAddress string,
+	protected bool,
 ) (net.Conn, error) {
 	var local net.Addr
 	var err error
@@ -574,6 +575,9 @@ func dialSIP(
 		return nil, fmt.Errorf("resolve tunnel local address: %w", err)
 	}
 	dialer := net.Dialer{LocalAddr: local}
+	if protected && transport == "tcp" {
+		configureProtectedTCPDialer(&dialer)
+	}
 	return dialer.DialContext(ctx, transport, remoteAddress)
 }
 

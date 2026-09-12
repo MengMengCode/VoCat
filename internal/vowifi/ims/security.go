@@ -876,6 +876,7 @@ func (session *Session) activateIPSec(
 		localIP.String(),
 		session.securityProposal.portClient,
 		remoteAddress,
+		true,
 	)
 	if dialErr != nil {
 		cleanupErr := handle.Close(context.Background())
