@@ -38,10 +38,13 @@ var (
 // LocalAddress is empty, Provider uses the corresponding value proven by the
 // TunnelSession. The default transport is TCP and the default port is 5060.
 type Config struct {
-	PCSCF           string
-	LocalAddress    string
-	Transport       string
-	TransportByPLMN map[string]string
+	// MTUCompatibility opts new protected TCP connections into conservative MSS.
+	// Nil disables it. The callback is evaluated on connection establishment.
+	MTUCompatibility func(context.Context) bool
+	PCSCF            string
+	LocalAddress     string
+	Transport        string
+	TransportByPLMN  map[string]string
 	// AutoTransportFallback tries the alternate TCP/UDP transport only when
 	// the initial P-CSCF attempt produced no SIP response at all. A challenge
 	// or rejection is authoritative and is never retried as another transport.
@@ -299,7 +302,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 			transports = append(transports, alternate)
 		}
 		for attempt, candidate := range transports {
-			connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address())
+			connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address(), false)
 			if dialErr != nil {
 				lastErr = fmt.Errorf("ims: connect to P-CSCF over %s: %w", candidate, dialErr)
 				if attempt+1 < len(transports) && ctx.Err() == nil {
@@ -559,6 +562,7 @@ func dialSIP(
 	localAddress string,
 	localPort int,
 	remoteAddress string,
+	mtuCompatibility bool,
 ) (net.Conn, error) {
 	var local net.Addr
 	var err error
@@ -574,6 +578,9 @@ func dialSIP(
 		return nil, fmt.Errorf("resolve tunnel local address: %w", err)
 	}
 	dialer := net.Dialer{LocalAddr: local}
+	if mtuCompatibility && transport == "tcp" {
+		configureProtectedTCPDialer(&dialer)
+	}
 	return dialer.DialContext(ctx, transport, remoteAddress)
 }
 

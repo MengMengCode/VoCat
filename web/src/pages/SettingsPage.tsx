@@ -29,6 +29,8 @@ import { DeviceQuotaCard } from "../components/settings/DeviceQuotaCard";
 import { SMSRateLimitCard } from "../components/settings/SMSRateLimitCard";
 import { SMSAutoClearCard } from "../components/settings/SMSAutoClearCard";
 
+import { VoWiFiMTUCard } from "../components/settings/VoWiFiMTUCard";
+
 const EMPTY_PASSWORD: PasswordForm = { oldPassword: "", newPassword: "", confirmPassword: "" };
 
 const NOTIFY_TABS = [
@@ -479,6 +481,7 @@ export default function SettingsPage() {
           onChange={(patch) => setSecurity((prev) => ({ ...prev, ...patch }))}
           onSave={onSaveSecurity}
         />
+        <VoWiFiMTUCard />
         <SMSAutoClearCard
           enabled={smsAutoClear}
           loading={loadingSMSSettings}

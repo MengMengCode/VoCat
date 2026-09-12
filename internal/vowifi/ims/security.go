@@ -868,6 +868,8 @@ func (session *Session) activateIPSec(
 		return fmt.Errorf("%w: installer returned no handle", ErrIPSecInstall)
 	}
 
+	mtuCompatibility := session.provider.config.MTUCompatibility != nil &&
+		session.provider.config.MTUCompatibility(ctx)
 	remoteAddress := net.JoinHostPort(remoteIP.String(), strconv.Itoa(selected.portServer))
 	_ = session.conn.Close()
 	connection, dialErr := dialSIP(
@@ -876,6 +878,7 @@ func (session *Session) activateIPSec(
 		localIP.String(),
 		session.securityProposal.portClient,
 		remoteAddress,
+		mtuCompatibility,
 	)
 	if dialErr != nil {
 		cleanupErr := handle.Close(context.Background())
