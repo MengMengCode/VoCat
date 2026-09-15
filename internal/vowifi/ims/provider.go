@@ -71,6 +71,11 @@ type Config struct {
 	// OnSMSStatus is invoked for an SMS-STATUS-REPORT received after a
 	// submission that requested a delivery report.
 	OnSMSStatus func(context.Context, ReceivedSMSStatus) error
+	// OnSIMDataDownload receives a decoded SMS-PP download for delivery to the
+	// UICC. The callback must return only after the UICC has processed the
+	// ENVELOPE command; a nil callback causes an RP-ERROR instead of discarding
+	// the operator command.
+	OnSIMDataDownload func(context.Context, SIMDataDownload) error
 	// OnUSSD is invoked for a network-originated USSD MESSAGE received over
 	// IMS (3GPP TS 24.390). Returning an error is logged but does not affect
 	// the 200 OK already sent, because USSI has no RP-ACK transport.

@@ -242,6 +242,7 @@ type SMSMessage struct {
 	ModemLength            int              `json:"modemLength"`
 	RawPDU                 string           `json:"rawPdu"`
 	RawUserData            string           `json:"rawUserData,omitempty"`
+	SIMDataDownload        bool             `json:"simDataDownload,omitempty"`
 	DecodeError            string           `json:"decodeError,omitempty"`
 }
 

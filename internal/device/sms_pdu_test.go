@@ -371,6 +371,40 @@ func TestDecode8BitPDUShowsHexPayload(t *testing.T) {
 	}
 }
 
+func TestDecodeSIMDataDownloadMarksBinaryPayload(t *testing.T) {
+	// O2 SMS-PP data download: PID 0x7F, 8-bit class-2 DCS 0xF6 and
+	// UDH IEI 0x70 (UICC toolkit security header).
+	tpdu, err := hex.DecodeString("440C919471071610007FF6629041718111403D02700000381516001212B201000D5F284696D1470A06A44E649D62B3BC7B6A11D49874DBE86C379BD4A87805BDA5ED2FF2DE9416A43640832306C159E1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := DecodeSMSDeliverTPDU(tpdu)
+	if err != nil {
+		t.Fatalf("decode SIM data download: %v", err)
+	}
+	if !message.SIMDataDownload || message.ProtocolID != 0x7f ||
+		message.DataCodingScheme != 0xf6 || message.Encoding != SMSEncoding8BitPDU {
+		t.Fatalf("SIM data download = %#v", message)
+	}
+}
+
+func TestSIMDataDownloadRequiresPIDAndClass2DCS(t *testing.T) {
+	for _, test := range []struct {
+		pid, dcs byte
+		want     bool
+	}{
+		{pid: 0x7f, dcs: 0xf6, want: true},
+		{pid: 0x7f, dcs: 0x16, want: true},
+		{pid: 0x00, dcs: 0xf6, want: false},
+		{pid: 0x7f, dcs: 0xf5, want: false},
+		{pid: 0x7f, dcs: 0x06, want: false},
+	} {
+		if got := isSIMDataDownload(test.pid, test.dcs); got != test.want {
+			t.Fatalf("isSIMDataDownload(0x%02X, 0x%02X) = %v, want %v", test.pid, test.dcs, got, test.want)
+		}
+	}
+}
+
 func TestDecodeUserDataUnderstandsDCSGroups(t *testing.T) {
 	septets, ok := encodeGSM7("HELLO")
 	if !ok {

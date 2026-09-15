@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -795,6 +796,76 @@ func TestSessionReceivesMalformedSMSBestEffort(t *testing.T) {
 	}
 }
 
+func TestSessionSuppressesSIMDataDownloadFromSMSInbox(t *testing.T) {
+	tpdu, err := hex.DecodeString("440C919471071610007FF6629041718111403D02700000381516001212B201000D5F284696D1470A06A44E649D62B3BC7B6A11D49874DBE86C379BD4A87805BDA5ED2FF2DE9416A43640832306C159E1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte{0x01, 0x62, 0x00, 0x00, byte(len(tpdu))}
+	body = append(body, tpdu...)
+	called := false
+	uiccCalled := false
+	var reportBody []byte
+	var session *Session
+	conn := &fakeConn{}
+	conn.onWrite = func(source []byte) {
+		packet, parseErr := parseSIPPacket(source)
+		if parseErr != nil || packet.Request == nil {
+			return
+		}
+		cseq, method, parseErr := cseqNumber(packet.Request.value("CSeq"))
+		if parseErr != nil || method != "MESSAGE" {
+			return
+		}
+		reportBody = append([]byte(nil), packet.Request.Body...)
+		session.dispatchPacket(sipPacket{Response: &sipResponse{StatusCode: 200, Headers: map[string][]string{
+			"call-id": {packet.Request.value("Call-ID")},
+			"cseq":    {fmt.Sprintf("%d MESSAGE", cseq)},
+		}}}, nil)
+	}
+	session = &Session{
+		provider: &Provider{config: Config{
+			Logger:             slog.Default(),
+			TransactionTimeout: time.Second,
+			OnSIMDataDownload: func(_ context.Context, download SIMDataDownload) error {
+				uiccCalled = true
+				if download.DeviceID != "ec20" || download.PID != 0x7f || download.DCS != 0xf6 ||
+					!bytes.Equal(download.TPDU, tpdu) {
+					t.Fatalf("SIM data download = %#v", download)
+				}
+				return nil
+			},
+			OnSMS: func(context.Context, ReceivedSMS) error {
+				called = true
+				return nil
+			},
+		}},
+		request:      vowifi.IMSRequest{DeviceID: "ec20"},
+		conn:         conn,
+		transactions: make(map[sipTransactionKey]chan *sipResponse),
+	}
+	// The write hook above feeds a synthetic SIP 200 response into this session.
+	_ = session
+	session.processSMSMessage(&sipRequest{
+		Headers: map[string][]string{
+			"content-type":              {smsContentType},
+			"content-transfer-encoding": {"binary"},
+			"call-id":                   {"sim-download-test"},
+			"from":                      {"<sip:network@example.com>"},
+		},
+		Body: body,
+	})
+	if called {
+		t.Fatal("SIM data download was delivered to the SMS inbox callback")
+	}
+	if !uiccCalled {
+		t.Fatal("SIM data download was not delivered to the UICC callback")
+	}
+	if !bytes.Equal(reportBody, []byte{0x02, 0x62}) {
+		t.Fatalf("SIM data download RP-ACK body = %X, want 0262", reportBody)
+	}
+}
+
 func TestSessionAllowsSMSWhenContactConfirmed(t *testing.T) {
 	session := &Session{
 		provider: &Provider{config: Config{Logger: slog.Default()}},
@@ -974,11 +1045,18 @@ func serveOutboundUSSI(listener *net.UDPConn, nonce string, readyForClose chan<-
 
 // fakeConn is a minimal net.Conn useful for tests that only need LocalAddr
 // to succeed and do not care about the actual SIP MESSAGE delivery report.
-type fakeConn struct{}
+type fakeConn struct {
+	onWrite func([]byte)
+}
 
-func (*fakeConn) Read([]byte) (int, error)         { return 0, errors.New("fakeConn: closed") }
-func (*fakeConn) Write(source []byte) (int, error) { return len(source), nil }
-func (*fakeConn) Close() error                     { return nil }
+func (*fakeConn) Read([]byte) (int, error) { return 0, errors.New("fakeConn: closed") }
+func (conn *fakeConn) Write(source []byte) (int, error) {
+	if conn.onWrite != nil {
+		conn.onWrite(source)
+	}
+	return len(source), nil
+}
+func (*fakeConn) Close() error { return nil }
 func (*fakeConn) LocalAddr() net.Addr {
 	return &net.UDPAddr{IP: net.IPv4(192, 0, 2, 10), Port: 5060}
 }

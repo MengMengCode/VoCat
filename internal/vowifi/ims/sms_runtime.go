@@ -59,6 +59,17 @@ type ReceivedSMS struct {
 	DecodeError            string
 }
 
+// SIMDataDownload is an SMS-PP binary command that must be passed to the UICC
+// through an SMS-PP DOWNLOAD ENVELOPE before the network is acknowledged.
+type SIMDataDownload struct {
+	DeviceID string
+	IMSI     string
+	PID      byte
+	DCS      byte
+	TPDU     []byte
+	RPDU     []byte
+}
+
 // ReceivedSMSStatus is network delivery evidence for one submitted SMS part.
 type ReceivedSMSStatus struct {
 	DeviceID               string
@@ -504,6 +515,38 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 			"rp_reference", int(rpdu.reference), "tpdu_bytes", len(rpdu.tpdu),
 			"carrier_profile", carrierProfile.ID,
 			"direction", message.Direction, "error", decodeErr)
+	}
+	if message.SIMDataDownload {
+		if decodeErr != nil {
+			session.logInboundSMS(slog.LevelWarn, "IMS SIM data download decode failed", request,
+				"stage", "tpdu", "rp_reference", int(rpdu.reference), "error", decodeErr)
+			session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 95), "rp_error")
+			return
+		}
+		if session.provider.config.OnSIMDataDownload == nil {
+			session.logInboundSMS(slog.LevelWarn, "IMS SIM data download has no UICC handler", request,
+				"stage", "uicc", "rp_reference", int(rpdu.reference))
+			session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 95), "rp_error")
+			return
+		}
+		if err := session.provider.config.OnSIMDataDownload(context.Background(), SIMDataDownload{
+			DeviceID: session.request.DeviceID,
+			IMSI:     session.request.Identity.IMSI,
+			PID:      byte(message.ProtocolID),
+			DCS:      byte(message.DataCodingScheme),
+			TPDU:     append([]byte(nil), rpdu.tpdu...),
+			RPDU:     append([]byte(nil), payload...),
+		}); err != nil {
+			session.logInboundSMS(slog.LevelWarn, "IMS SIM data download UICC delivery failed", request,
+				"stage", "uicc", "rp_reference", int(rpdu.reference), "error", err)
+			session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 22), "rp_error")
+			return
+		}
+		// The callback has completed the UICC ENVELOPE transaction.
+		session.logInboundSMS(slog.LevelInfo, "IMS SIM data download suppressed from SMS inbox", request,
+			"stage", "tpdu", "rp_reference", int(rpdu.reference))
+		session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
+		return
 	}
 
 	switch {
