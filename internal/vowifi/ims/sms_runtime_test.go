@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -792,6 +793,39 @@ func TestSessionReceivesMalformedSMSBestEffort(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for best-effort SMS callback")
+	}
+}
+
+func TestSessionSuppressesSIMDataDownloadFromSMSInbox(t *testing.T) {
+	tpdu, err := hex.DecodeString("440C919471071610007FF6629041718111403D02700000381516001212B201000D5F284696D1470A06A44E649D62B3BC7B6A11D49874DBE86C379BD4A87805BDA5ED2FF2DE9416A43640832306C159E1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte{0x01, 0x62, 0x00, 0x00, byte(len(tpdu))}
+	body = append(body, tpdu...)
+	called := false
+	session := &Session{
+		provider: &Provider{config: Config{
+			Logger: slog.Default(),
+			OnSMS: func(context.Context, ReceivedSMS) error {
+				called = true
+				return nil
+			},
+		}},
+		request:      vowifi.IMSRequest{DeviceID: "ec20"},
+		conn:         &fakeConn{},
+		transactions: make(map[sipTransactionKey]chan *sipResponse),
+	}
+	session.processSMSMessage(&sipRequest{
+		Headers: map[string][]string{
+			"content-type":              {smsContentType},
+			"content-transfer-encoding": {"binary"},
+			"call-id":                   {"sim-download-test"},
+		},
+		Body: body,
+	})
+	if called {
+		t.Fatal("SIM data download was delivered to the SMS inbox callback")
 	}
 }
 

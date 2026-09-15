@@ -655,6 +655,7 @@ func decodeDeliverPDU(
 	}
 	message.ProtocolID = int(pid)
 	message.DataCodingScheme = int(dcs)
+	message.SIMDataDownload = isSIMDataDownload(pid, dcs)
 	timestamp, err := cursor.bytes(7)
 	if err != nil {
 		return err
@@ -667,6 +668,19 @@ func decodeDeliverPDU(
 		return err
 	}
 	return decodeUserData(cursor.data[cursor.index:], firstOctet, dcs, int(udl), message)
+}
+
+// TS 23.040 identifies an SMS-PP data download by the SIM data download PID
+// together with a class-2 data coding scheme. These messages target the UICC,
+// not the user's SMS inbox.
+func isSIMDataDownload(pid, dcs byte) bool {
+	if pid != 0x7f {
+		return false
+	}
+	if dcs&0xf0 == 0xf0 {
+		return dcs&0x03 == 0x02
+	}
+	return dcs&0xc0 == 0 && dcs&0x10 != 0 && dcs&0x03 == 0x02
 }
 
 func decodeSubmitPDU(

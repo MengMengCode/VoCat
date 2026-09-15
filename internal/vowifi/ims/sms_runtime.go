@@ -505,6 +505,15 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 			"carrier_profile", carrierProfile.ID,
 			"direction", message.Direction, "error", decodeErr)
 	}
+	if decodeErr == nil && message.SIMDataDownload {
+		// SMS-PP downloads are binary commands for the UICC. Until the runtime
+		// exposes a UICC ENVELOPE hook, preserve the existing network ACK but do
+		// not leak the secured payload into the human-readable SMS inbox.
+		session.logInboundSMS(slog.LevelInfo, "IMS SIM data download suppressed from SMS inbox", request,
+			"stage", "tpdu", "rp_reference", int(rpdu.reference))
+		session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
+		return
+	}
 
 	switch {
 	case message.Direction == device.SMSDirectionStatusReport:
