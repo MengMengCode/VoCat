@@ -61,7 +61,8 @@ func buildRetrieveNotificationsRequest(sequenceNumber *uint64) []byte {
 	if sequenceNumber == nil {
 		return derConstruct(0xBF2B)
 	}
-	return derConstruct(0xBF2B, derEncode(0x80, encodePositiveInteger(*sequenceNumber)))
+	// searchCriteria is a tagged CHOICE; the seqNumber alternative is nested in A0.
+	return derConstruct(0xBF2B, derConstruct(0xA0, derEncode(0x80, encodePositiveInteger(*sequenceNumber))))
 }
 
 func buildListNotificationsRequest() []byte {
@@ -158,6 +159,14 @@ func parseNotificationMetadataList(payload []byte) ([]EsimNotification, error) {
 	return notifications, nil
 }
 
+type notificationRetrieveError struct {
+	code []byte
+}
+
+func (err *notificationRetrieveError) Error() string {
+	return fmt.Sprintf("esim: eUICC could not retrieve notifications (result %X)", err.code)
+}
+
 func parsePendingNotifications(payload []byte) ([]EsimNotification, error) {
 	tag, headerLength, totalLength, err := derElementAt(payload, 0)
 	if err != nil || tag != 0xBF2B || totalLength != len(payload) {
@@ -166,8 +175,14 @@ func parsePendingNotifications(payload []byte) ([]EsimNotification, error) {
 	value := payload[headerLength:totalLength]
 	responseNodes := derParse(value)
 	if len(responseNodes) == 1 && (responseNodes[0].tag == 0x81 || responseNodes[0].tag == 0x80 || responseNodes[0].tag == 0x02) {
+		// derParse is permissive about trailing bytes; a fallback needs a
+		// complete, unambiguous error response, not a partially parsed TLV.
+		_, _, errorLength, errorParseErr := derElementAt(value, 0)
+		if errorParseErr != nil || errorLength != len(value) {
+			return nil, fmt.Errorf("esim: malformed RetrieveNotificationsList error response %X", payload)
+		}
 		errorCode := responseNodes[0].value
-		return nil, fmt.Errorf("esim: eUICC could not retrieve notifications (result %X)", errorCode)
+		return nil, &notificationRetrieveError{code: append([]byte(nil), errorCode...)}
 	}
 	// The notificationList CHOICE alternative is encoded as context tag A0 by
 	// AUTOMATIC TAGS on newer eUICCs. Older cards are also seen returning the
@@ -227,7 +242,27 @@ func (channel *euiccChannel) retrieveNotifications(ctx context.Context, sequence
 	if err != nil {
 		return nil, err
 	}
-	return parsePendingNotifications(payload)
+	notifications, parseErr := parsePendingNotifications(payload)
+	var resultErr *notificationRetrieveError
+	// Only an explicit undefinedError permits the legacy encoding. An empty
+	// result, transport failure, or malformed response must not cause a retry.
+	if sequenceNumber == nil || !errors.As(parseErr, &resultErr) ||
+		len(resultErr.code) != 1 || resultErr.code[0] != 127 {
+		return notifications, parseErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(parseErr, err)
+	}
+	legacyRequest := derConstruct(0xBF2B, derEncode(0x80, encodePositiveInteger(*sequenceNumber)))
+	legacyPayload, err := channel.es10(ctx, legacyRequest)
+	if err != nil {
+		return nil, errors.Join(parseErr, fmt.Errorf("esim: legacy notification request failed: %w", err))
+	}
+	notifications, err = parsePendingNotifications(legacyPayload)
+	if err != nil {
+		return nil, errors.Join(parseErr, fmt.Errorf("esim: legacy notification response failed: %w", err))
+	}
+	return notifications, nil
 }
 
 func (channel *euiccChannel) listNotifications(ctx context.Context) ([]EsimNotification, error) {

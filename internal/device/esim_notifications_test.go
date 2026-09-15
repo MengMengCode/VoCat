@@ -69,7 +69,7 @@ func TestNotificationRequestsAndRemoveResult(t *testing.T) {
 		t.Fatalf("retrieve all request = %X", got)
 	}
 	sequenceNumber := uint64(128)
-	wantRetrieve := []byte{0xBF, 0x2B, 0x04, 0x80, 0x02, 0x00, 0x80}
+	wantRetrieve := []byte{0xBF, 0x2B, 0x06, 0xA0, 0x04, 0x80, 0x02, 0x00, 0x80}
 	if got := buildRetrieveNotificationsRequest(&sequenceNumber); !bytes.Equal(got, wantRetrieve) {
 		t.Fatalf("retrieve request = %X, want %X", got, wantRetrieve)
 	}
