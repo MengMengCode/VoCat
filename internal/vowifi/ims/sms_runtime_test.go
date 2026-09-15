@@ -804,9 +804,18 @@ func TestSessionSuppressesSIMDataDownloadFromSMSInbox(t *testing.T) {
 	body := []byte{0x01, 0x62, 0x00, 0x00, byte(len(tpdu))}
 	body = append(body, tpdu...)
 	called := false
+	uiccCalled := false
 	session := &Session{
 		provider: &Provider{config: Config{
 			Logger: slog.Default(),
+			OnSIMDataDownload: func(_ context.Context, download SIMDataDownload) error {
+				uiccCalled = true
+				if download.DeviceID != "ec20" || download.PID != 0x7f || download.DCS != 0xf6 ||
+					!bytes.Equal(download.TPDU, tpdu) {
+					t.Fatalf("SIM data download = %#v", download)
+				}
+				return nil
+			},
 			OnSMS: func(context.Context, ReceivedSMS) error {
 				called = true
 				return nil
@@ -826,6 +835,9 @@ func TestSessionSuppressesSIMDataDownloadFromSMSInbox(t *testing.T) {
 	})
 	if called {
 		t.Fatal("SIM data download was delivered to the SMS inbox callback")
+	}
+	if !uiccCalled {
+		t.Fatal("SIM data download was not delivered to the UICC callback")
 	}
 }
 
