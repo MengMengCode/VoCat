@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -153,5 +154,49 @@ func TestReconcileMBNOverrideMissingProfile(t *testing.T) {
 	_, _, _, err := reconcileMBNSelection(context.Background(), fake, "45400", "ROW_Generic_3GPP")
 	if err == nil {
 		t.Fatal("expected missing ROW profile to fail")
+	}
+}
+func TestResolveMBNOverrideRejectsSubstringCustomName(t *testing.T) {
+	profiles := parseMBNProfiles(modem.Response{Lines: ceProfiles(true)})
+	if _, err := resolveMBNOverride(profiles, "OpenMkt"); err == nil {
+		t.Fatal("expected unmatched custom name to fail")
+	}
+	got, err := resolveMBNOverride(profiles, "CU")
+	if err != nil || got != MBNProfileCU {
+		t.Fatalf("CU alias = %q %v", got, err)
+	}
+}
+
+func TestCardMBNOverridePropagatesLookupError(t *testing.T) {
+	manager := &Manager{
+		mbnProfileForICCID: func(context.Context, string) (string, error) {
+			return "", errors.New("db down")
+		},
+	}
+	if _, err := manager.cardMBNOverride(context.Background(), "8985200014631193805"); err == nil {
+		t.Fatal("expected lookup error")
+	}
+}
+
+func TestCardMBNOverridePropagatesInvalidProfile(t *testing.T) {
+	manager := &Manager{
+		mbnProfileForICCID: func(context.Context, string) (string, error) {
+			return "not a profile", nil
+		},
+	}
+	if _, err := manager.cardMBNOverride(context.Background(), "8985200014631193805"); err == nil {
+		t.Fatal("expected invalid profile error")
+	}
+}
+
+func TestCardMBNOverrideEmptyWhenUnset(t *testing.T) {
+	got, err := (*Manager)(nil).cardMBNOverride(context.Background(), "8985200014631193805")
+	if err != nil || got != "" {
+		t.Fatalf("nil manager = %q %v", got, err)
+	}
+	manager := &Manager{}
+	got, err = manager.cardMBNOverride(context.Background(), "8985200014631193805")
+	if err != nil || got != "" {
+		t.Fatalf("unset callback = %q %v", got, err)
 	}
 }

@@ -222,31 +222,22 @@ func resolveMBNOverride(profiles []mbnProfile, override string) (string, error) 
 			return name, nil
 		}
 	}
-	if name := availableMBNContaining(profiles, normalized); name != "" {
-		return name, nil
-	}
 	return "", fmt.Errorf("MBN profile %q is not present on this modem", normalized)
 }
 
-func (manager *Manager) cardMBNOverride(ctx context.Context, iccid string) string {
+func (manager *Manager) cardMBNOverride(ctx context.Context, iccid string) (string, error) {
 	if manager == nil || manager.mbnProfileForICCID == nil {
-		return ""
+		return "", nil
 	}
 	value, err := manager.mbnProfileForICCID(ctx, strings.TrimSpace(iccid))
 	if err != nil {
-		if manager.logger != nil {
-			manager.logger.Warn("read card MBN policy", "iccid", iccid, "error", err)
-		}
-		return ""
+		return "", err
 	}
 	normalized, err := NormalizeCardMBNProfile(value)
 	if err != nil {
-		if manager.logger != nil {
-			manager.logger.Warn("ignore invalid card MBN policy", "iccid", iccid, "mbn_profile", value, "error", err)
-		}
-		return ""
+		return "", err
 	}
-	return normalized
+	return normalized, nil
 }
 
 func mbnMatchesHPLMN(profile, hplmn string) (known bool, matches bool) {
@@ -398,8 +389,15 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("read new profile identity before MBN validation: %w", err)
 	}
+	if !strings.EqualFold(strings.TrimSpace(snapshot.ICCID), strings.TrimSpace(expectedICCID)) {
+		return fmt.Errorf("active ICCID %q does not match expected ICCID %q", snapshot.ICCID, expectedICCID)
+	}
+	override, err := manager.cardMBNOverride(ctx, expectedICCID)
+	if err != nil {
+		return fmt.Errorf("read card MBN policy: %w", err)
+	}
 	hplmn := profileSwitchHPLMN(snapshot)
-	if len(hplmn) < 5 {
+	if override == "" && len(hplmn) < 5 {
 		return errors.New("new eSIM profile did not expose a usable HPLMN for MBN validation")
 	}
 	preserveFlightMode := snapshot.FlightMode
@@ -410,7 +408,6 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 		state.opMu.Unlock()
 		return fmt.Errorf("open EC20 for MBN validation: %w", err)
 	}
-	override := manager.cardMBNOverride(ctx, expectedICCID)
 	commandContext, cancelCommand := context.WithTimeout(ctx, manager.longTimeout)
 	changed, previous, selected, err := reconcileMBNSelection(commandContext, client, hplmn, override)
 	cancelCommand()

@@ -1172,6 +1172,46 @@ func TestEventsPoliciesAndTraffic(t *testing.T) {
 	}
 }
 
+func TestMigration24DuplicateMBNProfileColumnIsIgnored(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mbn-dup.db")
+	first, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version = 23`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database := openTestStore(t, path)
+	if err := database.UpsertCardPolicy(ctx, CardPolicy{
+		ICCID: "8985200014631193805", IPVersion: "IPV4V6",
+		MBNProfile: "OpenMkt-Commercial-CU",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := database.CardPolicy(ctx, "8985200014631193805")
+	if err != nil || policy.MBNProfile != "OpenMkt-Commercial-CU" {
+		t.Fatalf("policy = %+v, %v", policy, err)
+	}
+	var version int
+	if err := database.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
+	}
+}
+
 func openTestStore(t *testing.T, path string) *Store {
 	t.Helper()
 	database, err := Open(context.Background(), path)
