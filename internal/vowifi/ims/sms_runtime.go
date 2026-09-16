@@ -526,7 +526,7 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 		if session.provider.config.OnSIMDataDownload == nil {
 			session.logInboundSMS(slog.LevelWarn, "IMS SIM data download has no UICC handler", request,
 				"stage", "uicc", "rp_reference", int(rpdu.reference))
-			session.sendLoggedDeliveryReport(request, buildRPError(rpdu.reference, 95), "rp_error")
+      session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
 			return
 		}
 		if err := session.provider.config.OnSIMDataDownload(context.Background(), SIMDataDownload{
