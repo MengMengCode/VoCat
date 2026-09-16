@@ -487,6 +487,7 @@ type CardPolicy struct {
 	APN                string
 	IPVersion          string
 	CustomPhoneNumber  string
+	MBNProfile         string
 	CellularIMSEnabled bool
 	CellularIMSManaged bool
 	Source             string

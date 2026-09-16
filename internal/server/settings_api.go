@@ -1436,13 +1436,15 @@ func (s *Server) handleCardPolicy(w http.ResponseWriter, r *http.Request, iccid 
 			APN               *string `json:"apn"`
 			IPVersion         *string `json:"ip_version"`
 			CustomPhoneNumber *string `json:"custom_phone_number"`
+			MBNProfile        *string `json:"mbn_profile"`
 		}
 		if err := s.decodeJSON(w, r, &request); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 		if request.VoWiFiEnabled == nil && request.AirplaneEnabled == nil &&
-			request.APN == nil && request.IPVersion == nil && request.CustomPhoneNumber == nil {
+			request.APN == nil && request.IPVersion == nil && request.CustomPhoneNumber == nil &&
+			request.MBNProfile == nil {
 			writeError(
 				w,
 				http.StatusBadRequest,
@@ -1496,6 +1498,14 @@ func (s *Server) handleCardPolicy(w http.ResponseWriter, r *http.Request, iccid 
 		if request.AirplaneEnabled != nil {
 			policy.AirplaneEnabled = *request.AirplaneEnabled
 		}
+		if request.MBNProfile != nil {
+			mbnProfile, mbnErr := device.NormalizeCardMBNProfile(*request.MBNProfile)
+			if mbnErr != nil {
+				writeError(w, http.StatusBadRequest, "invalid_card_policy", mbnErr.Error())
+				return
+			}
+			policy.MBNProfile = mbnProfile
+		}
 		// VoWiFi always owns an RF-off modem. Store airplane=true even when an
 		// older client omits that implication, so disabling VoWiFi cannot expose a
 		// brief cellular attach window.
@@ -1517,10 +1527,49 @@ func (s *Server) handleCardPolicy(w http.ResponseWriter, r *http.Request, iccid 
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"data": cardPolicyResponse(policy)})
+		if request.MBNProfile != nil {
+			s.applyLiveCardMBN(iccid)
+		}
 	default:
 		w.Header().Set("Allow", "GET, PUT")
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
+}
+
+func (s *Server) applyLiveCardMBN(iccid string) {
+	reconciler, ok := s.devices.(interface {
+		ReconcileEC20MBNAfterProfileSwitch(context.Context, string, string) error
+	})
+	if !ok || s.store == nil {
+		return
+	}
+	configs, err := s.store.ListDevices(context.Background())
+	if err != nil {
+		return
+	}
+	clean := strings.TrimSpace(iccid)
+	var deviceID string
+	for _, config := range configs {
+		entry, physicalID, present := s.physicalForConfig(config)
+		if !present || entry.Snapshot == nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(entry.Snapshot.ICCID), clean) {
+			continue
+		}
+		deviceID = physicalID
+		break
+	}
+	if deviceID == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if err := reconciler.ReconcileEC20MBNAfterProfileSwitch(ctx, deviceID, clean); err != nil && s.logger != nil {
+			s.logger.Warn("apply card MBN policy", "device_id", deviceID, "iccid", clean, "error", err)
+		}
+	}()
 }
 
 func defaultCardPolicy(iccid string) store.CardPolicy {
@@ -1823,6 +1872,7 @@ func cardPolicyResponse(policy store.CardPolicy) map[string]any {
 		"apn":                 policy.APN,
 		"ip_version":          policy.IPVersion,
 		"custom_phone_number": policy.CustomPhoneNumber,
+		"mbn_profile":         policy.MBNProfile,
 		"source":              policy.Source,
 	}
 	if !policy.CreatedAt.IsZero() {

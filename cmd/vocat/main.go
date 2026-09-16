@@ -490,7 +490,20 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 
 	cardReaders := pcsc.New()
 	deviceLogger := logger.With("category", "hardware")
-	deviceManager, err := device.NewManager(device.Options{CardReaders: cardReaders, Logger: deviceLogger})
+	deviceManager, err := device.NewManager(device.Options{
+		CardReaders: cardReaders,
+		Logger:      deviceLogger,
+		MBNProfileForICCID: func(ctx context.Context, iccid string) (string, error) {
+			policy, err := database.CardPolicy(ctx, iccid)
+			if errors.Is(err, store.ErrNotFound) {
+				return "", nil
+			}
+			if err != nil {
+				return "", err
+			}
+			return policy.MBNProfile, nil
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("create device manager: %w", err)
 	}

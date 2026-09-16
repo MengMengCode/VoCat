@@ -383,12 +383,13 @@ func (s *Store) UpsertCardPolicy(ctx context.Context, value CardPolicy) error {
 	if updatedAt.IsZero() {
 		updatedAt = now
 	}
+	value.MBNProfile = strings.TrimSpace(value.MBNProfile)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO card_policies (
 			iccid, network_enabled, vowifi_enabled, airplane_enabled,
-			apn, ip_version, custom_phone_number, cellular_ims_enabled, cellular_ims_managed,
+			apn, ip_version, custom_phone_number, mbn_profile, cellular_ims_enabled, cellular_ims_managed,
 			source, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(iccid) DO UPDATE SET
 			network_enabled = excluded.network_enabled,
 			vowifi_enabled = excluded.vowifi_enabled,
@@ -396,6 +397,7 @@ func (s *Store) UpsertCardPolicy(ctx context.Context, value CardPolicy) error {
 			apn = excluded.apn,
 			ip_version = excluded.ip_version,
 			custom_phone_number = excluded.custom_phone_number,
+			mbn_profile = excluded.mbn_profile,
 			cellular_ims_enabled = excluded.cellular_ims_enabled,
 			cellular_ims_managed = excluded.cellular_ims_managed,
 			source = excluded.source,
@@ -403,7 +405,7 @@ func (s *Store) UpsertCardPolicy(ctx context.Context, value CardPolicy) error {
 	`,
 		value.ICCID, boolInt(value.NetworkEnabled), boolInt(value.VoWiFiEnabled),
 		boolInt(value.AirplaneEnabled), value.APN, value.IPVersion,
-		value.CustomPhoneNumber, boolInt(value.CellularIMSEnabled), boolInt(value.CellularIMSManaged), value.Source,
+		value.CustomPhoneNumber, value.MBNProfile, boolInt(value.CellularIMSEnabled), boolInt(value.CellularIMSManaged), value.Source,
 		createdAt.Unix(), updatedAt.Unix(),
 	)
 	if err != nil {
@@ -450,7 +452,7 @@ func (s *Store) DeleteCardPolicy(ctx context.Context, iccid string) error {
 
 const cardPolicySelect = `
 	SELECT iccid, network_enabled, vowifi_enabled, airplane_enabled,
-		apn, ip_version, custom_phone_number, cellular_ims_enabled, cellular_ims_managed,
+		apn, ip_version, custom_phone_number, mbn_profile, cellular_ims_enabled, cellular_ims_managed,
 		source, created_at, updated_at
 	FROM card_policies`
 
@@ -460,7 +462,7 @@ func cardPolicy(row rowScanner) (CardPolicy, error) {
 	var createdAt, updatedAt int64
 	err := row.Scan(
 		&value.ICCID, &networkEnabled, &vowifiEnabled, &airplaneEnabled,
-		&value.APN, &value.IPVersion, &value.CustomPhoneNumber, &cellularIMSEnabled, &cellularIMSManaged,
+		&value.APN, &value.IPVersion, &value.CustomPhoneNumber, &value.MBNProfile, &cellularIMSEnabled, &cellularIMSManaged,
 		&value.Source, &createdAt, &updatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

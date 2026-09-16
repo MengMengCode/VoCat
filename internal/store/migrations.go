@@ -425,6 +425,13 @@ func migrationStatements(version int) []string {
 			`CREATE INDEX IF NOT EXISTS sms_messages_subscription_thread_idx
 				ON sms_messages(modem_imei, iccid, imsi, peer, message_time DESC, id DESC)`,
 		}
+	case 24:
+		return []string{
+			// Optional per-ICCID MBN override. Empty keeps the HPLMN heuristic
+			// (ROW_Generic_3GPP when a known operator MBN does not match).
+			`ALTER TABLE card_policies
+				ADD COLUMN mbn_profile TEXT NOT NULL DEFAULT ''`,
+		}
 	default:
 		return nil
 	}

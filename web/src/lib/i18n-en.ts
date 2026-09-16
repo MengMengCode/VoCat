@@ -767,6 +767,17 @@ export const EN_DICT: Record<string, string> = {
   "加载设备信息失败": "Failed to load device info",
   "升序": "Ascending",
   "卡策略": "Card Policy",
+  "MBN 配置": "MBN Profile",
+  "自动（按卡的 HPLMN 选择）": "Automatic (follow the card HPLMN)",
+  "强制中国联通 OpenMkt": "Force China Unicom OpenMkt",
+  "强制中国移动 VoLTE": "Force China Mobile VoLTE",
+  "强制中国电信 OpenMkt": "Force China Telecom OpenMkt",
+  "EC20-CE 没有 ROW_Generic_3GPP。海外卡请按卡指定运营商 MBN；正在使用的卡更改后模组可能会重启。":
+    "EC20-CE has no ROW_Generic_3GPP. Set an operator MBN per overseas card. Changing this on the active card may reboot the module.",
+  "已保存强制 MBN；若此卡正在使用，模组可能会重启":
+    "Forced MBN saved. If this card is active, the module may reboot.",
+  "已恢复自动选择 MBN": "Automatic MBN selection restored",
+  "保存 MBN 失败": "Failed to save MBN profile",
   "即可继续": "to continue",
   "原运营商": "Original Carrier",
   "发送": "Send",

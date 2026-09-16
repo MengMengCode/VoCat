@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Button, Spinner } from "../ui";
 import { PolicySwitchCard } from "./PolicySwitchCard";
 import { CardPolicyAPN } from "./CardPolicyAPN";
+import { CardPolicyMBN } from "./CardPolicyMBN";
 import { useCardPolicyToggles } from "./useCardPolicyToggles";
 import { getCardPolicy, putCardPolicy, enableVoWiFi, disableVoWiFi, setFlightMode } from "./deviceActions";
 import type { CardPolicy } from "../../types";
@@ -88,6 +89,15 @@ export function EsimCardPolicyInline({ deviceId, iccid, isActiveCard, deviceOnli
               onToggle={toggles.onAirplaneToggle}
             />
           </div>
+          <CardPolicyMBN
+            iccid={iccid}
+            policy={policy}
+            compact
+            onSaved={(saved) => {
+              setPolicy(saved);
+              onPolicyChanged();
+            }}
+          />
           <CardPolicyAPN
             deviceId={deviceId}
             iccid={iccid}

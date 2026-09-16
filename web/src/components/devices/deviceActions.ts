@@ -28,6 +28,7 @@ export interface CardPolicyUpdate {
   apn?: string;
   ipVersion?: "IP" | "IPV6" | "IPV4V6";
   customPhoneNumber?: string;
+  mbnProfile?: string;
 }
 
 export type CellularIMSMode = "mbn_default" | "force_enabled" | "force_disabled";

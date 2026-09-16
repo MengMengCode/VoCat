@@ -23,24 +23,28 @@ type Options struct {
 	ScanTimeout    time.Duration
 	CardReaders    *pcsc.Service
 	Logger         *slog.Logger
+	// MBNProfileForICCID returns a stored per-card MBN override. An empty
+	// result keeps the HPLMN heuristic used after eSIM profile switches.
+	MBNProfileForICCID func(context.Context, string) (string, error)
 }
 
 type Manager struct {
-	mu             sync.RWMutex
-	uiccMu         sync.Mutex // serializes all multi-command UICC/APDU transactions
-	esimMu         sync.Mutex // serializes eSIM card access (list/switch/download)
-	esimRecoveryMu sync.Mutex
-	esimRecoveries map[string]chan struct{}
-	esimCacheMu    sync.RWMutex
-	esimCache      map[string]EsimInfo
-	discoverer     modem.Discoverer
-	opener         modem.Opener
-	commandTimeout time.Duration
-	longTimeout    time.Duration
-	smsTimeout     time.Duration
-	scanTimeout    time.Duration
-	cardReaders    *pcsc.Service
-	logger         *slog.Logger
+	mu                 sync.RWMutex
+	uiccMu             sync.Mutex // serializes all multi-command UICC/APDU transactions
+	esimMu             sync.Mutex // serializes eSIM card access (list/switch/download)
+	esimRecoveryMu     sync.Mutex
+	esimRecoveries     map[string]chan struct{}
+	esimCacheMu        sync.RWMutex
+	esimCache          map[string]EsimInfo
+	discoverer         modem.Discoverer
+	opener             modem.Opener
+	commandTimeout     time.Duration
+	longTimeout        time.Duration
+	smsTimeout         time.Duration
+	scanTimeout        time.Duration
+	cardReaders        *pcsc.Service
+	logger             *slog.Logger
+	mbnProfileForICCID func(context.Context, string) (string, error)
 
 	networkEventsMu         sync.Mutex
 	networkEventSubscribers map[chan string]struct{}
@@ -162,14 +166,15 @@ func NewManager(options Options) (*Manager, error) {
 		options.CardReaders = pcsc.New()
 	}
 	return &Manager{
-		discoverer:     options.Discoverer,
-		opener:         options.Opener,
-		commandTimeout: options.CommandTimeout,
-		longTimeout:    options.LongTimeout,
-		smsTimeout:     options.SMSTimeout,
-		scanTimeout:    options.ScanTimeout,
-		cardReaders:    options.CardReaders,
-		logger:         options.Logger,
+		discoverer:         options.Discoverer,
+		opener:             options.Opener,
+		commandTimeout:     options.CommandTimeout,
+		longTimeout:        options.LongTimeout,
+		smsTimeout:         options.SMSTimeout,
+		scanTimeout:        options.ScanTimeout,
+		cardReaders:        options.CardReaders,
+		logger:             options.Logger,
+		mbnProfileForICCID: options.MBNProfileForICCID,
 
 		qmiRadioOpener:                openQMIRadioSession,
 		qmiDataOpener:                 openQMIDataSession,

@@ -12,7 +12,12 @@ import (
 	"vocat/internal/modem"
 )
 
-const rowGeneric3GPPMBN = "ROW_Generic_3GPP"
+const (
+	rowGeneric3GPPMBN = "ROW_Generic_3GPP"
+	MBNProfileCU      = "OpenMkt-Commercial-CU"
+	MBNProfileCMCC    = "Volte_OpenMkt-Commercial-CMCC"
+	MBNProfileCT      = "OpenMkt-Commercial-CT"
+)
 
 type mbnProfile struct {
 	Name      string
@@ -104,15 +109,144 @@ func parseMBNAutoSelection(response modem.Response) (enabled bool, ok bool) {
 func knownMBNCarrier(profile string) (carrier string, country string, known bool) {
 	normalized := strings.ToUpper(strings.TrimSpace(profile))
 	switch {
-	case strings.Contains(normalized, "OPNMKT_CT") || strings.Contains(normalized, "CHINA_TELECOM"):
+	case strings.Contains(normalized, "COMMERCIAL-CT") || strings.Contains(normalized, "OPNMKT_CT") ||
+		strings.Contains(normalized, "CHINA_TELECOM") || strings.HasSuffix(normalized, "-CT") ||
+		strings.HasSuffix(normalized, "_CT"):
 		return "China Telecom", "CN", true
 	case strings.Contains(normalized, "CMCC") || strings.Contains(normalized, "CHINA_MOBILE"):
 		return "China Mobile", "CN", true
-	case strings.Contains(normalized, "OPNMKT_CU") || strings.Contains(normalized, "CHINA_UNICOM"):
+	case strings.Contains(normalized, "COMMERCIAL-CU") || strings.Contains(normalized, "OPNMKT_CU") ||
+		strings.Contains(normalized, "CHINA_UNICOM") || strings.HasSuffix(normalized, "-CU") ||
+		strings.HasSuffix(normalized, "_CU"):
 		return "China Unicom", "CN", true
 	default:
 		return "", "", false
 	}
+}
+
+func availableMBNContaining(profiles []mbnProfile, needle string) string {
+	needle = strings.ToUpper(strings.TrimSpace(needle))
+	if needle == "" {
+		return ""
+	}
+	for _, profile := range profiles {
+		if strings.Contains(strings.ToUpper(profile.Name), needle) {
+			return profile.Name
+		}
+	}
+	return ""
+}
+
+func chinaUnicomMBNName(profiles []mbnProfile) string {
+	if name := availableMBNProfile(profiles, MBNProfileCU); name != "" {
+		return name
+	}
+	if name := availableMBNContaining(profiles, "COMMERCIAL-CU"); name != "" {
+		return name
+	}
+	for _, profile := range profiles {
+		if carrier, _, known := knownMBNCarrier(profile.Name); known && carrier == "China Unicom" {
+			return profile.Name
+		}
+	}
+	return ""
+}
+
+func validMBNProfileToken(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		switch {
+		case character >= 'A' && character <= 'Z', character >= 'a' && character <= 'z',
+			character >= '0' && character <= '9', character == '_', character == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// NormalizeCardMBNProfile canonicalizes a stored or requested per-card MBN
+// override. Empty / "auto" keeps the HPLMN heuristic.
+func NormalizeCardMBNProfile(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.EqualFold(value, "auto") {
+		return "", nil
+	}
+	switch strings.ToUpper(strings.ReplaceAll(value, " ", "_")) {
+	case "CU", "UNICOM", "CHINA_UNICOM", "OPENMKT-COMMERCIAL-CU", "OPENMKT_COMMERCIAL_CU":
+		return MBNProfileCU, nil
+	case "CMCC", "MOBILE", "CHINA_MOBILE", "VOLTE_OPENMKT-COMMERCIAL-CMCC", "VOLTE_OPENMKT_COMMERCIAL_CMCC":
+		return MBNProfileCMCC, nil
+	case "CT", "TELECOM", "CHINA_TELECOM", "OPENMKT-COMMERCIAL-CT", "OPENMKT_COMMERCIAL_CT":
+		return MBNProfileCT, nil
+	case "ROW", "ROW_GENERIC", "ROW_GENERIC_3GPP", "ROW_GENERIC-3GPP":
+		return rowGeneric3GPPMBN, nil
+	}
+	if !validMBNProfileToken(value) {
+		return "", fmt.Errorf("unsupported MBN profile %q", value)
+	}
+	return value, nil
+}
+
+func resolveMBNOverride(profiles []mbnProfile, override string) (string, error) {
+	normalized, err := NormalizeCardMBNProfile(override)
+	if err != nil {
+		return "", err
+	}
+	if normalized == "" {
+		return "", nil
+	}
+	if name := availableMBNProfile(profiles, normalized); name != "" {
+		return name, nil
+	}
+	switch normalized {
+	case MBNProfileCU:
+		if name := chinaUnicomMBNName(profiles); name != "" {
+			return name, nil
+		}
+	case MBNProfileCMCC:
+		if name := availableMBNContaining(profiles, "CMCC"); name != "" {
+			return name, nil
+		}
+	case MBNProfileCT:
+		if name := availableMBNProfile(profiles, MBNProfileCT); name != "" {
+			return name, nil
+		}
+		if name := availableMBNContaining(profiles, "COMMERCIAL-CT"); name != "" {
+			return name, nil
+		}
+	case rowGeneric3GPPMBN:
+		if name := availableMBNProfile(profiles, rowGeneric3GPPMBN); name != "" {
+			return name, nil
+		}
+	}
+	if name := availableMBNContaining(profiles, normalized); name != "" {
+		return name, nil
+	}
+	return "", fmt.Errorf("MBN profile %q is not present on this modem", normalized)
+}
+
+func (manager *Manager) cardMBNOverride(ctx context.Context, iccid string) string {
+	if manager == nil || manager.mbnProfileForICCID == nil {
+		return ""
+	}
+	value, err := manager.mbnProfileForICCID(ctx, strings.TrimSpace(iccid))
+	if err != nil {
+		if manager.logger != nil {
+			manager.logger.Warn("read card MBN policy", "iccid", iccid, "error", err)
+		}
+		return ""
+	}
+	normalized, err := NormalizeCardMBNProfile(value)
+	if err != nil {
+		if manager.logger != nil {
+			manager.logger.Warn("ignore invalid card MBN policy", "iccid", iccid, "mbn_profile", value, "error", err)
+		}
+		return ""
+	}
+	return normalized
 }
 
 func mbnMatchesHPLMN(profile, hplmn string) (known bool, matches bool) {
@@ -135,55 +269,94 @@ func mbnMatchesHPLMN(profile, hplmn string) (known bool, matches bool) {
 	return true, strings.EqualFold(actualCarrier, expectedCarrier)
 }
 
-// reconcileMBNSelection changes only recognized operator-specific profiles.
-// Unknown vendor profiles are left untouched because their HPLMN coverage
-// cannot be inferred safely from the profile name.
-func reconcileMBNSelection(ctx context.Context, executor mbnExecutor, hplmn string) (changed bool, current string, err error) {
-	response, err := executor.Execute(ctx, `AT+QMBNCFG="List"`)
-	if err != nil {
-		return false, "", err
-	}
-	profiles := parseMBNProfiles(response)
-	current = currentMBNProfile(profiles)
-	if current == "" {
-		return false, "", errors.New("modem returned no selected MBN profile")
-	}
-	if strings.EqualFold(current, rowGeneric3GPPMBN) {
-		return false, current, nil
-	}
-	known, matches := mbnMatchesHPLMN(current, hplmn)
-	if !known || matches {
-		return false, current, nil
-	}
-	generic := availableMBNProfile(profiles, rowGeneric3GPPMBN)
-	if generic == "" {
-		return false, current, fmt.Errorf("operator MBN %q does not match HPLMN %s, but %s is unavailable", current, hplmn, rowGeneric3GPPMBN)
-	}
+func disableMBNAutoSelection(ctx context.Context, executor mbnExecutor) (wasEnabled bool, err error) {
 	autoResponse, err := executor.Execute(ctx, `AT+QMBNCFG="AutoSel"`)
 	if err != nil {
-		return false, current, fmt.Errorf("query automatic MBN selection: %w", err)
+		return false, fmt.Errorf("query automatic MBN selection: %w", err)
 	}
 	autoSelectionEnabled, ok := parseMBNAutoSelection(autoResponse)
 	if !ok {
-		return false, current, errors.New("modem returned no automatic MBN selection state")
+		return false, errors.New("modem returned no automatic MBN selection state")
 	}
-	if autoSelectionEnabled {
-		if _, err := executor.Execute(ctx, `AT+QMBNCFG="AutoSel",0`); err != nil {
-			return false, current, fmt.Errorf("disable automatic MBN selection: %w", err)
-		}
+	if !autoSelectionEnabled {
+		return false, nil
 	}
-	if _, err := executor.Execute(ctx, fmt.Sprintf(`AT+QMBNCFG="Select",%q`, generic)); err != nil {
-		if autoSelectionEnabled {
-			if _, restoreErr := executor.Execute(ctx, `AT+QMBNCFG="AutoSel",1`); restoreErr != nil {
-				return false, current, errors.Join(
-					fmt.Errorf("select %s MBN: %w", generic, err),
-					fmt.Errorf("restore automatic MBN selection: %w", restoreErr),
-				)
+	if _, err := executor.Execute(ctx, `AT+QMBNCFG="AutoSel",0`); err != nil {
+		return true, fmt.Errorf("disable automatic MBN selection: %w", err)
+	}
+	return true, nil
+}
+
+func restoreMBNAutoSelection(ctx context.Context, executor mbnExecutor) error {
+	if _, err := executor.Execute(ctx, `AT+QMBNCFG="AutoSel",1`); err != nil {
+		return fmt.Errorf("restore automatic MBN selection: %w", err)
+	}
+	return nil
+}
+
+func selectMBNProfile(ctx context.Context, executor mbnExecutor, previous, wanted string, keepAutoSelOff bool) (changed bool, selected string, err error) {
+	if wanted == "" {
+		return false, previous, errors.New("MBN profile name is empty")
+	}
+	if strings.EqualFold(previous, wanted) {
+		if keepAutoSelOff {
+			if _, err := disableMBNAutoSelection(ctx, executor); err != nil {
+				return false, previous, err
 			}
 		}
-		return false, current, fmt.Errorf("select %s MBN: %w", generic, err)
+		return false, previous, nil
 	}
-	return true, current, nil
+	autoWasEnabled, err := disableMBNAutoSelection(ctx, executor)
+	if err != nil {
+		return false, previous, err
+	}
+	if _, err := executor.Execute(ctx, fmt.Sprintf(`AT+QMBNCFG="Select",%q`, wanted)); err != nil {
+		if autoWasEnabled {
+			if restoreErr := restoreMBNAutoSelection(ctx, executor); restoreErr != nil {
+				return false, previous, errors.Join(fmt.Errorf("select %s MBN: %w", wanted, err), restoreErr)
+			}
+		}
+		return false, previous, fmt.Errorf("select %s MBN: %w", wanted, err)
+	}
+	return true, wanted, nil
+}
+
+// reconcileMBNSelection changes recognized operator-specific profiles when they
+// do not match the SIM HPLMN. A non-empty override selects that MBN even when
+// ROW_Generic_3GPP is missing, and keeps AutoSel off so the modem cannot pull
+// another operator profile back in. Empty override keeps the original
+// ROW_Generic_3GPP heuristic.
+func reconcileMBNSelection(ctx context.Context, executor mbnExecutor, hplmn, override string) (changed bool, previous string, selected string, err error) {
+	response, err := executor.Execute(ctx, `AT+QMBNCFG="List"`)
+	if err != nil {
+		return false, "", "", err
+	}
+	profiles := parseMBNProfiles(response)
+	previous = currentMBNProfile(profiles)
+	if previous == "" {
+		return false, "", "", errors.New("modem returned no selected MBN profile")
+	}
+	if strings.TrimSpace(override) != "" {
+		wanted, resolveErr := resolveMBNOverride(profiles, override)
+		if resolveErr != nil {
+			return false, previous, previous, resolveErr
+		}
+		changed, selected, err = selectMBNProfile(ctx, executor, previous, wanted, true)
+		return changed, previous, selected, err
+	}
+	if strings.EqualFold(previous, rowGeneric3GPPMBN) {
+		return false, previous, previous, nil
+	}
+	known, matches := mbnMatchesHPLMN(previous, hplmn)
+	if !known || matches {
+		return false, previous, previous, nil
+	}
+	generic := availableMBNProfile(profiles, rowGeneric3GPPMBN)
+	if generic == "" {
+		return false, previous, previous, fmt.Errorf("operator MBN %q does not match HPLMN %s, but %s is unavailable", previous, hplmn, rowGeneric3GPPMBN)
+	}
+	changed, selected, err = selectMBNProfile(ctx, executor, previous, generic, false)
+	return changed, previous, selected, err
 }
 
 func profileSwitchHPLMN(snapshot Snapshot) string {
@@ -203,11 +376,11 @@ func isEC20Candidate(candidate modem.Candidate) bool {
 		strings.Contains(strings.ToUpper(candidate.Product), "EC20")
 }
 
-// reconcileEC20MBNAfterProfileSwitch prevents an EC20 from carrying a known
+// ReconcileEC20MBNAfterProfileSwitch prevents an EC20 from carrying a known
 // operator MBN across an unrelated eSIM profile. A changed MBN requires a full
 // module restart; the caller restores the target profile's saved network policy
 // after this method returns.
-func (manager *Manager) reconcileEC20MBNAfterProfileSwitch(ctx context.Context, id, expectedICCID string) error {
+func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, id, expectedICCID string) error {
 	state, err := manager.lookup(id)
 	if err != nil {
 		return err
@@ -237,8 +410,9 @@ func (manager *Manager) reconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 		state.opMu.Unlock()
 		return fmt.Errorf("open EC20 for MBN validation: %w", err)
 	}
+	override := manager.cardMBNOverride(ctx, expectedICCID)
 	commandContext, cancelCommand := context.WithTimeout(ctx, manager.longTimeout)
-	changed, previous, err := reconcileMBNSelection(commandContext, client, hplmn)
+	changed, previous, selected, err := reconcileMBNSelection(commandContext, client, hplmn, override)
 	cancelCommand()
 	if err != nil || !changed {
 		state.opMu.Unlock()
@@ -262,10 +436,12 @@ func (manager *Manager) reconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 
 	if manager.logger != nil {
 		manager.logger.Info(
-			"EC20 MBN did not match switched eSIM HPLMN; selected generic profile",
+			"EC20 MBN did not match switched eSIM HPLMN; selected replacement profile",
 			"device_id", id,
+			"iccid", expectedICCID,
 			"previous_mbn", previous,
-			"selected_mbn", rowGeneric3GPPMBN,
+			"selected_mbn", selected,
+			"mbn_override", override,
 			"hplmn", hplmn,
 		)
 		if rebootErr != nil {
@@ -289,14 +465,14 @@ func (manager *Manager) reconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("verify EC20 MBN after restart: %w", err)
 	}
-	if current := currentMBNProfile(parseMBNProfiles(response)); !strings.EqualFold(current, rowGeneric3GPPMBN) {
-		return fmt.Errorf("EC20 MBN restart retained %q instead of %s", current, rowGeneric3GPPMBN)
+	if current := currentMBNProfile(parseMBNProfiles(response)); !strings.EqualFold(current, selected) {
+		return fmt.Errorf("EC20 MBN restart retained %q instead of %s", current, selected)
 	}
 	return nil
 }
 
 func (manager *Manager) reconcileEC20MBNAfterProfileSwitchBestEffort(ctx context.Context, id, expectedICCID string) {
-	if err := manager.reconcileEC20MBNAfterProfileSwitch(ctx, id, expectedICCID); err != nil && manager.logger != nil {
+	if err := manager.ReconcileEC20MBNAfterProfileSwitch(ctx, id, expectedICCID); err != nil && manager.logger != nil {
 		// EnableProfile has already been committed and its ICCID verified. Keep
 		// this compatibility repair separate from switch success so callers can
 		// still restore the new card's saved radio, APN and VoWiFi policy.

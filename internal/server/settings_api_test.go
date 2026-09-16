@@ -839,6 +839,47 @@ func TestCardPolicyDefaultValidationAndPersistence(t *testing.T) {
 	}
 }
 
+func TestCardPolicyMBNProfilePersistence(t *testing.T) {
+	test := newSettingsAPITest(t)
+	const iccid = "8985200014631193805"
+	recorder := test.request(t, http.MethodPut, "/api/cards/"+iccid+"/policy", `{"mbn_profile":"CU"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("CU MBN policy status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	response := decodeSettingsResponse(t, recorder)
+	policy := response["data"].(map[string]any)
+	if policy["mbn_profile"] != "OpenMkt-Commercial-CU" {
+		t.Fatalf("canonical CU MBN = %#v", policy)
+	}
+	stored, err := test.database.CardPolicy(context.Background(), iccid)
+	if err != nil || stored.MBNProfile != "OpenMkt-Commercial-CU" {
+		t.Fatalf("stored CU MBN = %+v, %v", stored, err)
+	}
+
+	recorder = test.request(t, http.MethodPut, "/api/cards/"+iccid+"/policy", `{"mbn_profile":"Volte_OpenMkt-Commercial-CMCC"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("CMCC MBN policy status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	stored, err = test.database.CardPolicy(context.Background(), iccid)
+	if err != nil || stored.MBNProfile != "Volte_OpenMkt-Commercial-CMCC" {
+		t.Fatalf("stored CMCC MBN = %+v, %v", stored, err)
+	}
+
+	recorder = test.request(t, http.MethodPut, "/api/cards/"+iccid+"/policy", `{"mbn_profile":"auto"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("auto MBN policy status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+	stored, err = test.database.CardPolicy(context.Background(), iccid)
+	if err != nil || stored.MBNProfile != "" {
+		t.Fatalf("cleared MBN = %+v, %v", stored, err)
+	}
+
+	recorder = test.request(t, http.MethodPut, "/api/cards/"+iccid+"/policy", `{"mbn_profile":"not a profile"}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid MBN status = %d, body = %s", recorder.Code, recorder.Body)
+	}
+}
+
 func TestTrafficAnalysisUsesAndAggregatesStoredBuckets(t *testing.T) {
 	test := newSettingsAPITest(t)
 	test.server.developerEnabled = true
