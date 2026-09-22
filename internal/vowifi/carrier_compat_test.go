@@ -18,6 +18,57 @@ func TestResolveCarrierProfileUsesStandardDefault(t *testing.T) {
 	}
 }
 
+func TestCarrierProfileSubscriberIMSIRewriteValidation(t *testing.T) {
+	rewrite := []byte(`{"version":1,"profiles":[{"id":"subscriber-rewrite","match":{"iccid_prefixes":["89636626"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"204047616","to_prefix":"515661015"}}}]}`)
+	rules, err := loadCarrierProfiles(rewrite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := applyCarrierProfileRule(defaultCarrierProfile(), rules[0], "iccid", SIMIdentity{})
+	if got := profile.EffectiveSubscriberIMSI("204047616000001"); got != "515661015000001" {
+		t.Fatalf("rewritten subscriber IMSI = %q", got)
+	}
+	if got := profile.EffectiveSubscriberIMSI("204041234567890"); got != "204041234567890" {
+		t.Fatalf("unmatched subscriber IMSI changed to %q", got)
+	}
+	for _, malformed := range []string{
+		`{"version":1,"profiles":[{"id":"missing-target","match":{"iccid_prefixes":["896366"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"204047616"}}}]}`,
+		`{"version":1,"profiles":[{"id":"length-mismatch","match":{"iccid_prefixes":["896366"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"204047616","to_prefix":"51566"}}}]}`,
+		`{"version":1,"profiles":[{"id":"non-decimal","match":{"iccid_prefixes":["896366"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"20404x616","to_prefix":"515661015"}}}]}`,
+	} {
+		if _, err := loadCarrierProfiles([]byte(malformed)); err == nil {
+			t.Fatalf("invalid subscriber rewrite was accepted: %s", malformed)
+		}
+	}
+}
+
+func TestBuiltinDITOProfileRewritesRoamingSubscriberPrefix(t *testing.T) {
+	for _, homePLMN := range []struct{ mcc, mnc string }{
+		{mcc: "515", mnc: "66"},
+		{mcc: "204", mnc: "04"},
+	} {
+		profile := ResolveCarrierProfile(SIMIdentity{
+			HomeMCC: homePLMN.mcc,
+			HomeMNC: homePLMN.mnc,
+			ICCID:   "89636626000000000001",
+			IMSI:    "204047616000001",
+		})
+		if profile.ID != "ipcc-dito-51566" {
+			t.Fatalf("carrier profile for %s%s = %q, want ipcc-dito-51566", homePLMN.mcc, homePLMN.mnc, profile.ID)
+		}
+		if got := profile.EffectiveSubscriberIMSI("204047616000001"); got != "515661015000001" {
+			t.Fatalf("rewritten subscriber IMSI for %s%s = %q", homePLMN.mcc, homePLMN.mnc, got)
+		}
+		if profile.IKEProposal != IKEProposalLegacy {
+			t.Fatalf("IKE proposal for %s%s = %q", homePLMN.mcc, homePLMN.mnc, profile.IKEProposal)
+		}
+	}
+	profile := ResolveCarrierProfile(SIMIdentity{HomeMCC: "515", HomeMNC: "66", SPN: "DITO"})
+	if got := profile.EffectiveSubscriberIMSI("515661015000001"); got != "515661015000001" {
+		t.Fatalf("native DITO subscriber IMSI changed to %q", got)
+	}
+}
+
 func TestResolveCarrierProfilePrefersConstrainedMVNO(t *testing.T) {
 	// Cricket MVNO on AT&T network
 	cricket := ResolveCarrierProfile(SIMIdentity{

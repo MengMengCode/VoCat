@@ -122,6 +122,26 @@ func TestCarrierForSIMUsesAndroidGIDRuleBeforePLMNFallback(t *testing.T) {
 	}
 }
 
+func TestCarrierForSIMDisplaysDITOForRoamingSponsorIdentity(t *testing.T) {
+	for _, identity := range []CarrierIdentity{
+		{IMSI: "204047616000001", ICCID: "89636626000000000001"},
+		{IMSI: "204047616000002", ICCID: "89636626000000000002"},
+		{IMSI: "515661015000001", ICCID: "89636626000000000001"},
+	} {
+		plmn, name, country, ok := CarrierForSIM(identity)
+		if !ok || plmn != "51566" || name != "DITO" || country != "PH" {
+			t.Fatalf("DITO identity = (%q, %q, %q, %v)", plmn, name, country, ok)
+		}
+	}
+
+	plmn, name, country, ok := CarrierForSIM(CarrierIdentity{
+		IMSI: "204047616000001", ICCID: "8931440400000000000",
+	})
+	if !ok || plmn != "20404" || name == "DITO" || country != "NL" {
+		t.Fatalf("unrelated Vodafone identity was relabelled: (%q, %q, %q, %v)", plmn, name, country, ok)
+	}
+}
+
 func TestCarrierForSIMRecognizesGiffgaffWithoutRelabelingGenericO2(t *testing.T) {
 	for _, identity := range []CarrierIdentity{
 		{IMSI: "234100000000001", GID1: "508FFFFF", MNCLength: 2},

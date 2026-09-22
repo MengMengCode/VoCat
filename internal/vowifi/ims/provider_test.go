@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +18,47 @@ import (
 
 	"vocat/internal/vowifi"
 )
+
+func TestDeriveIdentitiesRewritesDITORoamingPrefix(t *testing.T) {
+	installDITONativeAliasProfile(t)
+	for _, test := range []struct {
+		iccid string
+		imsi  string
+		want  string
+	}{
+		{"89636626000000000001", "204047616000001", "515661015000001"},
+		{"89636626000000000002", "204047616000002", "515661015000002"},
+	} {
+		got, err := deriveIdentities(vowifi.SIMIdentity{
+			ICCID: test.iccid, IMSI: test.imsi, HomeMCC: "515", HomeMNC: "66",
+		}, Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.private != test.want+"@ims.mnc066.mcc515.3gppnetwork.org" ||
+			got.public != "sip:"+test.want+"@ims.mnc066.mcc515.3gppnetwork.org" {
+			t.Fatalf("DITO IMS identities = %#v", got)
+		}
+	}
+}
+
+func installDITONativeAliasProfile(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	emptyDir := t.TempDir()
+	t.Cleanup(func() {
+		if err := vowifi.LoadCarrierProfileDirectory(emptyDir); err != nil {
+			t.Errorf("clear carrier profiles: %v", err)
+		}
+	})
+	profile := `{"version":1,"profiles":[{"id":"test-dito-native-alias","match":{"home_plmns":["51566"],"imsi_prefixes":["204047616"],"iccid_prefixes":["89636626"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"204047616","to_prefix":"515661015"}},"route":{"mcc":"515","mnc":"66"}}]}`
+	if err := os.WriteFile(filepath.Join(dir, "profile.json"), []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := vowifi.LoadCarrierProfileDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type evidenceTunnel struct {
 	evidence vowifi.TunnelEvidence

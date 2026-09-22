@@ -256,6 +256,8 @@ func fipsSHA1G(xval []byte) [20]byte {
 
 func permanentAKAIdentity(identity vowifi.SIMIdentity) ([]byte, error) {
 	imsi := strings.TrimSpace(identity.IMSI)
+	profile := vowifi.ResolveCarrierProfile(identity)
+	imsi = profile.EffectiveSubscriberIMSI(imsi)
 	if len(imsi) < 5 || len(imsi) > 16 {
 		return nil, errors.New("ike: IMSI length is invalid for EAP-AKA")
 	}
@@ -264,7 +266,6 @@ func permanentAKAIdentity(identity vowifi.SIMIdentity) ([]byte, error) {
 			return nil, errors.New("ike: IMSI contains a non-digit")
 		}
 	}
-	profile := vowifi.ResolveCarrierProfile(identity)
 	mcc := strings.TrimSpace(profile.RouteMCC)
 	mnc := strings.TrimSpace(profile.RouteMNC)
 	if mcc == "" || mnc == "" {

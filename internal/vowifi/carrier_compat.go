@@ -30,6 +30,7 @@ const (
 type CarrierProfile struct {
 	ID                                 string
 	MatchSource                        string
+	SubscriberIMSIRewrite              SubscriberIMSIRewrite
 	RouteMCC                           string
 	RouteMNC                           string
 	EPDG                               string
@@ -49,6 +50,14 @@ type CarrierProfile struct {
 	IMSDialURIScheme                   string
 	IMSUserEqPhone                     bool
 	IMSVoiceCodecs                     []string
+}
+
+// SubscriberIMSIRewrite maps a sponsor/roaming IMSI prefix to the subscriber
+// identity prefix used by the carrier's EAP-AKA and IMS backends. The suffix is
+// preserved, so the rule remains per-subscriber without storing every IMSI.
+type SubscriberIMSIRewrite struct {
+	FromPrefix string
+	ToPrefix   string
 }
 
 // IMSRegisterOptions carries carrier-specific SIP REGISTER header values.
@@ -78,13 +87,23 @@ type carrierProfileDocument struct {
 }
 
 type carrierProfileRule struct {
-	ID       string                `json:"id"`
-	Match    carrierProfileMatch   `json:"match,omitzero"`
-	MatchAny []carrierProfileMatch `json:"match_any,omitempty"`
-	Route    carrierProfileRoute   `json:"route,omitzero"`
-	EPDG     carrierProfileEPDG    `json:"epdg,omitzero"`
-	IKE      carrierProfileIKE     `json:"ike,omitzero"`
-	IMS      carrierProfileIMS     `json:"ims,omitzero"`
+	ID       string                 `json:"id"`
+	Match    carrierProfileMatch    `json:"match,omitzero"`
+	MatchAny []carrierProfileMatch  `json:"match_any,omitempty"`
+	Identity carrierProfileIdentity `json:"identity,omitzero"`
+	Route    carrierProfileRoute    `json:"route,omitzero"`
+	EPDG     carrierProfileEPDG     `json:"epdg,omitzero"`
+	IKE      carrierProfileIKE      `json:"ike,omitzero"`
+	IMS      carrierProfileIMS      `json:"ims,omitzero"`
+}
+
+type carrierProfileIdentity struct {
+	SubscriberIMSIRewrite carrierProfileIMSIRewrite `json:"subscriber_imsi_rewrite,omitzero"`
+}
+
+type carrierProfileIMSIRewrite struct {
+	FromPrefix string `json:"from_prefix,omitempty"`
+	ToPrefix   string `json:"to_prefix,omitempty"`
 }
 
 type carrierProfileMatch struct {
@@ -310,6 +329,13 @@ func validCarrierProfileRule(rule carrierProfileRule) bool {
 	}
 	if (rule.Route.MCC == "") != (rule.Route.MNC == "") ||
 		(rule.Route.MCC != "" && canonicalPLMN(rule.Route.MCC, rule.Route.MNC) == "") {
+		return false
+	}
+	fromPrefix := strings.TrimSpace(rule.Identity.SubscriberIMSIRewrite.FromPrefix)
+	toPrefix := strings.TrimSpace(rule.Identity.SubscriberIMSIRewrite.ToPrefix)
+	if (fromPrefix == "") != (toPrefix == "") ||
+		(fromPrefix != "" && (len(fromPrefix) < 5 || len(fromPrefix) > 15 || len(fromPrefix) != len(toPrefix) ||
+			!decimalString(fromPrefix) || !decimalString(toPrefix))) {
 		return false
 	}
 	if proposal := strings.TrimSpace(rule.IKE.Proposal); proposal != "" &&
@@ -538,6 +564,10 @@ func matchesAny(values []string, match func(string) bool) bool {
 func applyCarrierProfileRule(base CarrierProfile, rule carrierProfileRule, source string, identity SIMIdentity) CarrierProfile {
 	base.ID = rule.ID
 	base.MatchSource = source
+	base.SubscriberIMSIRewrite = SubscriberIMSIRewrite{
+		FromPrefix: strings.TrimSpace(rule.Identity.SubscriberIMSIRewrite.FromPrefix),
+		ToPrefix:   strings.TrimSpace(rule.Identity.SubscriberIMSIRewrite.ToPrefix),
+	}
 	base.RouteMCC = strings.TrimSpace(rule.Route.MCC)
 	base.RouteMNC = strings.TrimSpace(rule.Route.MNC)
 	if base.RouteMCC == "" {
@@ -615,6 +645,18 @@ func applyCarrierProfileRule(base CarrierProfile, rule carrierProfileRule, sourc
 	}
 	base.IMSRegisterOptions = applyRegisterOptions(base.IMSRegisterOptions, rule.IMS.RegisterOptions)
 	return base
+}
+
+// EffectiveSubscriberIMSI returns the identity presented to EAP-AKA and IMS.
+// It never mutates the SIM-reported IMSI stored in runtime state.
+func (profile CarrierProfile) EffectiveSubscriberIMSI(imsi string) string {
+	imsi = strings.TrimSpace(imsi)
+	fromPrefix := strings.TrimSpace(profile.SubscriberIMSIRewrite.FromPrefix)
+	toPrefix := strings.TrimSpace(profile.SubscriberIMSIRewrite.ToPrefix)
+	if fromPrefix != "" && toPrefix != "" && strings.HasPrefix(imsi, fromPrefix) {
+		return toPrefix + strings.TrimPrefix(imsi, fromPrefix)
+	}
+	return imsi
 }
 
 func applyRegisterOptions(base IMSRegisterOptions, rule carrierProfileRegisterOptions) IMSRegisterOptions {

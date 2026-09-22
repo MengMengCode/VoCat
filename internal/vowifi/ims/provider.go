@@ -404,10 +404,11 @@ type identitySet struct {
 
 func deriveIdentities(identity vowifi.SIMIdentity, config Config) (identitySet, error) {
 	imsi := strings.TrimSpace(identity.IMSI)
+	profile := vowifi.ResolveCarrierProfile(identity)
+	imsi = profile.EffectiveSubscriberIMSI(imsi)
 	if !digitsBetween(imsi, 5, 16) {
 		return identitySet{}, errors.New("ims: SIM IMSI is unavailable or invalid")
 	}
-	profile := vowifi.ResolveCarrierProfile(identity)
 	mcc := strings.TrimSpace(profile.RouteMCC)
 	mnc := strings.TrimSpace(profile.RouteMNC)
 	if mcc == "" || mnc == "" {

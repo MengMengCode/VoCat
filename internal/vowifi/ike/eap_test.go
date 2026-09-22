@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -93,6 +95,46 @@ func TestEAPAKAIdentityRequiresExactlyOneRequestAttribute(t *testing.T) {
 	length := int(identity.Raw[2])<<8 | int(identity.Raw[3])
 	if got := string(identity.Raw[4 : 4+length]); got != "0234150123456789@nai.epc.mnc015.mcc234.3gppnetwork.org" {
 		t.Fatalf("permanent AKA identity = %q", got)
+	}
+}
+
+func TestPermanentAKAIdentityRewritesDITORoamingPrefix(t *testing.T) {
+	installDITONativeAliasProfile(t)
+	for _, test := range []struct {
+		iccid string
+		imsi  string
+		want  string
+	}{
+		{"89636626000000000001", "204047616000001", "0515661015000001@nai.epc.mnc066.mcc515.3gppnetwork.org"},
+		{"89636626000000000002", "204047616000002", "0515661015000002@nai.epc.mnc066.mcc515.3gppnetwork.org"},
+	} {
+		identity, err := permanentAKAIdentity(vowifi.SIMIdentity{
+			ICCID: test.iccid, IMSI: test.imsi, HomeMCC: "515", HomeMNC: "66",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(identity) != test.want {
+			t.Fatalf("permanent AKA identity = %q, want %q", identity, test.want)
+		}
+	}
+}
+
+func installDITONativeAliasProfile(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	emptyDir := t.TempDir()
+	t.Cleanup(func() {
+		if err := vowifi.LoadCarrierProfileDirectory(emptyDir); err != nil {
+			t.Errorf("clear carrier profiles: %v", err)
+		}
+	})
+	profile := `{"version":1,"profiles":[{"id":"test-dito-native-alias","match":{"home_plmns":["51566"],"imsi_prefixes":["204047616"],"iccid_prefixes":["89636626"]},"identity":{"subscriber_imsi_rewrite":{"from_prefix":"204047616","to_prefix":"515661015"}},"route":{"mcc":"515","mnc":"66"}}]}`
+	if err := os.WriteFile(filepath.Join(dir, "profile.json"), []byte(profile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := vowifi.LoadCarrierProfileDirectory(dir); err != nil {
+		t.Fatal(err)
 	}
 }
 

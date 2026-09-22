@@ -127,6 +127,14 @@ func CarrierForSIM(identity CarrierIdentity) (plmn, name, countryCode string, ok
 	if !decimalDigits(imsi, 5, 20) || IsPlaceholderIMSI(imsi) {
 		return "", "", "", false
 	}
+	// Some DITO eSIM profiles expose their roaming sponsor identity as a
+	// Vodafone NL 204-04 IMSI. Keep that raw IMSI available for diagnostics,
+	// but present the subscription's actual carrier in user-facing summaries.
+	// Requiring DITO's Philippine ICCID issuer prevents a real Vodafone SIM
+	// with the same IMSI prefix from being relabelled.
+	if isDITOCarrierIdentity(identity, imsi) {
+		return "51566", "DITO", "PH", true
+	}
 	plmns := carrierPLMNCandidates(imsi, identity.MNCLength)
 	bestScore := -1
 	for _, rule := range globalCarrierDatabase.Rules {
@@ -178,6 +186,16 @@ func CarrierForSIM(identity CarrierIdentity) (plmn, name, countryCode string, ok
 		return plmn, name, countryCode, true
 	}
 	return CarrierForIMSI(imsi)
+}
+
+func isDITOCarrierIdentity(identity CarrierIdentity, imsi string) bool {
+	iccid := strings.TrimSpace(identity.ICCID)
+	if !strings.HasPrefix(iccid, "896366") {
+		return false
+	}
+	return strings.HasPrefix(imsi, "204047616") ||
+		strings.HasPrefix(imsi, "515661015") ||
+		strings.EqualFold(strings.TrimSpace(identity.SPN), "DITO")
 }
 
 func carrierPLMNCandidates(imsi string, mncLength int) []string {
