@@ -1,6 +1,7 @@
 package vowifi
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -68,6 +69,29 @@ func TestResolveCarrierProfileGiffgaffIMSHeaders(t *testing.T) {
 	}
 	if len(options.ContactExtraTags) != 2 || options.ContactExtraTags[0] != "+g.3gpp.mid-call" || options.ContactExtraTags[1] != "+g.3gpp.smsip" {
 		t.Fatalf("giffgaff Contact tags = %#v", options.ContactExtraTags)
+	}
+}
+
+func TestResolveCarrierProfileUltraMobileIMS(t *testing.T) {
+	profile := ResolveCarrierProfile(SIMIdentity{
+		IMSI: "310240000000001", HomeMCC: "310", HomeMNC: "240", GID1: "4153FFFF",
+	})
+	if profile.ID != "ipcc-ultramint-mobile-310026" || profile.MatchSource != "hplmn+gid1" {
+		t.Fatalf("Ultra Mobile profile = %#v", profile)
+	}
+	if profile.EPDG != "epdg.epc.mnc240.mcc310.pub.3gppnetwork.org" {
+		t.Fatalf("Ultra Mobile ePDG = %q", profile.EPDG)
+	}
+	if profile.IMSIPSecEncryption != "aes-cbc" {
+		t.Fatalf("Ultra Mobile IMS encryption = %q", profile.IMSIPSecEncryption)
+	}
+	wantTags := []string{
+		`+g.3gpp.accesstype="wlan1"`,
+		"+g.3gpp.smsip-msisdnless",
+		"+g.3gpp.smsip-msisdn-less",
+	}
+	if got := profile.IMSRegisterOptions.ContactExtraTags; !slices.Equal(got, wantTags) {
+		t.Fatalf("Ultra Mobile Contact tags = %#v, want %#v", got, wantTags)
 	}
 }
 

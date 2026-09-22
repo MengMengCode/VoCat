@@ -25,6 +25,8 @@ const (
 	defaultTransactionTimeout   = 12 * time.Second
 	maxAuthenticationChallenges = 3
 	defaultPANIWLANNode         = "ffffffffffff"
+	registerContactICSIRef      = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel," +
+		"urn%3Aurn-7%3A3gpp-service.ims.icsi.sms"
 )
 
 var (
@@ -1073,7 +1075,7 @@ func (session *Session) buildRegister(
 func (session *Session) buildContact(contactAddress string, registerOptions vowifi.IMSRegisterOptions) string {
 	base := fmt.Sprintf("<sip:%s@%s;transport=%s>", session.identity.user, contactAddress, session.transport)
 	instanceID := session.instanceID
-	icsiRef := "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
+	icsiRef := registerContactICSIRef
 
 	switch registerOptions.ContactFormat {
 	case vowifi.IMSContactFormatATT:
