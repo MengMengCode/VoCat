@@ -1072,6 +1072,7 @@ func (session *Session) buildRegister(
 	return []byte(strings.Join(lines, "\r\n")), nil
 }
 
+// buildContact constructs the REGISTER Contact value for the selected carrier format.
 func (session *Session) buildContact(contactAddress string, registerOptions vowifi.IMSRegisterOptions) string {
 	base := fmt.Sprintf("<sip:%s@%s;transport=%s>", session.identity.user, contactAddress, session.transport)
 	instanceID := session.instanceID

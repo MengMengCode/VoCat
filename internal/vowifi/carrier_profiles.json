@@ -8503,8 +8503,7 @@
         "register_options": {
           "contact_extra_tags": [
             "+g.3gpp.accesstype=\"wlan1\"",
-            "+g.3gpp.smsip-msisdnless",
-            "+g.3gpp.smsip-msisdn-less"
+            "+g.3gpp.smsip-msisdnless"
           ]
         }
       }

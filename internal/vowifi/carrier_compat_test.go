@@ -72,6 +72,8 @@ func TestResolveCarrierProfileGiffgaffIMSHeaders(t *testing.T) {
 	}
 }
 
+// TestResolveCarrierProfileUltraMobileIMS locks the live-validated ePDG and
+// REGISTER Contact capabilities to the Ultra Mobile carrier selector.
 func TestResolveCarrierProfileUltraMobileIMS(t *testing.T) {
 	profile := ResolveCarrierProfile(SIMIdentity{
 		IMSI: "310240000000001", HomeMCC: "310", HomeMNC: "240", GID1: "4153FFFF",
@@ -88,7 +90,6 @@ func TestResolveCarrierProfileUltraMobileIMS(t *testing.T) {
 	wantTags := []string{
 		`+g.3gpp.accesstype="wlan1"`,
 		"+g.3gpp.smsip-msisdnless",
-		"+g.3gpp.smsip-msisdn-less",
 	}
 	if got := profile.IMSRegisterOptions.ContactExtraTags; !slices.Equal(got, wantTags) {
 		t.Fatalf("Ultra Mobile Contact tags = %#v, want %#v", got, wantTags)

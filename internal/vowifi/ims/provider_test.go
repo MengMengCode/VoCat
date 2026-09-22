@@ -609,6 +609,7 @@ func TestSipInstanceIDUsesGSMAFormWhenIMEIIsAvailable(t *testing.T) {
 	}
 }
 
+// TestGSMAContactFormatUsesAddressAndDeviceInstance verifies the complete GSMA Contact shape.
 func TestGSMAContactFormatUsesAddressAndDeviceInstance(t *testing.T) {
 	session := &Session{
 		identity:   identitySet{user: "234105776448519"},
@@ -619,12 +620,13 @@ func TestGSMAContactFormatUsesAddressAndDeviceInstance(t *testing.T) {
 		ContactFormat:    vowifi.IMSContactFormatGSMA,
 		ContactExtraTags: []string{"+g.3gpp.mid-call", "+g.3gpp.smsip"},
 	})
-	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="` + registerContactICSIRef + `";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:353024112557010-0>"`
+	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel,urn%3Aurn-7%3A3gpp-service.ims.icsi.sms";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:353024112557010-0>"`
 	if got != want {
 		t.Fatalf("GSMA Contact = %q, want %q", got, want)
 	}
 }
 
+// TestRegisterContactAdvertisesSMSOverIPICSI guards the encoded SMS service identifier independently.
 func TestRegisterContactAdvertisesSMSOverIPICSI(t *testing.T) {
 	session := &Session{
 		identity:   identitySet{user: "310240000000001"},
@@ -634,7 +636,7 @@ func TestRegisterContactAdvertisesSMSOverIPICSI(t *testing.T) {
 
 	for _, format := range []string{"", vowifi.IMSContactFormatATT, vowifi.IMSContactFormatGSMA} {
 		contact := session.buildContact("[2001:db8::1]:5060", vowifi.IMSRegisterOptions{ContactFormat: format})
-		if !strings.Contains(contact, `+g.3gpp.icsi-ref="`+registerContactICSIRef+`"`) {
+		if !strings.Contains(contact, "urn%3Aurn-7%3A3gpp-service.ims.icsi.sms") {
 			t.Fatalf("Contact format %q does not advertise SMS-over-IP ICSI: %s", format, contact)
 		}
 	}
