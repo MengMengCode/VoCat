@@ -462,8 +462,14 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 			if headers["expires"] == "0" {
 				return errors.New("refresh REGISTER used zero expiry")
 			}
-			if headers["authorization"] != "" {
-				return errors.New("refresh reused the one-time AKAv1 RES")
+			if headers["authorization"] == "" {
+				return errors.New("refresh REGISTER omitted cached digest credentials")
+			}
+			if err := verifyTestAuthorization(headers["authorization"], nonce); err != nil {
+				return err
+			}
+			if !strings.Contains(headers["authorization"], "nc=00000002") {
+				return fmt.Errorf("refresh REGISTER did not increment digest nonce count: %q", headers["authorization"])
 			}
 			contact := headers["contact"]
 			extraContacts := []string(nil)
@@ -734,8 +740,11 @@ func serveRefreshFailure(listener *net.UDPConn, nonce string) error {
 			}
 			continue
 		}
-		if headers["authorization"] != "" {
-			return errors.New("refresh reused the one-time AKAv1 RES")
+		if headers["authorization"] == "" {
+			return errors.New("refresh REGISTER omitted cached digest credentials")
+		}
+		if !strings.Contains(headers["authorization"], "nc=00000002") {
+			return fmt.Errorf("refresh REGISTER did not increment digest nonce count: %q", headers["authorization"])
 		}
 		if _, err := listener.WriteToUDP(
 			testResponse(503, "Service Unavailable", callID, headers["cseq"], nil),

@@ -1431,7 +1431,10 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 		SecurityMode:         session.effectiveSecurityMode(),
 		SecurityVerified:     session.securityActive,
 	}
-	session.clearAuthentication()
+	// Keep the digest state for registration refreshes. With qop=auth, the
+	// nonce count advances for each request, so a refresh does not replay the
+	// authenticated REGISTER. Clearing it here forces a new AKA challenge and
+	// can make an established ipsec-3gpp session fail with SIP 494.
 	return nil
 }
 
