@@ -360,6 +360,8 @@ func TestRefreshFailureRevokesRegistrationEvidence(t *testing.T) {
 	}
 }
 
+// serveRegistration exercises initial authentication, preauthenticated refresh,
+// and deregistration against one registrar transaction sequence.
 func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) error {
 	var callID string
 	var pani string
@@ -688,6 +690,8 @@ func validateTestPANI(value string) error {
 	return nil
 }
 
+// serveRefreshFailure accepts initial AKA registration and then rejects a
+// preauthenticated refresh so the session's failure evidence can be tested.
 func serveRefreshFailure(listener *net.UDPConn, nonce string) error {
 	var callID string
 	for step := 0; step < 3; step++ {

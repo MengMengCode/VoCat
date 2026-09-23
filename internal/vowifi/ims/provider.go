@@ -852,6 +852,8 @@ func safeSIPDiagnostic(value string) string {
 	return value
 }
 
+// register completes a REGISTER transaction, including AKA challenges, and
+// advances cached qop=auth credentials when the registrar permits preauthentication.
 func (session *Session) register(ctx context.Context, expires int) (*sipResponse, error) {
 	for challenges := 0; challenges <= maxAuthenticationChallenges; challenges++ {
 		cseq := session.cseq
@@ -1372,6 +1374,8 @@ func (session *Session) exchange(ctx context.Context, request []byte, cseq uint3
 	}
 }
 
+// applyRegistrationEvidence records only the Contact and lifetime granted to
+// this session and retains replay-protected credentials for its next refresh.
 func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 	if session.provider.config.SecurityMode == SecurityRequired && !session.securityActive {
 		session.evidence.Registered = false
