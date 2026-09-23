@@ -403,6 +403,8 @@ func TestRefreshFailureRevokesRegistrationEvidence(t *testing.T) {
 	}
 }
 
+// serveRegistration exercises initial authentication, preauthenticated refresh,
+// and deregistration against one registrar transaction sequence.
 func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) error {
 	var callID string
 	var pani string
@@ -505,8 +507,14 @@ func serveRegistration(listener *net.UDPConn, nonce string, confirmSMS bool) err
 			if headers["expires"] == "0" {
 				return errors.New("refresh REGISTER used zero expiry")
 			}
-			if headers["authorization"] != "" {
-				return errors.New("refresh reused the one-time AKAv1 RES")
+			if headers["authorization"] == "" {
+				return errors.New("refresh REGISTER omitted cached digest credentials")
+			}
+			if err := verifyTestAuthorization(headers["authorization"], nonce); err != nil {
+				return err
+			}
+			if !strings.Contains(headers["authorization"], "nc=00000002") {
+				return fmt.Errorf("refresh REGISTER did not increment digest nonce count: %q", headers["authorization"])
 			}
 			contact := headers["contact"]
 			extraContacts := []string(nil)
@@ -652,6 +660,7 @@ func TestSipInstanceIDUsesGSMAFormWhenIMEIIsAvailable(t *testing.T) {
 	}
 }
 
+// TestGSMAContactFormatUsesAddressAndDeviceInstance verifies the complete GSMA Contact shape.
 func TestGSMAContactFormatUsesAddressAndDeviceInstance(t *testing.T) {
 	session := &Session{
 		identity:   identitySet{user: "234105776448519"},
@@ -662,9 +671,25 @@ func TestGSMAContactFormatUsesAddressAndDeviceInstance(t *testing.T) {
 		ContactFormat:    vowifi.IMSContactFormatGSMA,
 		ContactExtraTags: []string{"+g.3gpp.mid-call", "+g.3gpp.smsip"},
 	})
-	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:353024112557010-0>"`
+	want := `<sip:[2001:db8::1]:49686>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel,urn%3Aurn-7%3A3gpp-service.ims.icsi.sms";+g.3gpp.mid-call;+g.3gpp.smsip;+sip.instance="<urn:gsma:imei:353024112557010-0>"`
 	if got != want {
 		t.Fatalf("GSMA Contact = %q, want %q", got, want)
+	}
+}
+
+// TestRegisterContactAdvertisesSMSOverIPICSI guards the encoded SMS service identifier independently.
+func TestRegisterContactAdvertisesSMSOverIPICSI(t *testing.T) {
+	session := &Session{
+		identity:   identitySet{user: "310240000000001"},
+		transport:  "tcp",
+		instanceID: "urn:gsma:imei:353024112557010-0",
+	}
+
+	for _, format := range []string{"", vowifi.IMSContactFormatATT, vowifi.IMSContactFormatGSMA} {
+		contact := session.buildContact("[2001:db8::1]:5060", vowifi.IMSRegisterOptions{ContactFormat: format})
+		if !strings.Contains(contact, "urn%3Aurn-7%3A3gpp-service.ims.icsi.sms") {
+			t.Fatalf("Contact format %q does not advertise SMS-over-IP ICSI: %s", format, contact)
+		}
 	}
 }
 
@@ -708,6 +733,8 @@ func validateTestPANI(value string) error {
 	return nil
 }
 
+// serveRefreshFailure accepts initial AKA registration and then rejects a
+// preauthenticated refresh so the session's failure evidence can be tested.
 func serveRefreshFailure(listener *net.UDPConn, nonce string) error {
 	var callID string
 	for step := 0; step < 3; step++ {
@@ -760,8 +787,11 @@ func serveRefreshFailure(listener *net.UDPConn, nonce string) error {
 			}
 			continue
 		}
-		if headers["authorization"] != "" {
-			return errors.New("refresh reused the one-time AKAv1 RES")
+		if headers["authorization"] == "" {
+			return errors.New("refresh REGISTER omitted cached digest credentials")
+		}
+		if !strings.Contains(headers["authorization"], "nc=00000002") {
+			return fmt.Errorf("refresh REGISTER did not increment digest nonce count: %q", headers["authorization"])
 		}
 		if _, err := listener.WriteToUDP(
 			testResponse(503, "Service Unavailable", callID, headers["cseq"], nil),

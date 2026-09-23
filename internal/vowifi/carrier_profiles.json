@@ -8492,14 +8492,25 @@
           ]
         }
       ],
+      "route": {
+        "mcc": "310",
+        "mnc": "240"
+      },
       "epdg": {
-        "hostname": "ss.epdg.epc.mnc260.mcc310.pub.3gppnetwork.org"
+        "hostname": "epdg.epc.mnc240.mcc310.pub.3gppnetwork.org"
       },
       "ike": {
         "proposal": "modern"
       },
       "ims": {
-        "ipsec_encryption": "aes-cbc"
+        "ipsec_encryption": "aes-cbc",
+        "register_options": {
+          "contact_extra_tags": [
+            "+g.3gpp.accesstype=\"wlan1\"",
+            "+g.3gpp.smsip-msisdnless",
+            "+g.3gpp.smsip-msisdn-less"
+          ]
+        }
       }
     },
     {

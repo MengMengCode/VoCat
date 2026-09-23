@@ -25,6 +25,8 @@ const (
 	defaultTransactionTimeout   = 12 * time.Second
 	maxAuthenticationChallenges = 3
 	defaultPANIWLANNode         = "ffffffffffff"
+	registerContactICSIRef      = "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel," +
+		"urn%3Aurn-7%3A3gpp-service.ims.icsi.sms"
 )
 
 var (
@@ -851,6 +853,8 @@ func safeSIPDiagnostic(value string) string {
 	return value
 }
 
+// register completes a REGISTER transaction, including AKA challenges, and
+// advances cached qop=auth credentials when the registrar permits preauthentication.
 func (session *Session) register(ctx context.Context, expires int) (*sipResponse, error) {
 	for challenges := 0; challenges <= maxAuthenticationChallenges; challenges++ {
 		cseq := session.cseq
@@ -927,6 +931,7 @@ func (session *Session) register(ctx context.Context, expires int) (*sipResponse
 			return nil, err
 		}
 		auts := base64.StdEncoding.EncodeToString(material.auts)
+		session.clearAuthentication()
 		session.auth = &authenticationState{
 			challenge: challenge,
 			response:  append([]byte(nil), material.response...),
@@ -1071,10 +1076,11 @@ func (session *Session) buildRegister(
 	return []byte(strings.Join(lines, "\r\n")), nil
 }
 
+// buildContact constructs the REGISTER Contact value for the selected carrier format.
 func (session *Session) buildContact(contactAddress string, registerOptions vowifi.IMSRegisterOptions) string {
 	base := fmt.Sprintf("<sip:%s@%s;transport=%s>", session.identity.user, contactAddress, session.transport)
 	instanceID := session.instanceID
-	icsiRef := "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
+	icsiRef := registerContactICSIRef
 
 	switch registerOptions.ContactFormat {
 	case vowifi.IMSContactFormatATT:
@@ -1369,6 +1375,8 @@ func (session *Session) exchange(ctx context.Context, request []byte, cseq uint3
 	}
 }
 
+// applyRegistrationEvidence records only the Contact and lifetime granted to
+// this session and retains replay-protected credentials for its next refresh.
 func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 	if session.provider.config.SecurityMode == SecurityRequired && !session.securityActive {
 		session.evidence.Registered = false
@@ -1429,7 +1437,13 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 		SecurityMode:         session.effectiveSecurityMode(),
 		SecurityVerified:     session.securityActive,
 	}
-	session.clearAuthentication()
+	// Keep qop=auth digest state for registration refreshes. Its
+	// nonce count advances for each request, so a refresh does not replay the
+	// authenticated REGISTER. Clearing it here forces a new AKA challenge and
+	// can make an established ipsec-3gpp session fail with SIP 494.
+	if session.auth != nil && !strings.EqualFold(session.auth.challenge.QOP, "auth") {
+		session.clearAuthentication()
+	}
 	return nil
 }
 
