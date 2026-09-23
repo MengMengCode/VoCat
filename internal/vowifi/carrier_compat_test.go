@@ -84,12 +84,16 @@ func TestResolveCarrierProfileUltraMobileIMS(t *testing.T) {
 	if profile.EPDG != "epdg.epc.mnc240.mcc310.pub.3gppnetwork.org" {
 		t.Fatalf("Ultra Mobile ePDG = %q", profile.EPDG)
 	}
+	if profile.RouteMCC != "310" || profile.RouteMNC != "240" {
+		t.Fatalf("Ultra Mobile route = %s/%s, want 310/240", profile.RouteMCC, profile.RouteMNC)
+	}
 	if profile.IMSIPSecEncryption != "aes-cbc" {
 		t.Fatalf("Ultra Mobile IMS encryption = %q", profile.IMSIPSecEncryption)
 	}
 	wantTags := []string{
 		`+g.3gpp.accesstype="wlan1"`,
 		"+g.3gpp.smsip-msisdnless",
+		"+g.3gpp.smsip-msisdn-less",
 	}
 	if got := profile.IMSRegisterOptions.ContactExtraTags; !slices.Equal(got, wantTags) {
 		t.Fatalf("Ultra Mobile Contact tags = %#v, want %#v", got, wantTags)

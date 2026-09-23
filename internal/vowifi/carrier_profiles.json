@@ -8492,6 +8492,10 @@
           ]
         }
       ],
+      "route": {
+        "mcc": "310",
+        "mnc": "240"
+      },
       "epdg": {
         "hostname": "epdg.epc.mnc240.mcc310.pub.3gppnetwork.org"
       },
@@ -8503,7 +8507,8 @@
         "register_options": {
           "contact_extra_tags": [
             "+g.3gpp.accesstype=\"wlan1\"",
-            "+g.3gpp.smsip-msisdnless"
+            "+g.3gpp.smsip-msisdnless",
+            "+g.3gpp.smsip-msisdn-less"
           ]
         }
       }
