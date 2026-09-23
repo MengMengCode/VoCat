@@ -928,6 +928,7 @@ func (session *Session) register(ctx context.Context, expires int) (*sipResponse
 			return nil, err
 		}
 		auts := base64.StdEncoding.EncodeToString(material.auts)
+		session.clearAuthentication()
 		session.auth = &authenticationState{
 			challenge: challenge,
 			response:  append([]byte(nil), material.response...),
@@ -1431,10 +1432,13 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 		SecurityMode:         session.effectiveSecurityMode(),
 		SecurityVerified:     session.securityActive,
 	}
-	// Keep the digest state for registration refreshes. With qop=auth, the
+	// Keep qop=auth digest state for registration refreshes. Its
 	// nonce count advances for each request, so a refresh does not replay the
 	// authenticated REGISTER. Clearing it here forces a new AKA challenge and
 	// can make an established ipsec-3gpp session fail with SIP 494.
+	if session.auth != nil && !strings.EqualFold(session.auth.challenge.QOP, "auth") {
+		session.clearAuthentication()
+	}
 	return nil
 }
 
