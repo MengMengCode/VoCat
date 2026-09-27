@@ -18,7 +18,7 @@ func decodeServiceIndicationText(contentType string, body []byte) (string, bool)
 }
 
 func extractXMLIndication(body []byte) (string, bool) {
-	lower := bytes.ToLower(body)
+	lower := asciiLower(body)
 	startTag := []byte("<indication")
 	start := bytes.Index(lower, startTag)
 	if start < 0 {
@@ -61,11 +61,6 @@ func extractWBXMLStrings(body []byte) (string, bool) {
 	index += tableLen
 
 	var candidates []string
-	for _, part := range bytes.Split(table, []byte{0}) {
-		if text := strings.TrimSpace(string(part)); readableText(text) {
-			candidates = append(candidates, text)
-		}
-	}
 	for index < len(body) {
 		switch body[index] {
 		case 0x03: // STR_I
@@ -80,10 +75,13 @@ func extractWBXMLStrings(body []byte) (string, bool) {
 			}
 			index = next
 		case 0x83: // STR_T
-			_, next, refOK := readUintvar(body, index+1)
+			offset, next, refOK := readUintvar(body, index+1)
 			if !refOK {
 				index = len(body)
 				break
+			}
+			if text, ok := stringTableText(table, offset); ok {
+				candidates = append(candidates, text)
 			}
 			index = next
 		default:
@@ -114,4 +112,30 @@ func looksLikeURL(text string) bool {
 	return strings.HasPrefix(lower, "http://") ||
 		strings.HasPrefix(lower, "https://") ||
 		strings.HasPrefix(lower, "www.")
+}
+
+func asciiLower(value []byte) []byte {
+	lower := make([]byte, len(value))
+	for i, b := range value {
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		lower[i] = b
+	}
+	return lower
+}
+
+func stringTableText(table []byte, offset int) (string, bool) {
+	if offset >= len(table) {
+		return "", false
+	}
+	end := bytes.IndexByte(table[offset:], 0)
+	if end < 0 {
+		end = len(table) - offset
+	}
+	text := strings.TrimSpace(string(table[offset : offset+end]))
+	if readableText(text) {
+		return text, true
+	}
+	return "", false
 }

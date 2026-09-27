@@ -117,6 +117,49 @@ func TestDecodeServiceIndicationWBXML(t *testing.T) {
 	}
 }
 
+func TestDecodeServiceIndicationXMLInvalidUTF8PrefixDoesNotPanic(t *testing.T) {
+	prefix := make([]byte, 40)
+	for i := range prefix {
+		prefix[i] = 0xff
+	}
+	body := append(prefix, []byte("<indication>alert</indication>")...)
+	payload := encodeWSPPush("text/vnd.wap.si", body)
+	text, ok := DecodeDisplayText(payload)
+	if !ok || text != "alert" {
+		t.Fatalf("invalid UTF-8 SI prefix = (%q, %v)", text, ok)
+	}
+	if got := Preview(hex.EncodeToString(payload)); got != "alert" {
+		t.Fatalf("Preview = %q, want alert", got)
+	}
+}
+
+func TestDecodeServiceIndicationXMLMixedCaseTags(t *testing.T) {
+	body := []byte(`<SI><Indication href="http://example.com">You have 1 new alert</Indication></SI>`)
+	payload := encodeWSPPush("text/vnd.wap.si", body)
+	text, ok := DecodeDisplayText(payload)
+	if !ok || text != "You have 1 new alert" {
+		t.Fatalf("mixed-case XML SI = (%q, %v)", text, ok)
+	}
+}
+
+func TestDecodeServiceIndicationWBXMLUsesReferencedStringTableEntry(t *testing.T) {
+	decoy := "this-is-a-much-longer-decoy-string"
+	indication := "Bank OTP 123456"
+	table := append(append([]byte(decoy), 0), append([]byte(indication), 0)...)
+	body := []byte{0x02, 0x05, 0x6a, byte(len(table))}
+	body = append(body, table...)
+	body = append(body,
+		0x45, 0xc6, 0x08, 0x01,
+		0x83, byte(len(decoy)+1),
+		0x01, 0x01,
+	)
+	payload := encodeWSPPush("application/vnd.wap.sic", body)
+	text, ok := DecodeDisplayText(payload)
+	if !ok || text != indication {
+		t.Fatalf("WBXML STR_T SI = (%q, %v), want %q", text, ok, indication)
+	}
+}
+
 func TestDecodeDisplayTextIgnoresUnrelatedBinary(t *testing.T) {
 	if text, ok := DecodeDisplayText([]byte{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11}); ok {
 		t.Fatalf("binary payload decoded as %q", text)
