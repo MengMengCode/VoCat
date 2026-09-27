@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -77,6 +78,31 @@ func TestMergeConcatSegmentKeepsURLContiguous(t *testing.T) {
 	want := "https://ofca.gov.hk/track?tok=abcdef1234&lang=zh"
 	if body != want {
 		t.Fatalf("body = %q, want %q", body, want)
+	}
+}
+
+func TestMergeConcatSegmentDecodesWAPPushMMSSubject(t *testing.T) {
+	payload := hex.EncodeToString([]byte{
+		0x01, 0x06, 0x03, 0xbe, 0xaf, 0x84,
+		0x8c, 0x82, 0x96, 'O', 'K', 0x00,
+	})
+	_, extra, _, err := mergeConcatSegment(nil, payload[:12], concatExtra(t, 7, 2, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, extra, _, err := mergeConcatSegment(extra, payload[12:], concatExtra(t, 7, 2, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "OK" {
+		t.Fatalf("body = %q, want OK", body)
+	}
+	document, err := decodeJSONObject(extra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document["encoding"] != "wap_push" {
+		t.Fatalf("encoding = %#v", document["encoding"])
 	}
 }
 

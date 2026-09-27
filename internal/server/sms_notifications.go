@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"vocat/internal/smsdecode"
 	"vocat/internal/store"
 )
 
@@ -191,7 +192,7 @@ func (s *Server) newSMSNotification(ctx context.Context, message store.SMSMessag
 		DeviceLabel: firstNonEmpty(name, deviceID, "--"),
 		Number:      firstNonEmpty(message.Peer, "--"),
 		Time:        message.Timestamp,
-		Content:     message.Body,
+		Content:     smsdecode.Preview(message.Body),
 	}
 }
 

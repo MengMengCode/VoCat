@@ -162,6 +162,7 @@ const (
 	SMSEncodingGB18030  SMSEncoding = "gb18030_pdu"
 	SMSEncodingLatin1   SMSEncoding = "latin1_pdu"
 	SMSEncoding8BitPDU  SMSEncoding = "8bit_pdu"
+	SMSEncodingWAPPush  SMSEncoding = "wap_push"
 	SMSEncodingUnknown  SMSEncoding = "unknown"
 )
 

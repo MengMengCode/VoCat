@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"vocat/internal/smsdecode"
 )
 
 // ConcatMessageIDPrefix marks the stable message id that ingest points assign to
@@ -127,7 +129,7 @@ func mergeConcatSegment(
 		stored[strconv.Itoa(n)] = parts[n]
 	}
 	complete := total > 0 && len(parts) >= total
-
+	bodyText := joined.String()
 	merged := map[string]any{
 		"concat":          concat,
 		"concat_parts":    stored,
@@ -140,11 +142,19 @@ func mergeConcatSegment(
 			merged[key] = value
 		}
 	}
+	// Concatenated WAP Push MMS notifications arrive as hex 8-bit segments.
+	// Decode the joined payload so the inbox and notifications show the
+	// subject instead of the raw WSP/MMS bytes. concat_parts stay hex so a
+	// later segment can still reassemble.
+	if text, ok := smsdecode.DecodeHexDisplayText(bodyText); ok {
+		bodyText = text
+		merged["encoding"] = "wap_push"
+	}
 	encoded, err := json.Marshal(merged)
 	if err != nil {
 		return "", nil, false, fmt.Errorf("encode merged concat extra: %w", err)
 	}
-	return joined.String(), json.RawMessage(encoded), changed, nil
+	return bodyText, json.RawMessage(encoded), changed, nil
 }
 
 // normalizeCumulativeConcatParts converts cumulative IMS segment bodies back
