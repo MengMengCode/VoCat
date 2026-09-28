@@ -31,17 +31,42 @@ type ec20Transcript struct {
 
 func TestICCIDIdentifierStripsBCDPadding(t *testing.T) {
 	for _, test := range []struct {
-		wire string
-		want string
+		wire   string
+		prefix string
+		want   string
 	}{
-		{wire: "8944110069353447454F", want: "8944110069353447454"},
-		{wire: "894921007608519523FF", want: "894921007608519523"},
+		{wire: "8944110069353447454F", prefix: "+QCCID: ", want: "8944110069353447454"},
+		{wire: "894921007608519523FF", prefix: "+QCCID: ", want: "894921007608519523"},
+		{wire: "894921007608519523FF", prefix: "+MCCID: ", want: "894921007608519523"},
 	} {
-		response := modem.Response{Lines: []string{"+QCCID: " + test.wire}}
-		if got := iccidIdentifier(response, []string{"+CCID:", "+QCCID:"}, 18, 22); got != test.want {
+		response := modem.Response{Lines: []string{test.prefix + test.wire}}
+		if got := iccidIdentifier(response, []string{"+CCID:", "+QCCID:", "+MCCID:"}, 18, 22); got != test.want {
 			t.Fatalf("iccidIdentifier(%q) = %q, want %q", test.wire, got, test.want)
 		}
 	}
+}
+
+func TestEC20AdapterReadICCIDFallsBackToML307MCCID(t *testing.T) {
+	transcript := &ec20Transcript{
+		t: t,
+		steps: []ec20TranscriptStep{
+			{command: "AT+CCID", err: errors.New("unsupported"), final: "ERROR"},
+			{command: "AT+QCCID", err: errors.New("unsupported"), final: "ERROR"},
+			{command: "AT+MCCID", lines: []string{"+MCCID: 894921007608519523FF"}},
+		},
+	}
+	adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := adapter.readICCID(context.Background(), "ml307-1")
+	if err != nil {
+		t.Fatalf("readICCID: %v", err)
+	}
+	if got != "894921007608519523" {
+		t.Fatalf("readICCID = %q, want padded ICCID removed", got)
+	}
+	transcript.assertDone()
 }
 
 func (transcript *ec20Transcript) ExecuteAT(
@@ -261,6 +286,27 @@ func TestEC20AdapterCSIMFallbackSupportsSuccessAndSynchronizationFailure(
 			transcript.assertDone()
 		})
 	}
+}
+
+func TestEC20AdapterReadIdentityIMEIFallback(t *testing.T) {
+	steps := identityTranscriptSteps("234150123456789")
+	steps[3].lines = []string{"86123456789012M1"}
+	steps = append(steps[:4], append([]ec20TranscriptStep{
+		{command: "AT+CGSN=1", lines: []string{"+CGSN: +867530912345678"}},
+	}, steps[4:]...)...)
+	transcript := &ec20Transcript{t: t, steps: steps}
+	adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := adapter.ReadIdentity(context.Background(), "ec20-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.IMEI != "867530912345678" {
+		t.Fatalf("IMEI = %q", identity.IMEI)
+	}
+	transcript.assertDone()
 }
 
 func TestEC20AdapterDiscoversFullUSIMAIDFromEFDIRWhenCUADFails(t *testing.T) {

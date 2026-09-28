@@ -26,8 +26,10 @@ export function CellularIMSConfigCard({ deviceId, deviceOnline }: CellularIMSCon
   const [selectedMode, setSelectedMode] = useState<CellularIMSMode>("mbn_default");
   const [loading, setLoading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   const load = useCallback(async () => {
+    setLoadError("");
     if (!deviceOnline) {
       setStatus(null);
       return;
@@ -39,7 +41,7 @@ export function CellularIMSConfigCard({ deviceId, deviceOnline }: CellularIMSCon
       setSelectedMode(next.mode);
     } catch (error) {
       setStatus(null);
-      message.error(apiMessage(error) || t("读取蜂窝 IMS 模组配置失败"));
+      setLoadError(apiMessage(error) || t("读取蜂窝 IMS 模组配置失败"));
     } finally {
       setLoading(false);
     }
@@ -102,6 +104,7 @@ export function CellularIMSConfigCard({ deviceId, deviceOnline }: CellularIMSCon
       {!deviceOnline ? (
         <div className="text-xs text-amber-600 dark:text-amber-400">{t("设备离线，无法读取或修改模组 IMS 配置。")}</div>
       ) : null}
+      {loadError ? <div role="alert" className="break-words text-xs text-red-600 dark:text-red-400">{loadError}</div> : null}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <Select
           className="min-w-0 flex-1"

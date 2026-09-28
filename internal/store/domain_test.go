@@ -185,6 +185,20 @@ func TestMigration9NormalizesVoWiFiAirplanePolicy(t *testing.T) {
 	}
 }
 
+func TestML307DeviceTypeNormalizesAndPersists(t *testing.T) {
+	if got := NormalizeDeviceType(" ML307 "); got != DeviceTypeML307 {
+		t.Fatalf("NormalizeDeviceType(ML307) = %q", got)
+	}
+	database := openTestStore(t, ":memory:")
+	if err := database.UpsertDevice(context.Background(), Device{ID: "ml307", Name: "ML307A", DeviceType: " ML307 "}); err != nil {
+		t.Fatalf("UpsertDevice: %v", err)
+	}
+	got, err := database.Device(context.Background(), "ml307")
+	if err != nil || got.DeviceType != DeviceTypeML307 {
+		t.Fatalf("persisted type = %q, err = %v", got.DeviceType, err)
+	}
+}
+
 func TestMigration8DefaultsExistingDevicesToPCIeType(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "device-type.db")

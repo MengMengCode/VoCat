@@ -1319,7 +1319,7 @@ func (manager *Manager) verifySwitchedICCIDAttempts(
 			}
 			lastErr = err
 		} else {
-			for _, command := range []string{"AT+CCID", "AT+QCCID"} {
+			for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+MCCID"} {
 				commandContext, cancel := context.WithTimeout(ctx, manager.commandTimeout)
 				response, err := manager.ExecuteAT(commandContext, id, command)
 				cancel()
@@ -1327,7 +1327,7 @@ func (manager *Manager) verifySwitchedICCIDAttempts(
 					lastErr = err
 					continue
 				}
-				live := parseICCIDIdentifier(response, []string{"+CCID:", "+QCCID:"}, 18, 22)
+				live := parseICCIDIdentifier(response, []string{"+CCID:", "+QCCID:", "+MCCID:"}, 18, 22)
 				if live == "" {
 					lastErr = errors.New("modem response contained no valid ICCID")
 					continue

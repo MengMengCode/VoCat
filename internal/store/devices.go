@@ -16,6 +16,7 @@ type contextExecer interface {
 const (
 	DeviceTypeWiFi410      = "wifi_410"
 	DeviceTypeDJI4G        = "dji_4g"
+	DeviceTypeML307        = "ml307"
 	DeviceTypePCIeEC20EC25 = "pcie_ec20_ec25"
 	DeviceTypeUSBSIMReader = "usb_sim_reader"
 )
@@ -28,6 +29,8 @@ func NormalizeDeviceType(value string) string {
 		return DeviceTypeWiFi410
 	case DeviceTypeDJI4G:
 		return DeviceTypeDJI4G
+	case DeviceTypeML307:
+		return DeviceTypeML307
 	case DeviceTypeUSBSIMReader:
 		return DeviceTypeUSBSIMReader
 	case "", DeviceTypePCIeEC20EC25:

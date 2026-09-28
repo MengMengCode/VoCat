@@ -48,6 +48,12 @@ func rowProfiles(selectedCMCC bool) []string {
 	)
 }
 
+func TestIsEC20CandidateExcludesML307(t *testing.T) {
+	if isEC20Candidate(modem.Candidate{VendorID: "2ecc", ProductID: "3012", Product: "ML307A"}) {
+		t.Fatal("ML307 must not use Quectel MBN controls")
+	}
+}
+
 func TestKnownMBNCarrierOpenMarketNames(t *testing.T) {
 	carrier, country, known := knownMBNCarrier("OpenMkt-Commercial-CU")
 	if !known || carrier != "China Unicom" || country != "CN" {

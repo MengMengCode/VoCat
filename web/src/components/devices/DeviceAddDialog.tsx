@@ -30,8 +30,9 @@ function isQmiMode(d?: DiscoveredDevice | null): boolean {
   return String(d?.mode || "").toLowerCase() === "qmi";
 }
 function modeLabel(d?: DiscoveredDevice | null): string {
-  const m = String(d?.mode || "unknown").toLowerCase();
-  return m === "pcsc" ? "PC/SC" : m === "qmi" ? "QMI" : m === "mbim" ? "MBIM" : m === "ecm" ? "ECM" : m === "rndis" ? "RNDIS" : m === "ncm" ? "NCM" : "UNKNOWN";
+  const mode = String(d?.mode || "").toUpperCase();
+  if (mode === "PCSC") return "PC/SC";
+  return ["AT", "QMI", "MBIM", "ECM", "RNDIS", "NCM"].includes(mode) ? mode : "UNKNOWN";
 }
 
 function Field({ label, children }: { label: ReactNode; children: ReactNode }) {

@@ -363,8 +363,8 @@ func profileSwitchHPLMN(snapshot Snapshot) string {
 }
 
 func isEC20Candidate(candidate modem.Candidate) bool {
-	return strings.EqualFold(strings.TrimSpace(candidate.VendorID), "2c7c") &&
-		strings.Contains(strings.ToUpper(candidate.Product), "EC20")
+	product := strings.ToUpper(candidate.Product)
+	return strings.EqualFold(candidate.VendorID, "2c7c") && strings.Contains(product, "EC20")
 }
 
 // ReconcileEC20MBNAfterProfileSwitch prevents an EC20 from carrying a known

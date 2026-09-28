@@ -1324,7 +1324,9 @@ func provisionDiscoveredDevices(
 			esimTransport = "pcsc"
 		}
 		name := candidate.Product
-		if name == "" || strings.EqualFold(name, "Android") {
+		if (name == "" || strings.EqualFold(name, "Android")) && modem.IsML307(candidate) {
+			name = "ML307"
+		} else if name == "" || strings.EqualFold(name, "Android") {
 			name = "Quectel EC20 / EC25"
 		}
 		supportsSMS := deviceType != store.DeviceTypeWiFi410
@@ -1354,6 +1356,9 @@ func provisionDiscoveredDevices(
 }
 
 func provisionedDeviceType(candidate modem.Candidate) string {
+	if modem.IsML307(candidate) {
+		return store.DeviceTypeML307
+	}
 	controlName := filepath.Base(filepath.Clean(candidate.QMIControl))
 	if candidate.HardwareKind == "wwan" &&
 		strings.HasPrefix(controlName, "wwan") && strings.Contains(controlName, "qmi") {

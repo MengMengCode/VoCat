@@ -95,7 +95,10 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			// Re-admit them by vendor so their AT serial ports stay discoverable;
 			// the candidate is only kept if a ttyUSB/ttyACM node is actually
 			// found below, which is exactly the AT-bearing composition we want.
-			if !isQuectelUSBModem(vendorID) {
+			if !isQuectelUSBModem(vendorID) && !IsML307(Candidate{
+				VendorID: vendorID, ProductID: productID,
+				Product: readTrimmed(filepath.Join(resolvedDevice, "product")),
+			}) {
 				continue
 			}
 		}
@@ -163,8 +166,21 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			}
 			return left.Name < right.Name
 		})
-		assignQuectelPortRoles(state.candidate.Ports)
-		state.candidate.ATPort = selectATPort(state.candidate.Ports)
+		if IsML307(state.candidate) {
+			// ML307 USB compositions expose AT endpoints on interfaces 02 and 03.
+			// Prefer interface 02, matching the tested ML307A composition.
+			for index := range state.candidate.Ports {
+				port := &state.candidate.Ports[index]
+				port.Role = PortRoleUnknown
+				if port.InterfaceNumber == 2 {
+					port.Role = PortRoleAT
+					state.candidate.ATPort = *port
+				}
+			}
+		} else {
+			assignQuectelPortRoles(state.candidate.Ports)
+			state.candidate.ATPort = selectATPort(state.candidate.Ports)
+		}
 		if !state.candidate.HasATPort() {
 			// A modem without a usable AT port cannot be driven by vocat, but it
 			// is far more useful to surface it with a discovery issue than to
@@ -209,10 +225,10 @@ func isQuectelUSBModem(vendorID string) bool {
 	return strings.EqualFold(strings.TrimSpace(vendorID), quectelVendorID)
 }
 
-// normalizeUSBIdentity replaces the placeholder strings shipped by the
-// classic Quectel EC20/EC25 USB composition. Linux faithfully exposes those
-// modules as "Android / Android", but that text is a firmware placeholder,
-// not the modem model or manufacturer.
+// normalizeUSBIdentity replaces the placeholder strings shipped by certain
+// modems. Linux faithfully exposes those modules as "Android / Android" or
+// "Linux / Linux", but those texts are firmware placeholders, not the modem
+// model or manufacturer.
 func normalizeUSBIdentity(vendorID, productID, manufacturer, product string) (string, string) {
 	if !isQuectelUSBModem(vendorID) ||
 		!strings.EqualFold(strings.TrimSpace(productID), "0125") {

@@ -1138,6 +1138,7 @@ export const EN_DICT: Record<string, string> = {
   "请选择设备类型": "Select a device type",
   "410 WiFi 棒（高通芯片）": "410 WiFi Dongle (Qualcomm)",
   "大疆 4G 模块（移远芯片）": "DJI 4G Module (Quectel)",
+  "ML307（中移物联）": "ML307 (China Mobile IoT)",
   "PCIe EC20/EC25（移远芯片）": "PCIe EC20/EC25 (Quectel)",
 
   // ---- Per-Profile phone display override ----

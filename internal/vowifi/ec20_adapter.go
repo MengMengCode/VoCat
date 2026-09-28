@@ -150,11 +150,18 @@ func (adapter *EC20Adapter) ReadIdentity(
 		return SIMIdentity{}, err
 	}
 
-	imeiResponse, err := adapter.execute(ctx, deviceID, "AT+CGSN")
-	if err != nil {
-		return SIMIdentity{}, fmt.Errorf("read EC20 IMEI: %w", err)
+	imeiResponse, imeiErr := adapter.execute(ctx, deviceID, "AT+CGSN")
+	imei := ""
+	if imeiErr == nil {
+		imei = modem.ParseIMEI(imeiResponse)
 	}
-	imei := digitIdentifier(imeiResponse, []string{"+CGSN:", "+GSN:"}, 14, 17)
+	if imei == "" {
+		imeiResponse, imeiErr = adapter.execute(ctx, deviceID, "AT+CGSN=1")
+		if imeiErr != nil {
+			return SIMIdentity{}, fmt.Errorf("read EC20 IMEI: %w", imeiErr)
+		}
+		imei = modem.ParseIMEI(imeiResponse)
+	}
 	if imei == "" {
 		return SIMIdentity{}, errors.New("vocat: EC20 returned no valid IMEI")
 	}
@@ -381,7 +388,7 @@ func (adapter *EC20Adapter) readICCID(
 ) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		for _, command := range []string{"AT+CCID", "AT+QCCID"} {
+		for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+MCCID"} {
 			response, err := adapter.execute(ctx, deviceID, command)
 			if err != nil {
 				lastErr = err
@@ -389,7 +396,7 @@ func (adapter *EC20Adapter) readICCID(
 			}
 			value := iccidIdentifier(
 				response,
-				[]string{"+CCID:", "+QCCID:"},
+				[]string{"+CCID:", "+QCCID:", "+MCCID:"},
 				18,
 				22,
 			)

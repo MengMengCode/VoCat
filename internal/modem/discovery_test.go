@@ -12,6 +12,34 @@ import (
 	"testing"
 )
 
+func TestSysFSDiscoverySelectsML307Interface02(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+	mustWrite(t, filepath.Join(usbRoot, "9-2", "idVendor"), "2ecc\n")
+	mustWrite(t, filepath.Join(usbRoot, "9-2", "idProduct"), "3012\n")
+	mustWrite(t, filepath.Join(usbRoot, "9-2", "product"), "Linux\n")
+
+	for number, tty := range map[string]string{"02": "ttyUSB4", "03": "ttyUSB3", "04": "ttyUSB2"} {
+		name := "9-2:1." + strings.TrimLeft(number, "0")
+		mustWrite(t, filepath.Join(usbRoot, name, "bInterfaceNumber"), number+"\n")
+		mustMkdir(t, filepath.Join(usbRoot, name, tty, "tty", tty))
+	}
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.ATPort.Name != "ttyUSB4" || candidate.ATPort.InterfaceNumber != 2 || candidate.ATPort.Role != PortRoleAT {
+		t.Fatalf("AT port = %#v, want interface 02", candidate.ATPort)
+	}
+}
+
 func TestSysFSDiscoverySelectsInterface04AndNeverInterface02(t *testing.T) {
 	root := t.TempDir()
 	sysRoot := filepath.Join(root, "sys")

@@ -125,7 +125,9 @@ func TestManagerRefreshBuildsEC20Snapshot(t *testing.T) {
 			response: modem.Response{Final: "+CME ERROR: 100"},
 			err:      errors.New("CCID unsupported"),
 		},
-		{command: "AT+QCCID", response: okResponse("+QCCID: 8986001234567890123F")},
+		{command: "AT+QCCID", response: modem.Response{Final: "ERROR"}, err: errors.New("QCCID unsupported")},
+		{command: "AT+MCCID", response: okResponse("+MCCID: 8986001234567890123F")},
+
 		{command: "AT+CIMI", response: okResponse("460001234567890")},
 		{command: "AT+CRSM=176,28486,0,0,17", response: okResponse(`+CRSM: 144,0,"00434D4343FFFFFFFFFFFFFFFFFFFFFFFF"`)},
 		{command: "AT+CRSM=192,28589,0,0,0", response: okResponse(`+CRSM: 144,0,"620680020004FFFF"`)},
@@ -205,12 +207,58 @@ func TestManagerRefreshBuildsEC20Snapshot(t *testing.T) {
 	client.assertDone(t)
 }
 
+func TestSnapshotReadsML307IdentityAndMUESTATS(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: "ATI", response: okResponse("CMCC", "ML307A", "ML307A-DSLN-MTSH1S00")},
+		{command: "AT+CGMR", response: okResponse("ML307A-DSLN-MTSH1S00")},
+		{command: "AT+CPIN?", response: okResponse("+CPIN: READY")},
+		{command: "AT+CCID", response: modem.Response{Final: "ERROR"}, err: errors.New("unsupported")},
+		{command: "AT+QCCID", response: modem.Response{Final: "ERROR"}, err: errors.New("unsupported")},
+		{command: "AT+MCCID", response: okResponse("+MCCID: 89861118216007272115")},
+		{command: "AT+CIMI", response: okResponse("460011234567890")},
+		{command: "AT+CRSM=176,28486,0,0,17", response: modem.Response{Final: "ERROR"}, err: errors.New("unsupported")},
+		{command: "AT+CRSM=192,28589,0,0,0", response: modem.Response{Final: "ERROR"}, err: errors.New("unsupported")},
+		{command: "AT+CRSM=192,28478,0,0,0", response: modem.Response{Final: "ERROR"}, err: errors.New("unsupported")},
+		{command: "AT+CRSM=192,28479,0,0,0", response: modem.Response{Final: "ERROR"}, err: errors.New("unsupported")},
+		{command: "AT+CSQ", response: okResponse("+CSQ: 29,99")},
+		{command: `AT+MUESTATS="cell"`, response: okResponse(`+MUESTATS: "scell",4,460,01,1650,,106,-810,-50,-550,80,20.0`)},
+		{command: `AT+MUESTATS="sband"`, response: okResponse(`+MUESTATS: "sband",3`)},
+
+		{command: "AT+COPS?", response: okResponse(`+COPS: 0,2,"46001",7`)},
+		{command: "AT+CEREG?", response: okResponse(`+CEREG: 2,1,"10D4","00595179",7`)},
+		{command: "AT+CGSN", response: okResponse("86123456789012M1")},
+		{command: "AT+CGSN=1", response: okResponse("+CGSN: +867530912345678")},
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 1")},
+		{command: "AT+CNUM", response: okResponse(`+CNUM: "","+8613800138000",145`)},
+	}}
+	manager := &Manager{commandTimeout: time.Second}
+	snapshot, err := manager.readSnapshot(context.Background(), "test", modem.Candidate{Product: "ML307A"}, "", "", nil, client)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if snapshot.Model != "ML307A" || snapshot.Manufacturer != "CMCC" || snapshot.Firmware != "ML307A-DSLN-MTSH1S00" {
+		t.Fatalf("modem identity = manufacturer %q model %q firmware %q", snapshot.Manufacturer, snapshot.Model, snapshot.Firmware)
+	}
+	if snapshot.IMEI != "867530912345678" || snapshot.ICCID != "89861118216007272115" {
+		t.Fatalf("identifiers were not parsed")
+	}
+	if snapshot.AccessTech != "LTE" || snapshot.OperatorCode != "46001" || snapshot.Channel != "1650" || snapshot.Band != "B3" {
+		t.Fatalf("network metrics = %#v", snapshot)
+	}
+	if snapshot.RSRP == nil || *snapshot.RSRP != -81 || snapshot.RSRQ == nil || *snapshot.RSRQ != -5 ||
+		snapshot.RSSIDBm == nil || *snapshot.RSSIDBm != -55 || snapshot.SINR == nil || *snapshot.SINR != 8 {
+		t.Fatalf("unexpected MUESTATS metrics: %+v", snapshot)
+	}
+	client.assertDone(t)
+}
+
 func TestManagerRefreshReadsNativeWWANICCIDThroughQMIUIM(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{
 		{command: "ATI", response: okResponse("Qualcomm", "PCIe/MHI WWAN modem", "Revision: native-410")},
 		{command: "AT+CPIN?", response: okResponse("+CPIN: READY")},
 		{command: "AT+CCID", response: modem.Response{Final: "ERROR"}, err: errors.New("CCID unsupported")},
 		{command: "AT+QCCID", response: modem.Response{Final: "ERROR"}, err: errors.New("QCCID unsupported")},
+		{command: "AT+MCCID", response: modem.Response{Final: "ERROR"}, err: errors.New("MCCID unsupported")},
 		{command: "AT+CIMI", response: okResponse("234159611274418")},
 		{command: "AT+CRSM=176,28486,0,0,17", response: okResponse(`+CRSM: 106,130,""`)},
 		{command: "AT+CRSM=192,28589,0,0,0", response: okResponse(`+CRSM: 106,130,""`)},

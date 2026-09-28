@@ -207,6 +207,19 @@ func TestVerifySwitchedICCIDReadsLiveModem(t *testing.T) {
 	client.assertDone(t)
 }
 
+func TestVerifySwitchedICCIDReadsML307MCCID(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CCID", response: modem.Response{Final: "ERROR"}, err: errors.New("CCID unsupported")},
+		{command: "AT+QCCID", response: modem.Response{Final: "ERROR"}, err: errors.New("QCCID unsupported")},
+		{command: "AT+MCCID", response: okResponse("+MCCID: 89492026266006792824F")},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	if err := manager.verifySwitchedICCIDAttempts(context.Background(), id, "89492026266006792824", 1, 0); err != nil {
+		t.Fatalf("verifySwitchedICCIDAttempts: %v", err)
+	}
+	client.assertDone(t)
+}
+
 func TestVerifySwitchedICCIDAttemptsAllowsProactiveRefreshToSettle(t *testing.T) {
 	const target = "89492026266006792824"
 	client := &transcriptClient{steps: []clientStep{

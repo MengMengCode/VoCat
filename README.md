@@ -24,7 +24,7 @@
 
 **English** | [العربية](docs/README.ar.md) | [简体中文](docs/README.zh-CN.md) | [繁體中文](docs/README.zh-TW.md) | [Français](docs/README.fr.md) | [Русский](docs/README.ru.md) | [Español](docs/README.es.md) | [日本語](docs/README.ja.md)
 
-Vocat is an open-source web control panel and engineering toolkit for Quectel EC20/EC25-class cellular modems. It combines modem discovery, live radio status, AT and USSD terminals, SMS, WiFi Calling, eSIM management, network selection, proxy routing, notifications, audit logs, and release automation in one self-contained service.
+Vocat is an open-source web control panel and engineering toolkit for Quectel EC20/EC25-class and China Mobile ML307 series cellular modems. It combines modem discovery, live radio status, AT and USSD terminals, SMS, WiFi Calling, eSIM management, network selection, proxy routing, notifications, audit logs, and release automation in one self-contained service.
 
 The backend is written in Go, the interface is built with React and TypeScript, and the production frontend is embedded into the Go binary. A single executable contains the web application and uses SQLite for persistent state.
 
@@ -52,12 +52,13 @@ The backend is written in Go, the interface is built with React and TypeScript, 
 
 ## Supported hardware
 
-Vocat targets Qualcomm-based Quectel modules that expose compatible AT, QMI, serial, and USB networking interfaces, including:
+Vocat targets Qualcomm-based Quectel and China Mobile ML307 series modules that expose compatible AT, QMI, serial, and USB networking interfaces, including:
 
 - Quectel EC20
 - Quectel EC25
 - Quectel EG25 family
 - Compatible EG600 and related modules
+- China Mobile ML307 series (e.g. ML307A-E5, various OEMs)
 
 Available features depend on the module firmware, USB composition, SIM/eSIM capabilities, host drivers, radio network, and carrier configuration.
 
@@ -188,7 +189,7 @@ network configuration, and devices added after the container starts. The
 
 This mode intentionally gives Vocat broad access to the host's devices and
 network stack. Use it only on a trusted Linux host. The automatic discovery
-identifies supported Quectel USB modems (USB vendor ID `2c7c`) and PCIe/MHI
+identifies supported Quectel USB modems (USB vendor ID `2c7c`) and China Mobile ML307 series modules by product string, and PCIe/MHI
 modems exposed through the Linux WWAN subsystem; it does not identify arbitrary
 modem layouts. Mapping only individual nodes with `--device`, such as
 `/dev/ttyUSB2`, `/dev/cdc-wdm0`, or `/dev/wwan0qmi0`, limits the container to

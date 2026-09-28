@@ -2368,6 +2368,8 @@ func fillConfigFromPhysical(config *store.Device, entry device.Device) {
 		config.NetworkEnabled = false
 		config.SMSEnabled = true
 		config.VoWiFiEnabled = true
+	} else if modem.IsML307(candidate) {
+		config.DeviceType = store.DeviceTypeML307
 	} else if modem.IsDJI4GUSB(candidate.VendorID, candidate.ProductID) {
 		config.DeviceType = store.DeviceTypeDJI4G
 	}
@@ -2397,6 +2399,9 @@ func fillConfigFromPhysical(config *store.Device, entry device.Device) {
 func discoveredDeviceType(candidate modem.Candidate) string {
 	if candidate.HardwareKind == "pcsc" {
 		return store.DeviceTypeUSBSIMReader
+	}
+	if modem.IsML307(candidate) {
+		return store.DeviceTypeML307
 	}
 	if modem.IsDJI4GUSB(candidate.VendorID, candidate.ProductID) {
 		return store.DeviceTypeDJI4G

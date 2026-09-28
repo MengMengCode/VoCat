@@ -51,6 +51,10 @@ func TestDiscoveredDevicesPerformsFreshScanAndOmitsAbsentEntries(t *testing.T) {
 				Candidate: modem.Candidate{ID: "current-device", USBPath: "2-1"},
 			},
 			{
+				ID: "ml307-device", Discovered: true,
+				Candidate: modem.Candidate{ID: "ml307-device", VendorID: "2ecc", ProductID: "3012", Product: "ML307A", USBPath: "3-2"},
+			},
+			{
 				ID: "absent-device", Discovered: false,
 				Candidate: modem.Candidate{ID: "absent-device", USBPath: "3-1"},
 			},
@@ -75,6 +79,9 @@ func TestDiscoveredDevicesPerformsFreshScanAndOmitsAbsentEntries(t *testing.T) {
 	body := recorder.Body.String()
 	if !strings.Contains(body, "current-device") {
 		t.Fatalf("response omits current device: %s", body)
+	}
+	if !strings.Contains(body, `"device_type":"ml307"`) {
+		t.Fatalf("response does not classify ML307: %s", body)
 	}
 	if strings.Contains(body, "stale-device") || strings.Contains(body, "absent-device") {
 		t.Fatalf("response contains an absent device: %s", body)
