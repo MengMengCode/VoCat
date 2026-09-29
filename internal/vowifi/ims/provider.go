@@ -1031,8 +1031,19 @@ func (session *Session) buildRegister(
 	if pani := session.pAccessNetworkInfo(); pani != "" {
 		lines = append(lines, "P-Access-Network-Info: "+pani)
 	}
-	if value := strings.TrimSpace(registerOptions.CellularNetworkInfo); value != "" {
-		lines = append(lines, "Cellular-Network-Info: "+value)
+	cellularInfo := strings.TrimSpace(registerOptions.CellularNetworkInfo)
+	if cellularInfo == "" && vowifi.IsATT310280(session.request.Identity) {
+		mcc := strings.TrimSpace(session.request.Identity.HomeMCC)
+		mnc := strings.TrimSpace(session.request.Identity.HomeMNC)
+		if len(mnc) == 2 {
+			mnc = "0" + mnc
+		}
+		if mcc != "" && mnc != "" {
+			cellularInfo = fmt.Sprintf("3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=%s%s0000000;cell-info-age=0", mcc, mnc)
+		}
+	}
+	if cellularInfo != "" {
+		lines = append(lines, "Cellular-Network-Info: "+cellularInfo)
 	}
 
 	acceptContactTags := []string{
@@ -1151,6 +1162,9 @@ func (session *Session) imsUserAgent() string {
 		profile := vowifi.ResolveCarrierProfile(session.request.Identity)
 		if value := strings.TrimSpace(profile.IMSUserAgent); value != "" {
 			return value
+		}
+		if vowifi.IsATT310280(session.request.Identity) {
+			return "SimAdmin VoWiFi"
 		}
 	}
 	if session != nil && session.provider != nil {

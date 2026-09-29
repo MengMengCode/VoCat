@@ -153,13 +153,13 @@ func sendPushplusTextNotification(ctx context.Context, config map[string]any, ti
 	if err != nil {
 		return err
 	}
-	payload := map[string]any{"token": configString(config, "token"), "title": title, "content": text, "template": "txt", "timestamp": time.Now().UnixMilli()}
-	if topic := configString(config, "topic"); topic != "" {
-		payload["topic"] = topic
-	}
-	if channel := configString(config, "channel"); channel != "" {
-		payload["channel"] = channel
-	}
+	payload := buildPushplusPayload(
+		configString(config, "token"),
+		title,
+		text,
+		configString(config, "topic"),
+		configString(config, "channel"),
+	)
 	encoded, _ := json.Marshal(payload)
 	client, err := restrictedHTTPClient(ctx, 8*time.Second, "")
 	if err != nil {

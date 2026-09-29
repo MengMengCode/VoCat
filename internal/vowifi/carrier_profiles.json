@@ -614,6 +614,8 @@
         "proposal": "modern"
       },
       "ims": {
+        "identity_profile": "att",
+        "register_profile": "att",
         "ipsec_encryption": "aes-cbc"
       }
     },

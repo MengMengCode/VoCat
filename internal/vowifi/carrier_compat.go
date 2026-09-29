@@ -644,7 +644,46 @@ func applyCarrierProfileRule(base CarrierProfile, rule carrierProfileRule, sourc
 		base.AllowSMSWithoutContactConfirmation = *rule.IMS.AllowSMSWithoutContactConfirmation
 	}
 	base.IMSRegisterOptions = applyRegisterOptions(base.IMSRegisterOptions, rule.IMS.RegisterOptions)
+	if (base.IMSIdentityProfile == "" || base.IMSIdentityProfile == IMSProfileStandard) && isATTEPDG(base.EPDG) {
+		base.IMSIdentityProfile = IMSProfileATT
+	}
+	if (base.IMSRegisterProfile == "" || base.IMSRegisterProfile == IMSProfileStandard) && isATTEPDG(base.EPDG) {
+		base.IMSRegisterProfile = IMSProfileATT
+	}
+	if base.IMSRegisterProfile == IMSProfileATT {
+		if base.IMSRegisterOptions.ContactFormat == "" {
+			base.IMSRegisterOptions.ContactFormat = IMSContactFormatATT
+		}
+		if base.IMSRegisterOptions.ExpirySeconds == 0 {
+			base.IMSRegisterOptions.ExpirySeconds = 18400
+		}
+		if len(base.IMSRegisterOptions.ContactExtraTags) == 0 {
+			base.IMSRegisterOptions.ContactExtraTags = []string{`+g.3gpp.accesstype="wlan1"`}
+		}
+		if base.IMSRegisterOptions.SupportedHeader == nil {
+			supported := "path,sec-agree,gruu"
+			base.IMSRegisterOptions.SupportedHeader = &supported
+		}
+		if base.IMSRegisterOptions.PVisitedNetworkID == "" {
+			base.IMSRegisterOptions.PVisitedNetworkID = "one.att.net"
+		}
+		base.IMSRegisterOptions.PPreferredIdentity = true
+		if len(base.IMSRegisterOptions.AcceptContactTags) == 0 {
+			base.IMSRegisterOptions.AcceptContactTags = []string{
+				"*;+g.3gpp.smsip",
+				`*;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
+			}
+		}
+		if base.PANINode == "" {
+			base.PANINode = "000000000000"
+		}
+	}
 	return base
+}
+
+func isATTEPDG(epdg string) bool {
+	epdg = strings.ToLower(strings.TrimSpace(epdg))
+	return epdg == "epdg.epc.att.net" || strings.HasSuffix(epdg, ".att.net")
 }
 
 // EffectiveSubscriberIMSI returns the identity presented to EAP-AKA and IMS.

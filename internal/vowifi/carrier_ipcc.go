@@ -626,6 +626,7 @@ func importCarrierIKE(rule *carrierProfileRule, plists []ipccPlist, warnings *ip
 
 func importCarrierIMS(rule *carrierProfileRule, plists []ipccPlist, warnings *ipccWarningSet) {
 	useIPSec := false
+	isATT := isATTEPDG(rule.EPDG.Hostname)
 	for _, document := range plists {
 		for _, signaling := range dictionariesForKey(document.root, "Signaling") {
 			if value, ok := plistBool(signaling.value["UseIPSec"]); ok {
@@ -640,12 +641,25 @@ func importCarrierIMS(rule *carrierProfileRule, plists []ipccPlist, warnings *ip
 				rule.IMS.PANIEnabled = &enabled
 				rule.IMS.PANICountry = "AUTO"
 			}
+			if policy := plistString(signaling.value["RegistrationPolicy"]); strings.EqualFold(policy, "ATT") {
+				isATT = true
+			}
+			if node := strings.TrimSpace(plistString(signaling.value["WifiAccessInfo"])); node != "" {
+				rule.IMS.PANINode = node
+			}
 		}
 	}
 	if useIPSec {
 		// Apple does not describe the negotiated ESP algorithm in a portable
 		// field. Keep VoCat's safe AES-CBC default while recording the intent.
 		rule.IMS.IPSecEncryption = "aes-cbc"
+	}
+	if isATT {
+		rule.IMS.IdentityProfile = IMSProfileATT
+		rule.IMS.RegisterProfile = IMSProfileATT
+		if rule.IMS.PANINode == "" {
+			rule.IMS.PANINode = "000000000000"
+		}
 	}
 }
 

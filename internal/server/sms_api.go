@@ -15,6 +15,7 @@ import (
 
 	"vocat/internal/developer"
 	"vocat/internal/device"
+	"vocat/internal/smsdecode"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 )
@@ -97,8 +98,8 @@ func (s *Server) handleSMSContacts(w http.ResponseWriter, r *http.Request) {
 			"local_phone":    contact.LocalPhone,
 			"peer":           contact.Peer,
 			"display_name":   contact.DisplayName,
-			"last_message":   contact.LastMessage,
-			"last_content":   contact.LastMessage,
+			"last_message":   smsdecode.Preview(contact.LastMessage),
+			"last_content":   smsdecode.Preview(contact.LastMessage),
 			"last_timestamp": contact.LastTimestamp,
 			"direction":      contact.Direction,
 			"last_type":      "sms",
@@ -1116,6 +1117,7 @@ func (s *Server) StartSMSSyncLoop(ctx context.Context, interval time.Duration) {
 }
 
 func storedSMSResponse(message store.SMSMessage) map[string]any {
+	body := smsdecode.Preview(message.Body)
 	return map[string]any{
 		"id":             message.ID,
 		"message_id":     message.MessageID,
@@ -1126,8 +1128,8 @@ func storedSMSResponse(message store.SMSMessage) map[string]any {
 		"local_phone":    message.LocalPhone,
 		"peer":           message.Peer,
 		"direction":      message.Direction,
-		"body":           message.Body,
-		"content":        message.Body,
+		"body":           body,
+		"content":        body,
 		"sender":         ternaryString(message.Direction == "outbound", "", message.Peer),
 		"recipient":      ternaryString(message.Direction == "outbound", message.Peer, ""),
 		"type":           "sms",

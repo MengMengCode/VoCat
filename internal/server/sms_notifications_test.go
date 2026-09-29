@@ -117,3 +117,15 @@ func TestValidateSMSNotificationConfig(t *testing.T) {
 		t.Fatal("missing Pushplus token was accepted")
 	}
 }
+
+func TestBuildPushplusPayloadOmitsTimestamp(t *testing.T) {
+	payload := buildPushplusPayload("my-token", "测试标题", "测试内容", "my-topic", "wechat")
+	if _, ok := payload["timestamp"]; ok {
+		t.Fatalf("pushplus payload should omit timestamp to avoid server expiration rejection, got: %v", payload["timestamp"])
+	}
+	if payload["token"] != "my-token" || payload["title"] != "测试标题" || payload["content"] != "测试内容" ||
+		payload["template"] != "txt" || payload["topic"] != "my-topic" || payload["channel"] != "wechat" {
+		t.Fatalf("pushplus payload = %#v", payload)
+	}
+}
+

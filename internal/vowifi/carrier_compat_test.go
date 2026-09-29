@@ -158,15 +158,37 @@ func TestResolveCarrierProfileATT(t *testing.T) {
 	if !strings.Contains(profile.ID, "att") {
 		t.Fatalf("AT&T profile = %#v", profile)
 	}
+	if profile.IMSIdentityProfile != IMSProfileATT || profile.IMSRegisterProfile != IMSProfileATT {
+		t.Fatalf("AT&T IMS profiles = %q/%q, want %q/%q", profile.IMSIdentityProfile, profile.IMSRegisterProfile, IMSProfileATT, IMSProfileATT)
+	}
+	if profile.IMSRegisterOptions.ContactFormat != IMSContactFormatATT {
+		t.Fatalf("AT&T ContactFormat = %q, want %q", profile.IMSRegisterOptions.ContactFormat, IMSContactFormatATT)
+	}
+	if profile.IMSRegisterOptions.PVisitedNetworkID != "one.att.net" {
+		t.Fatalf("AT&T PVisitedNetworkID = %q, want one.att.net", profile.IMSRegisterOptions.PVisitedNetworkID)
+	}
 }
 
 func TestResolveCarrierProfileRedPocketOutranksBroadATTICCID(t *testing.T) {
-	profile := ResolveCarrierProfile(SIMIdentity{
+	identity := SIMIdentity{
 		ICCID: "8901410000000000001", IMSI: "310170000000001",
 		HomeMCC: "310", HomeMNC: "170", SPN: "Red Pocket", GID1: "42FFFF",
-	})
+	}
+	profile := ResolveCarrierProfile(identity)
 	if profile.ID != "ipcc-redpocket-310170" || profile.MatchSource != "hplmn+gid1" {
 		t.Fatalf("RedPocket profile = %#v", profile)
+	}
+	if profile.IMSIdentityProfile != IMSProfileATT || profile.IMSRegisterProfile != IMSProfileATT {
+		t.Fatalf("RedPocket IMS profiles = %q/%q, want %q/%q", profile.IMSIdentityProfile, profile.IMSRegisterProfile, IMSProfileATT, IMSProfileATT)
+	}
+	if !IsATT310280(identity) {
+		t.Fatalf("IsATT310280(RedPocket) = false, want true")
+	}
+	if profile.IMSRegisterOptions.ContactFormat != IMSContactFormatATT {
+		t.Fatalf("RedPocket ContactFormat = %q, want %q", profile.IMSRegisterOptions.ContactFormat, IMSContactFormatATT)
+	}
+	if profile.IMSRegisterOptions.PVisitedNetworkID != "one.att.net" {
+		t.Fatalf("RedPocket PVisitedNetworkID = %q, want one.att.net", profile.IMSRegisterOptions.PVisitedNetworkID)
 	}
 }
 
@@ -249,5 +271,40 @@ func TestCTExcelMVNOResolution(t *testing.T) {
 	}
 	if ctexcel.IMSDialURIScheme != "sip" || !ctexcel.IMSUserEqPhone {
 		t.Fatalf("CTExcel dial URI scheme = %q, userEqPhone = %v", ctexcel.IMSDialURIScheme, ctexcel.IMSUserEqPhone)
+	}
+}
+
+func TestCarrierSwapSeparation(t *testing.T) {
+	// 1. Red Pocket on AT&T (310280)
+	redPocket := ResolveCarrierProfile(SIMIdentity{
+		IMSI: "310280000000001", HomeMCC: "310", HomeMNC: "280", SPN: "Red Pocket", GID1: "42",
+	})
+	if redPocket.IMSIdentityProfile != IMSProfileATT || redPocket.IMSRegisterProfile != IMSProfileATT {
+		t.Fatalf("Red Pocket profile = %q/%q, want att/att", redPocket.IMSIdentityProfile, redPocket.IMSRegisterProfile)
+	}
+
+	// 2. Swapped to Vodafone UK (23415)
+	vodafone := ResolveCarrierProfile(SIMIdentity{
+		IMSI: "234150000000001", HomeMCC: "234", HomeMNC: "15",
+	})
+	if vodafone.IMSIdentityProfile != IMSProfileStandard || vodafone.IMSRegisterProfile != IMSProfileStandard {
+		t.Fatalf("Vodafone UK profile = %q/%q, want standard/standard", vodafone.IMSIdentityProfile, vodafone.IMSRegisterProfile)
+	}
+	if vodafone.IMSRegisterOptions.ContactFormat != "" || vodafone.IMSRegisterOptions.PVisitedNetworkID != "" {
+		t.Fatalf("Vodafone UK leaked AT&T register options: %#v", vodafone.IMSRegisterOptions)
+	}
+
+	// 3. Swapped to Cricket (on AT&T)
+	cricket := ResolveCarrierProfile(SIMIdentity{
+		ICCID: "8901150000000000001", IMSI: "310410000000001", HomeMCC: "310", HomeMNC: "410",
+	})
+	if cricket.IMSIdentityProfile != IMSProfileATT || cricket.IMSRegisterProfile != IMSProfileATT {
+		t.Fatalf("Cricket profile = %q/%q, want att/att", cricket.IMSIdentityProfile, cricket.IMSRegisterProfile)
+	}
+
+	// 4. Swapped to Unknown / Standard SIM (99999)
+	standard := ResolveCarrierProfile(SIMIdentity{HomeMCC: "999", HomeMNC: "99"})
+	if standard.IMSIdentityProfile != IMSProfileStandard || standard.IMSRegisterProfile != IMSProfileStandard {
+		t.Fatalf("Standard profile = %q/%q, want standard/standard", standard.IMSIdentityProfile, standard.IMSRegisterProfile)
 	}
 }
