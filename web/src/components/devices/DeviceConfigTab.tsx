@@ -36,7 +36,7 @@ export function DeviceConfigTab({ editConfig, deviceStatus, saving, deleting, on
   const isQmi = isQmiControl(controlDevice);
   const isMbim = String(editConfig?.deviceBackend || "").toLowerCase() === "mbim";
 	const isReader = editConfig?.deviceType === "usb_sim_reader";
-	const supportsCellularIMS = !isReader && editConfig?.deviceType !== "wifi_410";
+	const supportsCellularIMS = !isReader && editConfig?.deviceType !== "wifi_410" && editConfig?.deviceType !== "ml307";
 	const deviceOnline = deviceStatus ? isDeviceOnline(deviceStatus) : false;
 
   useEffect(() => {
