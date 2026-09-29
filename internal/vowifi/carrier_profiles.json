@@ -3799,8 +3799,16 @@
           "8985203"
         ]
       },
+      "epdg": {
+        "hostname": "wlan.three.com.hk"
+      },
       "ike": {
         "proposal": "modern"
+      },
+      "ims": {
+        "ipsec_mode": "optional",
+        "pani_enabled": true,
+        "pani_country": "AUTO"
       }
     },
     {

@@ -308,3 +308,25 @@ func TestCarrierSwapSeparation(t *testing.T) {
 		t.Fatalf("Standard profile = %q/%q, want standard/standard", standard.IMSIdentityProfile, standard.IMSRegisterProfile)
 	}
 }
+
+func TestThreeHKCarrierProfileAndPANI(t *testing.T) {
+	identity := SIMIdentity{
+		IMSI:    "454030000000001",
+		ICCID:   "8985203000000000001",
+		HomeMCC: "454",
+		HomeMNC: "03",
+	}
+	profile := ResolveCarrierProfile(identity)
+	if profile.ID != "ipcc-hutchison-hk-45403" {
+		t.Fatalf("3HK profile ID = %q, want ipcc-hutchison-hk-45403", profile.ID)
+	}
+	if profile.EPDG != "wlan.three.com.hk" {
+		t.Fatalf("3HK ePDG = %q, want wlan.three.com.hk", profile.EPDG)
+	}
+	if profile.IMSIPSecMode != "optional" {
+		t.Fatalf("3HK IMSIPSecMode = %q, want optional", profile.IMSIPSecMode)
+	}
+	if profile.PANIEnabled == nil || !*profile.PANIEnabled || profile.PANICountry != "AUTO" {
+		t.Fatalf("3HK PANI configuration = enabled=%v country=%q", profile.PANIEnabled, profile.PANICountry)
+	}
+}

@@ -337,7 +337,10 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 			sipResponseObserved := session.evidence.LastSIPCode != 0
 			session.abort()
 			lastErr = establishErr
-			if sipResponseObserved || attempt+1 >= len(transports) || ctx.Err() != nil {
+			if sipResponseObserved {
+				return nil, establishErr
+			}
+			if attempt+1 >= len(transports) || ctx.Err() != nil {
 				break
 			}
 			provider.logTransportFallback(request.Identity, candidate, transports[attempt+1], establishErr)
@@ -609,6 +612,7 @@ type Session struct {
 	conn             net.Conn
 	reader           *bufio.Reader
 	initialEndpoint  pcscfEndpoint
+	securityMode     SecurityMode
 	securityDeclined bool
 
 	callID             string
@@ -648,6 +652,16 @@ type Session struct {
 	refreshDone         chan struct{}
 }
 
+func (session *Session) configuredSecurityMode() SecurityMode {
+	if session != nil && session.securityMode != "" {
+		return session.securityMode
+	}
+	if session != nil && session.provider != nil {
+		return session.provider.config.SecurityMode
+	}
+	return SecurityRequired
+}
+
 func newSession(
 	provider *Provider,
 	request vowifi.IMSRequest,
@@ -670,12 +684,17 @@ func newSession(
 	}
 	instanceURI := "urn:uuid:" + instanceID
 	profile := vowifi.ResolveCarrierProfile(request.Identity)
+	securityMode := provider.config.SecurityMode
+	if profile.IMSIPSecMode != "" {
+		securityMode = SecurityMode(profile.IMSIPSecMode)
+	}
 	if profile.IMSRegisterOptions.ContactFormat == vowifi.IMSContactFormatGSMA {
 		instanceURI = sipInstanceID(request.Identity, instanceID)
 	}
 	refreshContext, refreshCancel := context.WithCancel(context.Background())
 	session := &Session{
 		provider:           provider,
+		securityMode:       securityMode,
 		request:            request,
 		identity:           identity,
 		endpoint:           endpoint,
@@ -703,7 +722,7 @@ func newSession(
 	if transport == "tcp" {
 		session.reader = bufio.NewReader(connection)
 	}
-	if provider.config.SecurityMode != SecurityDisabled {
+	if securityMode != SecurityDisabled {
 		localIP := addressIP(connection.LocalAddr())
 		if localIP == nil {
 			refreshCancel()
@@ -853,9 +872,16 @@ func safeSIPDiagnostic(value string) string {
 	return value
 }
 
+const maxRegistrationIntervalRetries = 2
+
 // register completes a REGISTER transaction, including AKA challenges, and
 // advances cached qop=auth credentials when the registrar permits preauthentication.
 func (session *Session) register(ctx context.Context, expires int) (*sipResponse, error) {
+	profile := vowifi.ResolveCarrierProfile(session.request.Identity)
+	if profile.IMSRegisterOptions.ExpirySeconds != 0 && expires > 0 {
+		expires = profile.IMSRegisterOptions.ExpirySeconds
+	}
+	intervalRetries := 0
 	for challenges := 0; challenges <= maxAuthenticationChallenges; challenges++ {
 		cseq := session.cseq
 		session.cseq++
@@ -888,6 +914,22 @@ func (session *Session) register(ctx context.Context, expires int) (*sipResponse
 			return nil, err
 		}
 		session.evidence.LastSIPCode = response.StatusCode
+		if response.StatusCode == 423 && expires > 0 {
+			minExpires, err := minExpiresFromResponse(response)
+			if err != nil {
+				return nil, err
+			}
+			if minExpires <= expires {
+				return nil, fmt.Errorf("ims: SIP 423 Min-Expires %d does not exceed requested Expires %d", minExpires, expires)
+			}
+			if intervalRetries >= maxRegistrationIntervalRetries {
+				return nil, errors.New("ims: too many SIP registration interval retries")
+			}
+			expires = minExpires
+			intervalRetries++
+			challenges--
+			continue
+		}
 		if response.StatusCode != 401 && response.StatusCode != 407 {
 			return response, nil
 		}
@@ -964,6 +1006,26 @@ func challengeFromResponse(response *sipResponse) (digestChallenge, error) {
 	return digestChallenge{}, lastError
 }
 
+func minExpiresFromResponse(response *sipResponse) (int, error) {
+	if response == nil {
+		return 0, errors.New("ims: missing SIP response")
+	}
+	for _, value := range response.values("Min-Expires") {
+		for _, part := range splitHeaderValues([]string{value}) {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			seconds, err := strconv.Atoi(part)
+			if err == nil && seconds > 0 {
+				return seconds, nil
+			}
+		}
+	}
+	return 0, errors.New("ims: missing or invalid Min-Expires header in SIP 423 response")
+}
+
+
 func (session *Session) buildRegister(
 	cseq uint32,
 	expires int,
@@ -972,9 +1034,6 @@ func (session *Session) buildRegister(
 ) ([]byte, error) {
 	profile := vowifi.ResolveCarrierProfile(session.request.Identity)
 	registerOptions := profile.IMSRegisterOptions
-	if registerOptions.ExpirySeconds != 0 {
-		expires = registerOptions.ExpirySeconds
-	}
 	branch, err := randomHex(12)
 	if err != nil {
 		return nil, err
@@ -1076,7 +1135,7 @@ func (session *Session) buildRegister(
 			authorization += ", integrity-protected=" + integrity
 		}
 		lines = append(lines, authorizationHeader+": "+authorization)
-	} else if session.securityOffered() && (cseq == 1 || session.securityActive) {
+	} else if session.shouldSendEmptyDigestAuthorization() {
 		identityAuthorization := session.emptyDigestAuthorization()
 		if session.securityActive {
 			identityAuthorization = strings.Replace(identityAuthorization, "integrity-protected=no", "integrity-protected=yes", 1)
@@ -1392,7 +1451,7 @@ func (session *Session) exchange(ctx context.Context, request []byte, cseq uint3
 // applyRegistrationEvidence records only the Contact and lifetime granted to
 // this session and retains replay-protected credentials for its next refresh.
 func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
-	if session.provider.config.SecurityMode == SecurityRequired && !session.securityActive {
+	if session.configuredSecurityMode() == SecurityRequired && !session.securityActive {
 		session.evidence.Registered = false
 		session.evidence.RegistrationState = "security_failed"
 		return ErrIPSecAgreementRequired

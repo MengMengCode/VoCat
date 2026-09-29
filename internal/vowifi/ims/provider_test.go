@@ -1,6 +1,7 @@
 package ims
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -691,7 +692,7 @@ func TestATTAndRedPocketDeriveIdentitiesAndBuildRegister(t *testing.T) {
 			encryptionAlgorithmsList: []string{"aes-cbc"},
 		},
 	}
-	packet, err := session.buildRegister(1, 3600, "", "")
+	packet, err := session.buildRegister(1, 18400, "", "")
 	if err != nil {
 		t.Fatalf("buildRegister() error = %v", err)
 	}
@@ -1097,5 +1098,257 @@ func TestRegistrationExpiryUsesMatchingContact(t *testing.T) {
 	got := s.expiresAt.Sub(before)
 	if got < 3590*time.Second || got > 3591*time.Second {
 		t.Fatalf("current Contact grants 3590 seconds but session expiry is %s", got)
+	}
+}
+
+func TestRegistrationRetries423UsingMinExpires(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	session := &Session{
+		provider:     &Provider{config: Config{SecurityMode: SecurityDisabled, TransactionTimeout: 2 * time.Second}},
+		request:      vowifi.IMSRequest{Identity: vowifi.SIMIdentity{HomeMCC: "454", HomeMNC: "03"}},
+		identity:     identitySet{user: "sub", domain: "ims.mnc003.mcc454.3gppnetwork.org", private: "sub@ims.mnc003.mcc454.3gppnetwork.org", public: "sip:sub@ims.mnc003.mcc454.3gppnetwork.org"},
+		endpoint:     pcscfEndpoint{host: "pcscf.example", port: 5060},
+		transport:    "tcp",
+		conn:         client,
+		reader:       bufio.NewReader(client),
+		callID:       "test-423",
+		fromTag:      "tag423",
+		instanceID:   "urn:uuid:test",
+		cseq:         1,
+		transactions: make(map[sipTransactionKey]chan *sipResponse),
+	}
+
+	serverDone := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		packet1, err := readSIPPacket(reader)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		if packet1.Request.value("Expires") != "3600" {
+			serverDone <- fmt.Errorf("initial expires = %q, want 3600", packet1.Request.value("Expires"))
+			return
+		}
+		resp423 := strings.Join([]string{
+			"SIP/2.0 423 Interval Too Brief",
+			"Via: " + packet1.Request.value("Via"),
+			"From: " + packet1.Request.value("From"),
+			"To: " + packet1.Request.value("To"),
+			"Call-ID: " + packet1.Request.value("Call-ID"),
+			"CSeq: " + packet1.Request.value("CSeq"),
+			"Min-Expires: 7200",
+			"Content-Length: 0",
+			"", "",
+		}, "\r\n")
+		if _, err := server.Write([]byte(resp423)); err != nil {
+			serverDone <- err
+			return
+		}
+
+		packet2, err := readSIPPacket(reader)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		if packet2.Request.value("Expires") != "7200" {
+			serverDone <- fmt.Errorf("retried expires = %q, want 7200", packet2.Request.value("Expires"))
+			return
+		}
+		if packet2.Request.value("CSeq") != "2 REGISTER" {
+			serverDone <- fmt.Errorf("retried CSeq = %q, want 2 REGISTER", packet2.Request.value("CSeq"))
+			return
+		}
+		resp200 := strings.Join([]string{
+			"SIP/2.0 200 OK",
+			"Via: " + packet2.Request.value("Via"),
+			"From: " + packet2.Request.value("From"),
+			"To: " + packet2.Request.value("To"),
+			"Call-ID: " + packet2.Request.value("Call-ID"),
+			"CSeq: " + packet2.Request.value("CSeq"),
+			"Contact: <sip:sub@pipe;transport=tcp>;expires=7200",
+			"Content-Length: 0",
+			"", "",
+		}, "\r\n")
+		_, err = server.Write([]byte(resp200))
+		serverDone <- err
+	}()
+
+	response, err := session.register(context.Background(), 3600)
+	if err != nil {
+		t.Fatalf("session.register() error = %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("session.register() status = %d, want 200", response.StatusCode)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestUnchallengedRegisterRetryRetainsEmptyAuthorization(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	session := &Session{
+		provider:     &Provider{config: Config{SecurityMode: SecurityRequired, TransactionTimeout: 2 * time.Second}},
+		securityMode: SecurityRequired,
+		request:      vowifi.IMSRequest{Identity: vowifi.SIMIdentity{HomeMCC: "454", HomeMNC: "03"}},
+		identity:     identitySet{user: "sub", domain: "ims.mnc003.mcc454.3gppnetwork.org", private: "sub@ims.mnc003.mcc454.3gppnetwork.org", public: "sip:sub@ims.mnc003.mcc454.3gppnetwork.org"},
+		endpoint:     pcscfEndpoint{host: "pcscf.example", port: 5060},
+		transport:    "tcp",
+		conn:         client,
+		reader:       bufio.NewReader(client),
+		callID:       "test-auth-retained",
+		fromTag:      "tag-auth",
+		instanceID:   "urn:uuid:test",
+		transactions: make(map[sipTransactionKey]chan *sipResponse),
+	}
+
+	serverDone := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(server)
+		packet1, err := readSIPPacket(reader)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		auth1 := packet1.Request.value("Authorization")
+		if !strings.Contains(auth1, "algorithm=AKAv1-MD5") || !strings.Contains(auth1, "integrity-protected=no") {
+			serverDone <- fmt.Errorf("initial Authorization = %q", auth1)
+			return
+		}
+		resp423 := strings.Join([]string{
+			"SIP/2.0 423 Interval Too Brief",
+			"Via: " + packet1.Request.value("Via"),
+			"From: " + packet1.Request.value("From"),
+			"To: " + packet1.Request.value("To"),
+			"Call-ID: " + packet1.Request.value("Call-ID"),
+			"CSeq: " + packet1.Request.value("CSeq"),
+			"Min-Expires: 7200",
+			"Content-Length: 0",
+			"", "",
+		}, "\r\n")
+		if _, err := server.Write([]byte(resp423)); err != nil {
+			serverDone <- err
+			return
+		}
+
+		packet2, err := readSIPPacket(reader)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		auth2 := packet2.Request.value("Authorization")
+		if !strings.Contains(auth2, "algorithm=AKAv1-MD5") || !strings.Contains(auth2, "integrity-protected=no") {
+			serverDone <- fmt.Errorf("retried Authorization omitted empty digest: %q", auth2)
+			return
+		}
+		resp200 := strings.Join([]string{
+			"SIP/2.0 200 OK",
+			"Via: " + packet2.Request.value("Via"),
+			"From: " + packet2.Request.value("From"),
+			"To: " + packet2.Request.value("To"),
+			"Call-ID: " + packet2.Request.value("Call-ID"),
+			"CSeq: " + packet2.Request.value("CSeq"),
+			"Contact: <sip:sub@pipe;transport=tcp>;expires=7200",
+			"Content-Length: 0",
+			"", "",
+		}, "\r\n")
+		_, err = server.Write([]byte(resp200))
+		serverDone <- err
+	}()
+
+	response, err := session.register(context.Background(), 3600)
+	if err != nil {
+		t.Fatalf("session.register() error = %v", err)
+	}
+	if response.StatusCode != 200 {
+		t.Fatalf("session.register() status = %d, want 200", response.StatusCode)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server error = %v", err)
+	}
+}
+
+func TestPCSIPResponseStopsAlternatePCSCFFailover(t *testing.T) {
+	listener1, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener1.Close()
+
+	listener2, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener2.Close()
+
+	listener2Received := make(chan bool, 1)
+	go func() {
+		buf := make([]byte, 1024)
+		_ = listener2.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		_, _, err := listener2.ReadFrom(buf)
+		if err == nil {
+			listener2Received <- true
+		} else {
+			listener2Received <- false
+		}
+	}()
+
+	go func() {
+		buf := make([]byte, 2048)
+		n, remote, err := listener1.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		packet, err := parseSIPPacket(buf[:n])
+		if err != nil || packet.Request == nil {
+			return
+		}
+		resp := strings.Join([]string{
+			"SIP/2.0 486 Busy Here",
+			"Via: " + packet.Request.value("Via"),
+			"From: " + packet.Request.value("From"),
+			"To: " + packet.Request.value("To"),
+			"Call-ID: " + packet.Request.value("Call-ID"),
+			"CSeq: " + packet.Request.value("CSeq"),
+			"Content-Length: 0",
+			"", "",
+		}, "\r\n")
+		_, _ = listener1.WriteTo([]byte(resp), remote)
+	}()
+
+	addr1 := listener1.LocalAddr().String()
+	addr2 := listener2.LocalAddr().String()
+
+	provider, err := NewProvider(&recordingAKA{}, Config{
+		LocalAddress:       "127.0.0.1",
+		Transport:          "udp",
+		TransactionTimeout: 1 * time.Second,
+		SecurityMode:       SecurityDisabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = provider.Start(context.Background(), vowifi.IMSRequest{
+		Identity: vowifi.SIMIdentity{IMSI: "001010123456789", HomeMCC: "001", HomeMNC: "01"},
+		Tunnel: evidenceTunnel{evidence: vowifi.TunnelEvidence{
+			Established: true,
+			LocalIPv4:   "127.0.0.1",
+			PCSCF:       []string{addr1, addr2},
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected error from 486 response, got nil")
+	}
+
+	if received := <-listener2Received; received {
+		t.Fatal("failover reached alternate P-CSCF after authoritative SIP response")
 	}
 }

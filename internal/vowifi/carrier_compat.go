@@ -41,6 +41,7 @@ type CarrierProfile struct {
 	IMSTransport                       string
 	IMSIdentityProfile                 string
 	IMSRegisterProfile                 string
+	IMSIPSecMode                       string
 	IMSIPSecEncryption                 string
 	SMSCenter                          string
 	PANIEnabled                        *bool
@@ -135,6 +136,7 @@ type carrierProfileIMS struct {
 	Transport                          string                        `json:"transport,omitempty"`
 	IdentityProfile                    string                        `json:"identity_profile,omitempty"`
 	RegisterProfile                    string                        `json:"register_profile,omitempty"`
+	IPSecMode                          string                        `json:"ipsec_mode,omitempty"`
 	IPSecEncryption                    string                        `json:"ipsec_encryption,omitempty"`
 	SMSCenter                          string                        `json:"sms_center,omitempty"`
 	PANIEnabled                        *bool                         `json:"pani_enabled,omitempty"`
@@ -348,6 +350,10 @@ func validCarrierProfileRule(rule carrierProfileRule) bool {
 	}
 	if encryption := strings.ToLower(strings.TrimSpace(rule.IMS.IPSecEncryption)); encryption != "" &&
 		encryption != "aes-cbc" && encryption != "null" {
+		return false
+	}
+	if mode := strings.ToLower(strings.TrimSpace(rule.IMS.IPSecMode)); mode != "" &&
+		mode != "required" && mode != "optional" && mode != "disabled" {
 		return false
 	}
 	if country := strings.ToUpper(strings.TrimSpace(rule.IMS.PANICountry)); country != "" &&
@@ -620,6 +626,9 @@ func applyCarrierProfileRule(base CarrierProfile, rule carrierProfileRule, sourc
 	}
 	if value := strings.ToLower(strings.TrimSpace(rule.IMS.IPSecEncryption)); value != "" {
 		base.IMSIPSecEncryption = value
+	}
+	if value := strings.ToLower(strings.TrimSpace(rule.IMS.IPSecMode)); value != "" {
+		base.IMSIPSecMode = value
 	}
 	base.SMSCenter = strings.TrimSpace(rule.IMS.SMSCenter)
 	if rule.IMS.PANIEnabled != nil {
