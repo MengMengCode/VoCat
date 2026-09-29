@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -433,6 +434,30 @@ func TestDeleteSMSRemovesModemCopyBeforeDatabaseRow(t *testing.T) {
 	}
 	if logs := hub.History(100, slog.LevelInfo, "cellular SMS received"); len(logs) != 1 {
 		t.Fatalf("sms.received logs after delete and resync = %d, want 1", len(logs))
+	}
+}
+
+func TestDeleteSMSWithoutDeviceConfig(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	message, err := database.SaveSMSMessage(ctx, store.SMSMessage{
+		DeviceID: "removed-device", ModemIMEI: "867394042309830",
+		MessageID: "modem:history", Source: "cellular_at",
+		Peer: "VOXI", Direction: "inbound", Body: "history",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: database, devices: fakeDeviceController{}}
+	if err := server.deleteSMSMessages(ctx, []store.SMSMessage{message}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SMSMessage(ctx, message.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("SMS after deletion: %v, want store.ErrNotFound", err)
 	}
 }
 

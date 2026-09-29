@@ -1036,7 +1036,8 @@ func (s *Server) deleteModemSMS(ctx context.Context, stored store.SMSMessage) er
 		}
 	}
 	if !found {
-		return device.ErrNotFound
+		// Removed devices leave SMS history that can be deleted locally.
+		return nil
 	}
 	_, physicalID, present := s.physicalForConfig(config)
 	if !present {
