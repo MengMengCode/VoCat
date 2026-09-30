@@ -25,6 +25,36 @@ import (
 
 const smsNotificationPollInterval = 2 * time.Second
 
+const (
+	// smsNotificationMaxAttempts bounds how many times one message is retried
+	// before the channel moves on. Without it a message that the provider
+	// permanently rejects stalls every later notification for that channel.
+	// Combined with the backoff below this keeps retrying for roughly thirteen
+	// minutes, so a short provider outage does not drop a notification.
+	smsNotificationMaxAttempts = 10
+	// smsNotificationMaxRetryDelay caps the exponential retry backoff so a
+	// provider that is down for a long time is still probed, just rarely.
+	smsNotificationMaxRetryDelay = 5 * time.Minute
+)
+
+// smsNotificationRetryDelay returns how long to wait before the next poll after
+// consecutiveFailures send failures in a row. The first failure keeps the
+// normal two-second cadence; every further failure doubles the delay, so a
+// permanently broken provider is not polled every two seconds forever.
+func smsNotificationRetryDelay(consecutiveFailures int) time.Duration {
+	delay := smsNotificationPollInterval
+	for attempt := 1; attempt < consecutiveFailures; attempt++ {
+		if delay >= smsNotificationMaxRetryDelay {
+			return smsNotificationMaxRetryDelay
+		}
+		delay *= 2
+	}
+	if delay > smsNotificationMaxRetryDelay {
+		return smsNotificationMaxRetryDelay
+	}
+	return delay
+}
+
 var smsOnlyNotificationChannels = []string{"bark", "email", "pushplus", "webhook", "wecom", "lark"}
 
 type smsNotification struct {
@@ -64,68 +94,111 @@ func (s *Server) StartSMSNotificationDispatchers(ctx context.Context) {
 	}
 }
 
+// smsNotificationCursor is the per-channel dispatcher state carried across
+// ticks. It is not safe for concurrent use; each channel owns one instance.
+type smsNotificationCursor struct {
+	id                  int64
+	initialized         bool
+	lastError           string
+	lastErrorAt         time.Time
+	consecutiveFailures int
+	failedMessageID     int64
+	failedAttempts      int
+}
+
+// logError reports a channel dispatch error through the server logger. Repeats
+// of the same error within a minute are suppressed so a provider that is down
+// cannot flood the log at the polling cadence.
+func (state *smsNotificationCursor) logError(server *Server, channel string, err error) {
+	if err.Error() != state.lastError || time.Since(state.lastErrorAt) >= time.Minute {
+		server.logSMSNotificationError(channel, err)
+		state.lastError, state.lastErrorAt = err.Error(), time.Now()
+	}
+}
+
+// smsNotificationSender delivers one notification. It is a parameter so the
+// retry policy can be tested without reaching a real provider.
+type smsNotificationSender func(context.Context, string, map[string]any, smsNotification) error
+
+// runSMSNotificationChannel polls one notification channel until ctx is
+// cancelled, sleeping for the delay returned by each scheduling tick so a
+// failing provider backs off instead of being retried every two seconds.
 func (s *Server) runSMSNotificationChannel(ctx context.Context, channel string) {
-	var cursor int64
-	cursorInitialized := false
-	lastError := ""
-	lastErrorAt := time.Time{}
+	state := &smsNotificationCursor{}
 	for ctx.Err() == nil {
-		if !cursorInitialized {
-			latest, err := s.store.LatestSMSMessageID(ctx)
-			if err != nil {
-				if err.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
-					s.logSMSNotificationError(channel, err)
-					lastError, lastErrorAt = err.Error(), time.Now()
-				}
-				if !waitTelegram(ctx, smsNotificationPollInterval) {
-					return
-				}
-				continue
-			}
-			cursor, cursorInitialized = latest, true
-			lastError = ""
-		}
-		config, enabled, configErr := s.smsNotificationConfig(ctx, channel)
-		if configErr != nil {
-			if configErr.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
-				s.logSMSNotificationError(channel, configErr)
-				lastError, lastErrorAt = configErr.Error(), time.Now()
-			}
-		} else if !enabled {
-			if newest, latestErr := s.store.LatestSMSMessageID(ctx); latestErr == nil {
-				cursor = newest
-			}
-			lastError = ""
-		} else {
-			messages, listErr := s.store.ListInboundSMSAfterID(ctx, cursor, 100)
-			if listErr != nil {
-				if listErr.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
-					s.logSMSNotificationError(channel, listErr)
-					lastError, lastErrorAt = listErr.Error(), time.Now()
-				}
-			} else {
-				for _, message := range messages {
-					if !smsMessageReadyToNotify(message) {
-						cursor = message.ID
-						continue
-					}
-					notification := s.newSMSNotification(ctx, message)
-					if sendErr := sendSMSNotification(s.notificationDestinationContext(ctx), channel, config, notification); sendErr != nil {
-						if sendErr.Error() != lastError || time.Since(lastErrorAt) >= time.Minute {
-							s.logSMSNotificationError(channel, sendErr)
-							lastError, lastErrorAt = sendErr.Error(), time.Now()
-						}
-						break
-					}
-					cursor = message.ID
-					lastError = ""
-				}
-			}
-		}
-		if !waitTelegram(ctx, smsNotificationPollInterval) {
+		delay := s.deliverSMSNotificationsOnce(ctx, channel, state, sendSMSNotification)
+		if !waitTelegram(ctx, delay) {
 			return
 		}
 	}
+}
+
+// deliverSMSNotificationsOnce performs one scheduling tick for a channel and
+// returns how long the caller should wait before the next tick.
+func (s *Server) deliverSMSNotificationsOnce(
+	ctx context.Context,
+	channel string,
+	state *smsNotificationCursor,
+	send smsNotificationSender,
+) time.Duration {
+	if !state.initialized {
+		latest, err := s.store.LatestSMSMessageID(ctx)
+		if err != nil {
+			state.logError(s, channel, err)
+			return smsNotificationPollInterval
+		}
+		state.id, state.initialized = latest, true
+		state.lastError = ""
+	}
+	config, enabled, configErr := s.smsNotificationConfig(ctx, channel)
+	if configErr != nil {
+		state.logError(s, channel, configErr)
+	} else if !enabled {
+		if newest, latestErr := s.store.LatestSMSMessageID(ctx); latestErr == nil {
+			state.id = newest
+		}
+		state.lastError = ""
+	} else {
+		messages, listErr := s.store.ListInboundSMSAfterID(ctx, state.id, 100)
+		if listErr != nil {
+			state.logError(s, channel, listErr)
+		} else {
+			for _, message := range messages {
+				if !smsMessageReadyToNotify(message) {
+					state.id = message.ID
+					continue
+				}
+				notification := s.newSMSNotification(ctx, message)
+				if sendErr := send(s.notificationDestinationContext(ctx), channel, config, notification); sendErr != nil {
+					if message.ID == state.failedMessageID {
+						state.failedAttempts++
+					} else {
+						state.failedMessageID, state.failedAttempts = message.ID, 1
+					}
+					state.consecutiveFailures++
+					state.logError(s, channel, sendErr)
+					if state.failedAttempts >= smsNotificationMaxAttempts {
+						// Give up on this one message so a permanently failing provider
+						// cannot stall every later notification for this channel.
+						state.logError(s, channel, fmt.Errorf(
+							"dropping inbound SMS notification %d after %d attempts: %w",
+							message.ID, state.failedAttempts, sendErr,
+						))
+						state.id = message.ID
+						state.failedMessageID, state.failedAttempts = 0, 0
+						state.consecutiveFailures = 0
+						continue
+					}
+					break
+				}
+				state.id = message.ID
+				state.lastError = ""
+				state.consecutiveFailures = 0
+				state.failedMessageID, state.failedAttempts = 0, 0
+			}
+		}
+	}
+	return smsNotificationRetryDelay(state.consecutiveFailures)
 }
 
 func smsMessageReadyToNotify(message store.SMSMessage) bool {
