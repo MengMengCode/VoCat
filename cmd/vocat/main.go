@@ -957,7 +957,7 @@ func configureVoWiFiRuntime(
 			} else if deviceConfig.DeviceType == store.DeviceTypeWiFi410 {
 				adapter = nativeQMIAdapter
 			}
-			return newVoWiFiOrchestrator(deviceConfig, database, adapter, logger, onIncomingCall)
+			return newVoWiFiOrchestrator(factoryContext, deviceConfig, database, adapter, logger, onIncomingCall)
 		},
 	})
 
@@ -1145,16 +1145,16 @@ func receivedIMSSMSMessageID(message ims.ReceivedSMS) string {
 }
 
 func newVoWiFiOrchestrator(
+	ctx context.Context,
 	deviceConfig store.Device,
 	database *store.Store,
 	adapter vowifiDeviceAdapter,
 	logger *slog.Logger,
 	onIncomingCall func(context.Context, ims.ReceivedCall) error,
 ) (*vowifi.Orchestrator, error) {
-	apn := deviceConfig.APN
-	if apn == "" {
-		apn = "ims"
-	}
+	// The ePDG tunnel is an IMS service: request the dedicated IMS APN and never
+	// the cellular data APN cached on the device or card policy.
+	apn := vowifisettings.IMSAPN(ctx, database)
 	vowifiLogger := logger.With("category", "vowifi", "device_id", deviceConfig.ID)
 	tunnelProvider, err := ike.NewProvider(ike.Config{
 		APN: apn, Logger: vowifiLogger, AutoProposalFallback: true,
