@@ -42,7 +42,7 @@ func (s *Server) notifyAutomaticTask(ctx context.Context, task store.AutomaticTa
 		status = "失败"
 		detail = firstNonEmpty(run.Error, "未知错误")
 	}
-	taskType := map[string]string{"sms": "发送短信", "call": "拨打电话", "public_ip": "获取漫游公网 IP"}[task.TaskType]
+	taskType := map[string]string{"sms": "发送短信", "call": "拨打电话", "public_ip": "获取漫游公网 IP", "cellular_attach": "仅注册蜂窝网络"}[task.TaskType]
 	environment := map[string]string{"vowifi": "VoWiFi", "cellular": "基站直连"}[task.Environment]
 	notification := automaticTaskNotification{
 		Title: "自动任务执行" + status,
