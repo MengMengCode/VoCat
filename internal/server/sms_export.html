@@ -1,0 +1,32 @@
+{{define "header"}}<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="{{policy}}">
+<title>VoCat 短信归档 / SMS archive</title><style>{{styles}}</style></head>
+<body><main class="sms-page">
+<header class="page-header"><div><div class="brand">VoCat</div><h1>短信归档</h1><p class="page-subtitle">离线阅读 · 时区：{{.HTMLLocation}}</p></div>
+<details class="archive-info"><summary class="button">归档信息</summary><div class="info-panel">
+<strong>VoCat 短信归档 / SMS archive</strong>
+<p>导出时间 / Exported: {{timestamp .ExportedAt}} · 格式版本 / Format: {{.FormatVersion}}</p>
+<p>显示时区 / Display timezone: {{.HTMLLocation}} · 各时间包含 UTC 偏移 / UTC offsets included</p>
+<p>设备 / Device: {{scope .Filters.DeviceID}}<br>开始时间（含）/ Since (inclusive): {{scope .Filters.Since}}<br>结束时间（不含）/ Until (exclusive): {{scope .Filters.Until}}</p>
+<p>仅包含已保存的短信。文件含敏感信息，不会脱敏或加密，请妥善保管。<br>Stored SMS only. This file contains private messages. Keep it secure.</p>
+</div></details></header>
+<noscript><p class="notice">脚本已禁用，以下显示全部会话。启用 JavaScript 可在本文件内切换会话、筛选设备和搜索；无需网络。</p></noscript>
+<div class="sms-main-layout ui-card" id="sms-reader">
+<aside class="device-column interactive" aria-label="设备"><div class="column-heading">设备</div><div id="device-list" class="device-list"></div></aside>
+<aside class="contact-column interactive" aria-label="联系人"><div class="contact-toolbar">
+<label class="mobile-device"><span class="sr-only">筛选设备</span><select id="device-select" aria-label="筛选设备"></select></label>
+<label class="search-box"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg><input id="contact-search" type="search" placeholder="搜索联系人/内容" aria-label="搜索联系人/内容" autocomplete="off"></label>
+</div><div id="contact-list" class="contact-list"></div><div id="no-contacts" class="empty-state" hidden><strong>没有匹配的会话</strong><span>请调整设备或搜索内容</span></div></aside>
+<div class="thread-column" id="sms-threads"><div id="no-selection" class="empty-state interactive" hidden><strong>请选择一个会话</strong><span>从左侧联系人列表进入短信明细</span></div>
+{{end}}
+{{define "conversation"}}<section class="sms-conversation" data-peer="{{.Peer}}" data-imei="{{.ModemIMEI}}" data-iccid="{{.ICCID}}" data-imsi="{{.IMSI}}">
+<header class="thread-header"><div class="thread-identity"><button type="button" class="back-button button-text interactive">返回</button><div class="thread-title"><h2>{{.Peer}}</h2><p class="thread-local">本机号码见短信详情</p></div></div><button type="button" class="latest-button button-text interactive">最新</button></header>
+<div class="sms-detail-scroll"><div class="message-groups">{{end}}
+{{define "message"}}<article class="sms-message {{if incoming .Direction}}incoming{{else}}outgoing{{end}}" data-device="{{.DeviceID}}" data-phone="{{.LocalPhone}}" data-time="{{timestamp .Timestamp}}" data-epoch="{{.Timestamp.Unix}}" data-read="{{.Read}}" data-id="{{.ID}}">
+<div class="sms-msg-wrapper"><div class="message-meta">{{if incoming .Direction}}<span class="sender">{{.Peer}}</span>{{end}}<span class="device-badge">{{.DeviceID}}</span><time datetime="{{timestamp .Timestamp}}">{{readableTime .Timestamp}}</time>{{if not (incoming .Direction)}}<span class="delivery {{deliveryClass .}}" title="{{deliveryTitle .}}">{{deliveryMark .}}</span>{{end}}</div>
+<pre class="message-bubble"><span>{{.Body}}</span></pre>
+<details class="message-details"><summary>详情</summary><div>ID: {{.ID}} · {{if incoming .Direction}}收到 / Received{{else}}发出 / Sent{{end}} · {{if .Read}}已读 / Read{{else}}未读 / Unread{{end}}<br>本机 / Local: {{.LocalPhone}} · 设备 / Device: {{.DeviceID}}<br>IMEI: {{.ModemIMEI}} · ICCID: {{.ICCID}} · IMSI: {{.IMSI}}<br>状态 / Status: {{.Status}} · 投递 / Delivery: {{.DeliveryState}} · 来源 / Source: {{.Source}} · 段数 / Parts: {{.PartsTotal}}</div></details>
+</div></article>{{end}}
+{{define "conversationEnd"}}</div></div><div class="readonly-bar">只读归档 · 发送和删除不可用</div></section>{{end}}
+{{define "footer"}}</div></div><footer class="archive-footer">共导出 / Exported: {{.}} 条 / messages.{{if eq . 0}} 没有匹配的短信 / No matching messages.{{end}}</footer></main><script>{{script}}</script></body></html>{{end}}

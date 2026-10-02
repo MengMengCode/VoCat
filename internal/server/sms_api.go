@@ -58,6 +58,8 @@ func (s *Server) handleSMSSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routeSMSAPI(w http.ResponseWriter, r *http.Request, cleanPath string) bool {
 	switch cleanPath {
+	case "sms/export":
+		s.handleSMSExport(w, r)
 	case "sms/contacts":
 		s.handleSMSContacts(w, r)
 	case "sms/thread":
