@@ -216,6 +216,44 @@ func (controller *esimAIDCaptureController) ESIMRenameProfile(_ context.Context,
 	return nil
 }
 
+type flightTrackingController struct {
+	fakeDeviceController
+	switchErr       error
+	lastFlightState bool
+}
+
+func (c *flightTrackingController) ESIMSwitchProfile(_ context.Context, _, _, _ string) error {
+	if c.switchErr != nil {
+		return c.switchErr
+	}
+	return nil
+}
+
+func (c *flightTrackingController) SetFlight(_ context.Context, _ string, enable bool) (device.FlightResult, error) {
+	c.lastFlightState = enable
+	return device.FlightResult{}, nil
+}
+
+type fakeEsimVoWiFiController struct {
+	enabled bool
+}
+
+func (f *fakeEsimVoWiFiController) RequestEnabled(_ string, enabled bool) (vowifi.State, error) {
+	f.enabled = enabled
+	return vowifi.State{Enabled: f.enabled}, nil
+}
+
+func (f *fakeEsimVoWiFiController) RequestReconnect(_ string) (vowifi.State, error) {
+	return vowifi.State{Enabled: f.enabled}, nil
+}
+
+func (f *fakeEsimVoWiFiController) State(_ string) (vowifi.State, error) {
+	if f.enabled {
+		return vowifi.State{Enabled: true, Active: true, Phase: "registered"}, nil
+	}
+	return vowifi.State{Enabled: false, Active: false, Phase: vowifi.PhaseIdle}, nil
+}
+
 func TestAttachSingleEUICCIdentityFillsProfileGroupMetadataKey(t *testing.T) {
 	groups := []map[string]any{{"eid": "", "aidHex": "", "profiles": []any{}}}
 	chipInfo := map[string]any{
@@ -636,6 +674,79 @@ func TestHandleESIMShapes(t *testing.T) {
 	storedDevice, err := database.Device(context.Background(), "dev1")
 	if err != nil || storedDevice.VoWiFiEnabled || storedDevice.APN != "profile.apn" {
 		t.Fatalf("switch did not restore device policy: %+v, %v", storedDevice, err)
+	}
+
+	// Switch failure path: when ESIMSwitchProfile fails (e.g. commandError),
+	// Switch failure path 1 (cellular device): when ESIMSwitchProfile fails,
+	// flight mode must be restored to disabled (false) so cellular network can resume.
+	failDatabaseCellular, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = failDatabaseCellular.Close() })
+	if err := failDatabaseCellular.UpsertDevice(context.Background(), store.Device{
+		ID:            "devCellular",
+		Name:          "devCellular",
+		VoWiFiEnabled: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flightRecorderCellular := &flightTrackingController{
+		fakeDeviceController: fakeDeviceController{entry: device.Device{ID: "devCellular"}},
+		switchErr:            device.ErrESIMCommandError,
+	}
+	failServerCellular := &Server{
+		store:               failDatabaseCellular,
+		logger:              regionTestLogger(),
+		maxRequestBodyBytes: 4096,
+		devices:             flightRecorderCellular,
+	}
+	swFailCellular := httptest.NewRecorder()
+	swFailReqCellular := httptest.NewRequest(http.MethodPost, "/esim/actions/switch", strings.NewReader(`{"iccid":"8900000000000000002"}`))
+	swFailReqCellular.Header.Set("Content-Type", "application/json")
+	failServerCellular.handleESIM(swFailCellular, swFailReqCellular, []string{"actions", "switch"}, "devCellular", true)
+	if swFailCellular.Code == http.StatusOK {
+		t.Fatalf("expected switch failure, got 200")
+	}
+	if flightRecorderCellular.lastFlightState {
+		t.Fatalf("switch failure left cellular device stranded in flight mode!")
+	}
+
+	// Switch failure path 2 (VoWiFi device): when ESIMSwitchProfile fails,
+	// VoWiFi runtime must be restored to enabled.
+	failDatabaseVoWiFi, err := store.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = failDatabaseVoWiFi.Close() })
+	if err := failDatabaseVoWiFi.UpsertDevice(context.Background(), store.Device{
+		ID:            "devVoWiFi",
+		Name:          "devVoWiFi",
+		VoWiFiEnabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flightRecorderVoWiFi := &flightTrackingController{
+		fakeDeviceController: fakeDeviceController{entry: device.Device{ID: "devVoWiFi"}},
+		switchErr:            device.ErrESIMCommandError,
+	}
+	vowifiRecorder := &fakeEsimVoWiFiController{enabled: true}
+	failServerVoWiFi := &Server{
+		store:               failDatabaseVoWiFi,
+		logger:              regionTestLogger(),
+		maxRequestBodyBytes: 4096,
+		devices:             flightRecorderVoWiFi,
+		vowifi:              vowifiRecorder,
+	}
+	swFailVoWiFi := httptest.NewRecorder()
+	swFailReqVoWiFi := httptest.NewRequest(http.MethodPost, "/esim/actions/switch", strings.NewReader(`{"iccid":"8900000000000000002"}`))
+	swFailReqVoWiFi.Header.Set("Content-Type", "application/json")
+	failServerVoWiFi.handleESIM(swFailVoWiFi, swFailReqVoWiFi, []string{"actions", "switch"}, "devVoWiFi", true)
+	if swFailVoWiFi.Code == http.StatusOK {
+		t.Fatalf("expected switch failure, got 200")
+	}
+	if !vowifiRecorder.enabled {
+		t.Fatalf("switch failure did not restore VoWiFi runtime!")
 	}
 
 	// Disable happy path routes the active profile to ES10c DisableProfile.

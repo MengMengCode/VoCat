@@ -177,6 +177,45 @@ func buildEnableProfileRequestWithRefresh(iccid string, refresh bool) ([]byte, e
 	return derConstruct(0xBF31, profileID, derEncode(0x81, []byte{refreshFlag})), nil
 }
 
+// buildEnableProfileRequestWithAID constructs an ES10c EnableProfileRequest
+// with ISD-P AID addressing (tag 4F) per GSMA SGP.22 clause 5.7.17:
+//
+//	BF31 { A0 { 4F <AID> } 81 01 <refreshFlag> }
+func buildEnableProfileRequestWithAID(aid []byte, refresh bool) ([]byte, error) {
+	if len(aid) == 0 || len(aid) > 16 {
+		return nil, fmt.Errorf("esim: invalid ISD-P AID length %d (must be 1-16 octets)", len(aid))
+	}
+	profileID := derConstruct(0xA0, derEncode(0x4F, aid))
+	refreshFlag := byte(0x00)
+	if refresh {
+		refreshFlag = 0xFF
+	}
+	return derConstruct(0xBF31, profileID, derEncode(0x81, []byte{refreshFlag})), nil
+}
+
+// isHexAID reports whether an identifier represents an ISD-P AID (a hexadecimal
+// string of up to 16 octets / 32 hex chars) rather than a decimal ICCID.
+func isHexAID(id string) bool {
+	id = strings.TrimSpace(id)
+	if len(id) < 10 || len(id) > 32 || len(id)%2 != 0 {
+		return false
+	}
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	if len(id) == 32 {
+		return true
+	}
+	for _, c := range id {
+		if (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			return true
+		}
+	}
+	return false
+}
+
 // parseCSIM extracts the payload and status word from an AT+CSIM response.
 func parseCSIM(response modem.Response) ([]byte, int, error) {
 	value := valueAfterPrefix(response, "+CSIM:")
@@ -817,6 +856,34 @@ func boundESIMContext(ctx context.Context) (context.Context, context.CancelFunc)
 	return context.WithTimeout(ctx, 10*time.Second)
 }
 
+// resolveProfileAID attempts to look up the ISD-P AID for a profile by its ICCID.
+// It checks the in-memory eSIM cache first; if missing and an active eUICC
+// channel is provided, it executes a live GetProfilesInfo (BF2D) on the open channel.
+func (manager *Manager) resolveProfileAID(ctx context.Context, id string, channel *euiccChannel, iccid string) string {
+	clean := strings.TrimSpace(iccid)
+	if cached, ok := manager.cachedESIMInfo(id); ok {
+		for _, p := range cached.Profiles {
+			if strings.TrimSpace(p.ICCID) == clean && strings.TrimSpace(p.AID) != "" {
+				return strings.TrimSpace(p.AID)
+			}
+		}
+	}
+	if channel != nil {
+		probeContext, cancelProbe := context.WithTimeout(context.WithoutCancel(ctx), csimAPDUTimeout)
+		payload, err := channel.es10(probeContext, []byte{0xBF, 0x2D, 0x00})
+		cancelProbe()
+		if err == nil {
+			profiles := parseProfilesInfo(payload)
+			for _, p := range profiles {
+				if strings.TrimSpace(p.ICCID) == clean && strings.TrimSpace(p.AID) != "" {
+					return strings.TrimSpace(p.AID)
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // ESIMSwitchProfile enables one profile by ICCID via ES10c EnableProfile.
 func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid string, aidHex string) error {
 	iccid = strings.TrimSpace(iccid)
@@ -856,7 +923,18 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 			refreshRequested = false
 		}
 	}
-	der, err := buildEnableProfileRequestWithRefresh(iccid, refreshRequested)
+	var der []byte
+	if isHexAID(iccid) {
+		aidBytes, hexErr := hex.DecodeString(strings.TrimSpace(iccid))
+		if hexErr != nil {
+			channel.close(context.Background())
+			manager.unlockESIM()
+			return fmt.Errorf("esim: decode ISD-P AID %q: %w", iccid, hexErr)
+		}
+		der, err = buildEnableProfileRequestWithAID(aidBytes, refreshRequested)
+	} else {
+		der, err = buildEnableProfileRequestWithRefresh(iccid, refreshRequested)
+	}
 	if err != nil {
 		channel.close(context.Background())
 		manager.unlockESIM()
@@ -880,6 +958,31 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	// Parse the card-level result before waiting for an indication, otherwise
 	// every retry needlessly waits for the refresh timeout.
 	resultBeforeClose, resultPresentBeforeClose := enableProfileResult(payload)
+
+	// If addressing by ICCID was rejected by the eUICC with commandError (0x07),
+	// undefinedError (0x7F), or notFound (0x01) — as observed on Eastcompeace (ECP,
+	// e.g. Apex / 5ber) removable eUICC cards with firmware 4.2.0 due to an
+	// internal card manager directory lookup bug — attempt fallback to ISD-P AID
+	// addressing per GSMA SGP.22 clause 5.7.17 while the logical channel remains open.
+	if err == nil && resultPresentBeforeClose && !isHexAID(iccid) &&
+		(byte(resultBeforeClose) == 7 || byte(resultBeforeClose) == 0x7F || byte(resultBeforeClose) == 1) {
+		if aidStr := manager.resolveProfileAID(ctx, id, channel, iccid); aidStr != "" {
+			if aidBytes, decErr := hex.DecodeString(aidStr); decErr == nil && len(aidBytes) > 0 {
+				if aidDer, buildErr := buildEnableProfileRequestWithAID(aidBytes, refreshRequested); buildErr == nil {
+					aidCommitContext, cancelAIDCommit := context.WithTimeout(context.WithoutCancel(ctx), csimAPDUTimeout)
+					aidPayload, aidErr := channel.es10(aidCommitContext, aidDer)
+					cancelAIDCommit()
+					if aidErr == nil {
+						if aidRes, aidOk := enableProfileResult(aidPayload); aidOk {
+							payload = aidPayload
+							resultBeforeClose = aidRes
+							resultPresentBeforeClose = aidOk
+						}
+					}
+				}
+			}
+		}
+	}
 	if err == nil && resultPresentBeforeClose && byte(resultBeforeClose) == 5 && nativeQMI {
 		// Registering CAT2 may immediately deliver a proactive command that was
 		// already pending before EnableProfile. Drain it on catBusy so the raw
@@ -1061,13 +1164,15 @@ func (manager *Manager) markCachedProfileEnabled(id, iccid string) {
 	manager.esimCacheMu.Lock()
 	info, ok := manager.esimCache[id]
 	if ok {
+		clean := strings.TrimSpace(iccid)
 		for index := range info.Profiles {
-			if info.Profiles[index].ICCID == iccid {
-				info.Profiles[index].State = 1
-				info.Profiles[index].StateText = i18n.T("已启用")
+			p := &info.Profiles[index]
+			if strings.TrimSpace(p.ICCID) == clean || (strings.TrimSpace(p.AID) != "" && strings.EqualFold(strings.TrimSpace(p.AID), clean)) {
+				p.State = 1
+				p.StateText = i18n.T("已启用")
 			} else {
-				info.Profiles[index].State = 0
-				info.Profiles[index].StateText = i18n.T("已禁用")
+				p.State = 0
+				p.StateText = i18n.T("已禁用")
 			}
 		}
 		manager.esimCache[id] = info
@@ -1079,10 +1184,12 @@ func (manager *Manager) markCachedProfileDisabled(id, iccid string) {
 	manager.esimCacheMu.Lock()
 	info, ok := manager.esimCache[id]
 	if ok {
+		clean := strings.TrimSpace(iccid)
 		for index := range info.Profiles {
-			if info.Profiles[index].ICCID == iccid {
-				info.Profiles[index].State = 0
-				info.Profiles[index].StateText = i18n.T("已禁用")
+			p := &info.Profiles[index]
+			if strings.TrimSpace(p.ICCID) == clean || (strings.TrimSpace(p.AID) != "" && strings.EqualFold(strings.TrimSpace(p.AID), clean)) {
+				p.State = 0
+				p.StateText = i18n.T("已禁用")
 				break
 			}
 		}
@@ -1199,12 +1306,16 @@ func enableProfileResult(payload []byte) (int, bool) {
 }
 
 var (
-	ErrESIMEnableProfileNotFound  = errors.New("esim: profile to enable was not found on the selected eUICC")
-	ErrESIMProfileNotDisabled     = errors.New("esim: profile is not currently disabled")
-	ErrESIMEnableDisallowedPolicy = errors.New("esim: profile switch is not allowed by the active profile policy")
-	ErrESIMWrongProfileReenabling = errors.New("esim: profile cannot be re-enabled from the current profile state")
-	ErrESIMEnableCATBusy          = errors.New("esim: card application toolkit is busy; retry enabling later")
-	ErrESIMEnableUndefined        = errors.New("esim: eUICC returned undefinedError while enabling this profile; the card did not provide a more specific reason")
+	ErrESIMEnableProfileNotFound      = errors.New("esim: profile to enable was not found on the selected eUICC")
+	ErrESIMProfileNotDisabled         = errors.New("esim: profile is not currently disabled")
+	ErrESIMEnableDisallowedPolicy     = errors.New("esim: profile switch is not allowed by the active profile policy")
+	ErrESIMWrongProfileReenabling     = errors.New("esim: profile cannot be re-enabled from the current profile state")
+	ErrESIMEnableCATBusy              = errors.New("esim: card application toolkit is busy; retry enabling later")
+	ErrESIMDisallowedByEnterpriseRule = errors.New("esim: profile switch is not allowed by enterprise rule")
+	ErrESIMCommandError               = errors.New("esim: eUICC internal command error (commandError); profile cannot be enabled by ICCID on this card firmware")
+	ErrESIMDisallowedForRPM           = errors.New("esim: profile switch is disallowed for roaming position management")
+	ErrESIMNoEsimPortAvailable        = errors.New("esim: no eSIM port available on eUICC")
+	ErrESIMEnableUndefined            = errors.New("esim: eUICC returned undefinedError while enabling this profile; the card did not provide a more specific reason")
 )
 
 // enableProfileResponseError maps the complete SGP.22 EnableProfileResult
@@ -1228,6 +1339,14 @@ func enableProfileResponseError(result byte, payload []byte) error {
 		return wrap(ErrESIMWrongProfileReenabling)
 	case 5:
 		return wrap(ErrESIMEnableCATBusy)
+	case 6:
+		return wrap(ErrESIMDisallowedByEnterpriseRule)
+	case 7:
+		return wrap(ErrESIMCommandError)
+	case 9:
+		return wrap(ErrESIMDisallowedForRPM)
+	case 10:
+		return wrap(ErrESIMNoEsimPortAvailable)
 	case 0x7F:
 		return wrap(ErrESIMEnableUndefined)
 	default:

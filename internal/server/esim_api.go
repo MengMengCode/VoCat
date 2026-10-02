@@ -458,6 +458,8 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 	_ = controller.SetWriteDeadline(time.Time{})
 	aidHex := firstNonEmpty(request.AIDHex, request.AIDHexCamel)
 	if err := s.devices.ESIMSwitchProfile(r.Context(), physicalID, iccid, aidHex); err != nil {
+		endMaintenance()
+		s.restoreProfileSwitchFailureState(r.Context(), configuredID, physicalID)
 		s.writeDeviceError(w, err)
 		return
 	}
@@ -565,6 +567,41 @@ func (s *Server) quiesceVoWiFiForProfileSwitch(ctx context.Context, configuredID
 		case <-waitContext.Done():
 			return fmt.Errorf("wait for VoWiFi to stop before switching profile: %w", waitContext.Err())
 		case <-ticker.C:
+		}
+	}
+}
+
+// restoreProfileSwitchFailureState restores the device's flight mode and VoWiFi
+// runtime state to their pre-switch configurations when ESIMSwitchProfile fails,
+// preventing the modem from remaining disabled/stranded in flight mode.
+func (s *Server) restoreProfileSwitchFailureState(ctx context.Context, configuredID, physicalID string) {
+	if s.store == nil || s.devices == nil {
+		return
+	}
+	config, err := s.store.Device(ctx, configuredID)
+	if err != nil {
+		_, _ = s.devices.SetFlight(context.Background(), physicalID, false)
+		return
+	}
+	if config.VoWiFiEnabled && s.vowifi != nil {
+		if _, err := s.vowifi.RequestEnabled(configuredID, true); err != nil {
+			s.logger.Warn("profile switch failed; error restoring VoWiFi runtime", "device_id", configuredID, "error", err)
+		}
+		shouldDisableFlight := false
+		if runtime, rErr := s.store.DeviceRuntime(ctx, configuredID); rErr == nil && runtime.ICCID != "" {
+			if policy, pErr := s.store.CardPolicy(ctx, runtime.ICCID); pErr == nil && !policy.AirplaneEnabled {
+				shouldDisableFlight = true
+			}
+		}
+		if shouldDisableFlight {
+			if _, err := s.devices.SetFlight(context.Background(), physicalID, false); err != nil {
+				s.logger.Warn("profile switch failed; error restoring airplane mode", "device_id", configuredID, "error", err)
+			}
+		}
+	} else {
+		// VoWiFi was disabled; restore flight mode to disabled so cellular network can resume.
+		if _, err := s.devices.SetFlight(context.Background(), physicalID, false); err != nil {
+			s.logger.Warn("profile switch failed; error restoring airplane mode", "device_id", configuredID, "error", err)
 		}
 	}
 }
