@@ -257,6 +257,7 @@ func (s *Server) ensureAutomaticTaskProfile(ctx context.Context, task store.Auto
 	if strings.EqualFold(strings.TrimSpace(entry.Snapshot.ICCID), strings.TrimSpace(task.ProfileICCID)) {
 		return config, entry, physicalID, nil
 	}
+	originalNetworkEnabled := config.NetworkEnabled
 	if task.TaskType == "cellular_attach" {
 		// Persist the disabled intent before switching: device reappearance can
 		// otherwise make the lifecycle reconciler restore the previous data state.
@@ -282,6 +283,18 @@ func (s *Server) ensureAutomaticTaskProfile(ctx context.Context, task store.Auto
 		}
 	}()
 	if _, err := s.devices.SetFlight(ctx, physicalID, true); err != nil {
+		// Data stopped successfully, and ESIMSwitchProfile has not been called.
+		// Restore intent only here; after a switch attempt the active SIM is uncertain.
+		if task.TaskType == "cellular_attach" {
+			cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			config.NetworkEnabled = originalNetworkEnabled
+			if restoreErr := s.store.UpsertDevice(cleanupContext, config); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restore device intent before profile switch: %w", restoreErr))
+			} else {
+				desiredData = config.NetworkEnabled && !config.VoWiFiEnabled
+			}
+		}
 		return store.Device{}, device.Device{}, "", fmt.Errorf("enter airplane mode before profile switch: %w", err)
 	}
 	if err := s.devices.ESIMSwitchProfile(ctx, physicalID, task.ProfileICCID, task.ProfileAID); err != nil {

@@ -13,9 +13,22 @@ import (
 
 type registrationSwitchController struct {
 	registrationTaskController
-	server    *Server
-	switchErr error
-	switched  bool
+	server       *Server
+	switchErr    error
+	flightErr    error
+	cancelFlight context.CancelFunc
+	switched     bool
+}
+
+func (c *registrationSwitchController) SetFlight(ctx context.Context, id string, enabled bool) (device.FlightResult, error) {
+	result, err := c.registrationTaskController.SetFlight(ctx, id, enabled)
+	if c.cancelFlight != nil {
+		c.cancelFlight()
+	}
+	if c.flightErr != nil {
+		return result, c.flightErr
+	}
+	return result, err
 }
 
 func (c *registrationSwitchController) ESIMSwitchProfile(ctx context.Context, id, iccid, aid string) error {
@@ -41,11 +54,15 @@ func (c *registrationSwitchController) ESIMSwitchProfile(ctx context.Context, id
 
 func TestCellularRegistrationDisablesDataBeforeProfileSwitch(t *testing.T) {
 	for _, tc := range []struct {
-		name               string
-		stopErr, switchErr error
-		wantError          string
-		wantSwitch         bool
+		name                                         string
+		stopErr, switchErr, flightErr                error
+		initiallyDisabled, cancelFlight, wantEnabled bool
+		wantError                                    string
+		wantSwitch                                   bool
 	}{
+		{name: "flight fails restores enabled intent", flightErr: errors.New("flight failed"), wantError: "flight failed", wantEnabled: true},
+		{name: "flight fails preserves disabled intent", flightErr: errors.New("flight failed"), initiallyDisabled: true, wantError: "flight failed"},
+		{name: "flight cancellation still restores intent", flightErr: context.Canceled, cancelFlight: true, wantError: "context canceled", wantEnabled: true},
 		{name: "device reappears during switch", wantSwitch: true},
 		{name: "stop fails", stopErr: errors.New("stop failed"), wantError: "stop cellular data before profile switch"},
 		{name: "switch fails", switchErr: errors.New("switch rejected"), wantError: "switch rejected", wantSwitch: true},
@@ -56,7 +73,11 @@ func TestCellularRegistrationDisablesDataBeforeProfileSwitch(t *testing.T) {
 			s.devices = c
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := s.store.UpsertDevice(ctx, store.Device{ID: "dev1", Name: "Modem", NetworkEnabled: true}); err != nil {
+			c.flightErr = tc.flightErr
+			if tc.cancelFlight {
+				c.cancelFlight = cancel
+			}
+			if err := s.store.UpsertDevice(ctx, store.Device{ID: "dev1", Name: "Modem", NetworkEnabled: !tc.initiallyDisabled}); err != nil {
 				t.Fatal(err)
 			}
 			// Even if the target card normally uses data, it must not connect while switching.
@@ -80,8 +101,12 @@ func TestCellularRegistrationDisablesDataBeforeProfileSwitch(t *testing.T) {
 				}
 			}
 			stored, err := s.store.Device(context.Background(), "dev1")
-			if err != nil || stored.NetworkEnabled {
-				t.Fatalf("data intent not disabled: %+v, %v", stored, err)
+			if err != nil || stored.NetworkEnabled != tc.wantEnabled {
+				t.Fatalf("data intent: %+v, %v, want enabled=%v", stored, err, tc.wantEnabled)
+			}
+			status := s.cellularDataRuntime().status("dev1", stored.NetworkEnabled)
+			if status.DesiredEnabled != tc.wantEnabled || status.MaintenancePhase != "" {
+				t.Fatalf("runtime intent=%+v, want enabled=%v", status, tc.wantEnabled)
 			}
 			policy, err := s.store.CardPolicy(context.Background(), "test-card")
 			if err != nil || !policy.NetworkEnabled || policy.Source != "user" {
