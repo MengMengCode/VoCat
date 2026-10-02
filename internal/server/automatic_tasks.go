@@ -257,6 +257,19 @@ func (s *Server) ensureAutomaticTaskProfile(ctx context.Context, task store.Auto
 	if strings.EqualFold(strings.TrimSpace(entry.Snapshot.ICCID), strings.TrimSpace(task.ProfileICCID)) {
 		return config, entry, physicalID, nil
 	}
+	if task.TaskType == "cellular_attach" {
+		// Persist the disabled intent before switching: device reappearance can
+		// otherwise make the lifecycle reconciler restore the previous data state.
+		config.NetworkEnabled = false
+		if err := s.store.UpsertDevice(ctx, config); err != nil {
+			return store.Device{}, device.Device{}, "", err
+		}
+		request := s.cellularNetworkRequest(ctx, config, entry.Snapshot)
+		request.Enabled = false
+		if _, err := s.applyCellularData(ctx, config.ID, physicalID, request); err != nil {
+			return store.Device{}, device.Device{}, "", fmt.Errorf("stop cellular data before profile switch: %w", err)
+		}
+	}
 	progress("正在切换到任务指定的 eSIM Profile")
 	desiredData := config.NetworkEnabled && !config.VoWiFiEnabled
 	dataRuntime := s.cellularDataRuntime()
