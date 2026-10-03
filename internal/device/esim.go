@@ -884,7 +884,10 @@ func (manager *Manager) resolveProfileAID(ctx context.Context, id string, channe
 	return ""
 }
 
-// ESIMSwitchProfile enables one profile by ICCID via ES10c EnableProfile.
+// ESIMSwitchProfile enables a profile via ES10c and verifies its live ICCID.
+// PC/SC uses refresh=false and a host reset to apply the switch; modem transports
+// retain their own REFRESH handling. Accepting EnableProfile is not sufficient:
+// recovery must expose the requested ICCID before this method reports success.
 func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid string, aidHex string) error {
 	iccid = strings.TrimSpace(iccid)
 	if iccid == "" {
@@ -904,7 +907,11 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 		manager.unlockESIM()
 		return err
 	}
-	refreshRequested := !nativeQMI
+	// PC/SC applies profile switches with the host reset below.
+	// Some removable eUICCs reject refresh=true with commandError (0x07),
+	// including when addressed by AID. Use the existing CloseWithReset below
+	// to apply the switch before recovering and verifying the live ICCID.
+	refreshRequested := !nativeQMI && channel.pcscSession == nil
 	if nativeQMI {
 		refreshContext, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		refreshRequested, err = channel.registerProfileRefresh(refreshContext)
@@ -959,11 +966,10 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	// every retry needlessly waits for the refresh timeout.
 	resultBeforeClose, resultPresentBeforeClose := enableProfileResult(payload)
 
-	// If addressing by ICCID was rejected by the eUICC with commandError (0x07),
-	// undefinedError (0x7F), or notFound (0x01) — as observed on Eastcompeace (ECP,
-	// e.g. Apex / 5ber) removable eUICC cards with firmware 4.2.0 due to an
-	// internal card manager directory lookup bug — attempt fallback to ISD-P AID
-	// addressing per GSMA SGP.22 clause 5.7.17 while the logical channel remains open.
+	// If addressing by ICCID was rejected with commandError (0x07),
+	// undefinedError (0x7F), or notFound (0x01), try ISD-P AID addressing
+	// per SGP.22 clause 5.7.17 while the logical channel remains open.
+	// commandError alone does not identify a directory lookup failure.
 	if err == nil && resultPresentBeforeClose && !isHexAID(iccid) &&
 		(byte(resultBeforeClose) == 7 || byte(resultBeforeClose) == 0x7F || byte(resultBeforeClose) == 1) {
 		if aidStr := manager.resolveProfileAID(ctx, id, channel, iccid); aidStr != "" {
@@ -1312,7 +1318,7 @@ var (
 	ErrESIMWrongProfileReenabling     = errors.New("esim: profile cannot be re-enabled from the current profile state")
 	ErrESIMEnableCATBusy              = errors.New("esim: card application toolkit is busy; retry enabling later")
 	ErrESIMDisallowedByEnterpriseRule = errors.New("esim: profile switch is not allowed by enterprise rule")
-	ErrESIMCommandError               = errors.New("esim: eUICC internal command error (commandError); profile cannot be enabled by ICCID on this card firmware")
+	ErrESIMCommandError               = errors.New("esim: eUICC internal command error (commandError)")
 	ErrESIMDisallowedForRPM           = errors.New("esim: profile switch is disallowed for roaming position management")
 	ErrESIMNoEsimPortAvailable        = errors.New("esim: no eSIM port available on eUICC")
 	ErrESIMEnableUndefined            = errors.New("esim: eUICC returned undefinedError while enabling this profile; the card did not provide a more specific reason")
