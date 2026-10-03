@@ -1,4 +1,5 @@
 import { SettingsRegular } from "@fluentui/react-icons";
+import { CellLockButton } from "./CellLockButton";
 import { cx } from "../../lib/utils";
 import { StatusDot } from "../ui";
 import { FieldRow } from "./FieldRow";
@@ -21,7 +22,7 @@ const BAR_TONE = {
   gray: "bg-gray-300 dark:bg-gray-600",
 } as const;
 
-export function OverviewNetworkCard({ device, onOpenOperatorSelection }: { device: DeviceDetail; onOpenOperatorSelection: () => void }) {
+export function OverviewNetworkCard({ device, onOpenOperatorSelection, onOpenCellLock, cellLocked }: { device: DeviceDetail; onOpenOperatorSelection: () => void; onOpenCellLock?: () => void; cellLocked: boolean }) {
   const { t } = useI18n();
   const modem = device.modem;
   const online = isDeviceOnline(device);
@@ -97,6 +98,7 @@ export function OverviewNetworkCard({ device, onOpenOperatorSelection }: { devic
             )}
           </div>
         </div>
+        {onOpenCellLock ? <CellLockButton compact onClick={onOpenCellLock} locked={cellLocked} /> : null}
         <button
           type="button"
           onClick={onOpenOperatorSelection}

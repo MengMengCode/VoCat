@@ -28,6 +28,29 @@ export interface ApiErrorBody {
   busy?: boolean;
 }
 
+export interface CellLockTarget {
+  earfcn: number;
+  pci: number;
+}
+
+export interface CellLockStatus {
+  target: CellLockTarget | null;
+}
+
+export interface CellInfo extends CellLockTarget {
+  plmn: string;
+  source: "serving" | "neighbor";
+  rsrp?: number;
+  rsrq?: number;
+  rssi?: number;
+  sinr?: number;
+}
+
+export interface DeviceCells {
+  items: CellInfo[];
+  neighborsStatus: "available" | "unsupported" | "unavailable";
+}
+
 export interface VoWiFiRuntime {
   deviceId: string;
   phase: string;
@@ -120,6 +143,7 @@ export interface DeviceListItem {
   id: string;
   name: string;
   deviceType: DeviceType;
+  supportsCellLock: boolean;
   running: boolean;
   healthy: boolean;
   controlOnline: boolean;

@@ -667,9 +667,10 @@ export default function DevicesPage() {
     { key: "card", label: t("卡策略") },
   ].filter((tab) => !isReader || !["at", "ussd"].includes(tab.key));
 
-  const overviewNode = detail ? (
+  const overviewNode = detail?.id === selectedId ? (
     <div className="space-y-4">
       <DeviceOverviewTab
+        key={detail.id}
         device={detail}
         simOperatorDisplay={simOperator}
         customPhoneNumber={cardPolicy?.iccid === detail.modem?.iccid ? cardPolicy.customPhoneNumber : ""}

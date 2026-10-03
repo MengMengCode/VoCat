@@ -157,6 +157,26 @@ func TestConfiguredDeviceOverviewAlwaysUsesLiveDiscoveredATPort(t *testing.T) {
 	}
 }
 
+func TestDeviceSummaryCellLockSupport(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		candidate modem.Candidate
+		supported bool
+	}{
+		{"ML307", modem.Candidate{Product: "ML307A"}, true},
+		{"Quectel", modem.Candidate{VendorID: "2c7c"}, true},
+		{"DJI EC25", modem.Candidate{VendorID: "2ca3", ProductID: "4006"}, true},
+		{"unknown", modem.Candidate{}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			summary := deviceSummary(device.Device{Candidate: test.candidate})
+			if got := summary["supports_cell_lock"]; got != test.supported {
+				t.Fatalf("supports_cell_lock = %v, want %v", got, test.supported)
+			}
+		})
+	}
+}
+
 func TestSnapshotHasSIMDoesNotTreatUnknownStatusAsInserted(t *testing.T) {
 	for _, snapshot := range []*device.Snapshot{
 		{IMEI: "867123456789012"},

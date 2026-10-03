@@ -217,7 +217,6 @@ export default function ExportProxyPage() {
         open={open}
         onClose={() => setOpen(false)}
         title={form.id ? t("编辑导出代理") : t("添加导出代理")}
-        width="max-w-2xl"
         footer={<><Button onClick={() => setOpen(false)}>{t("取消")}</Button><Button variant="primary" loading={saving} onClick={() => void save()}>{t("保存")}</Button></>}
       >
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

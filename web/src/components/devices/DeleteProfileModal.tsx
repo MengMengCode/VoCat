@@ -21,7 +21,7 @@ export function DeleteProfileModal({ open, target, deleting, input, onInputChang
   const { t } = useI18n();
   const last4 = (target?.iccid || "").slice(-4);
   return (
-    <Modal open={open} onClose={onCancel} title={t("⚠️ 删除 Profile")} width="max-w-sm" className="glass-modal">
+    <Modal open={open} onClose={onCancel} title={t("⚠️ 删除 Profile")}>
       <div className="text-sm leading-relaxed text-gray-600 dark:text-gray-300">
         {tf("此操作不可逆！请输入 ICCID 后 4 位「{last4}」以确认删除 Profile「{name}」", { last4, name: target?.name || target?.iccid })}
       </div>

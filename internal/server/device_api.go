@@ -686,6 +686,16 @@ func (s *Server) handleDevicePath(
 			return true
 		}
 		return s.handleUSBNetMode(w, r, physicalID)
+	case "cells":
+		if !s.requirePhysicalDevice(w, physicalPresent) {
+			return true
+		}
+		return s.handleCells(w, r, physicalID)
+	case "cell-lock":
+		if !s.requirePhysicalDevice(w, physicalPresent) {
+			return true
+		}
+		return s.handleCellLock(w, r, config.ID, physicalID)
 	case "operator_selection":
 		if !s.requirePhysicalDevice(w, physicalPresent) {
 			return true
@@ -2286,6 +2296,7 @@ func deviceSummary(entry device.Device) map[string]any {
 		"private_ip":               "",
 		"interface":                entry.Candidate.NetworkInterface,
 		"esim_transport":           backendMode(entry.Candidate),
+		"supports_cell_lock":       device.SupportsCellLock(entry.Candidate),
 		"sms_enabled":              true,
 		"network_enabled":          false,
 		"vowifi_enabled":           false,

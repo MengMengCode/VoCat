@@ -41,7 +41,7 @@ export interface EsimNotificationsModalProps {
 export function EsimNotificationsModal({ open, loading, items, retryingSeq, onClose, onRetry }: EsimNotificationsModalProps) {
   const { t } = useI18n();
   return (
-    <Modal open={open} onClose={onClose} title={t("当前通知列表")} width="max-w-[min(500px,80vw)]" className="glass-modal">
+    <Modal open={open} onClose={onClose} title={t("当前通知列表")}>
       {loading ? (
         <div className="py-10 text-center text-sm text-gray-400">{t("正在加载通知...")}</div>
       ) : items.length === 0 ? (

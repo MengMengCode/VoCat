@@ -104,7 +104,6 @@ export function SmsExportModal({ devices, defaultDeviceId, onClose }: SmsExportM
       open
       onClose={close}
       title={t("导出短信")}
-      width="max-w-[min(560px,92vw)]"
       footer={<>
         <Button onClick={close}>{busy ? t("取消导出") : t("关闭")}</Button>
         <Button variant="primary" loading={busy} icon={<ArrowDownloadRegular />} onClick={() => void download()}>

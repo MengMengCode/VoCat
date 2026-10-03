@@ -76,8 +76,6 @@ export function DeviceAddDialog(props: DeviceAddDialogProps) {
       open={props.open}
       onClose={props.onClose}
       title={t("添加设备配置")}
-      width="max-w-[min(720px,92vw)]"
-      className="glass-modal"
       footer={
         <div className="flex justify-end gap-2">
           <Button onClick={props.onClose}>{t("取消")}</Button>

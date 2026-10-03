@@ -95,7 +95,7 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			// Re-admit them by vendor so their AT serial ports stay discoverable;
 			// the candidate is only kept if a ttyUSB/ttyACM node is actually
 			// found below, which is exactly the AT-bearing composition we want.
-			if !isQuectelUSBModem(vendorID) && !IsML307(Candidate{
+			if !IsQuectelUSBModem(vendorID) && !IsML307(Candidate{
 				VendorID: vendorID, ProductID: productID,
 				Product: readTrimmed(filepath.Join(resolvedDevice, "product")),
 			}) {
@@ -208,6 +208,15 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 	return result, nil
 }
 
+// IsML307 identifies the ML307 USB modem family by its USB identity or product string.
+func IsML307(candidate Candidate) bool {
+	if strings.EqualFold(strings.TrimSpace(candidate.VendorID), "2ecc") &&
+		strings.EqualFold(strings.TrimSpace(candidate.ProductID), "3012") {
+		return true
+	}
+	return strings.Contains(strings.ToUpper(candidate.Product), "ML307")
+}
+
 // IsDJI4GUSB reports whether a USB identity belongs to the first-generation
 // DJI/Baiwang 4G module. It keeps the factory 2ca3:4006 identity usable without
 // requiring a persistent AT+QCFG USB identity rewrite to Quectel 2c7c:0125.
@@ -216,12 +225,12 @@ func IsDJI4GUSB(vendorID, productID string) bool {
 		strings.EqualFold(strings.TrimSpace(productID), dji4GProductID)
 }
 
-// isQuectelUSBModem reports whether a USB identity belongs to a Quectel
+// IsQuectelUSBModem reports whether a USB identity belongs to a Quectel
 // module. Quectel's serial/RNDIS/ECM compositions (e.g. EC200A at 2c7c:6005)
 // do not bind qmi_wwan, so discovery must fall back to the vendor ID to keep
 // them visible. The candidate is only retained if it exposes an AT serial
 // port, which filters out unrelated Quectel-branded peripherals.
-func isQuectelUSBModem(vendorID string) bool {
+func IsQuectelUSBModem(vendorID string) bool {
 	return strings.EqualFold(strings.TrimSpace(vendorID), quectelVendorID)
 }
 
@@ -230,7 +239,7 @@ func isQuectelUSBModem(vendorID string) bool {
 // "Linux / Linux", but those texts are firmware placeholders, not the modem
 // model or manufacturer.
 func normalizeUSBIdentity(vendorID, productID, manufacturer, product string) (string, string) {
-	if !isQuectelUSBModem(vendorID) ||
+	if !IsQuectelUSBModem(vendorID) ||
 		!strings.EqualFold(strings.TrimSpace(productID), "0125") {
 		return manufacturer, product
 	}

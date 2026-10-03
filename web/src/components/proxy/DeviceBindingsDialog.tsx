@@ -115,7 +115,7 @@ export function DeviceBindingsDialog(props: DeviceBindingsDialogProps) {
   const toggleAll = () => setSelected(allSelected ? [] : selectable);
 
   return (
-    <Modal open={open} onClose={onClose} title={`${adding ? t("添加 SIM / Profile 绑定") : t("SIM / Profile 绑定")} — ${proxyName}`} width="max-w-5xl">
+    <Modal open={open} onClose={onClose} title={`${adding ? t("添加 SIM / Profile 绑定") : t("SIM / Profile 绑定")} — ${proxyName}`}>
       <div className="space-y-4 pb-2">
         <div className="rounded-lg border border-sky-200/70 bg-sky-50 px-3 py-2 text-xs text-sky-800 dark:border-sky-800/50 dark:bg-sky-900/20 dark:text-sky-200">
           {t("VoWiFi 会按当前 ICCID 选择代理。实体 SIM 和 eSIM Profile 都可以绑定；同一 ICCID 只能绑定一个代理。")}

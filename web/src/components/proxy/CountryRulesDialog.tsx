@@ -65,7 +65,6 @@ export function CountryRulesDialog(props: CountryRulesDialogProps) {
       open={open}
       onClose={onClose}
       title={t("MCC 国家规则")}
-      width="max-w-5xl"
       footer={(
         <>
           <Button onClick={onClose} disabled={busy}>{t("取消")}</Button>

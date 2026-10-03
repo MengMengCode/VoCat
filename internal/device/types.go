@@ -89,6 +89,23 @@ const (
 	PhoneSourceEFMSISDN  = "usim_ef_msisdn"
 )
 
+type servingMetrics struct {
+	PLMN       string
+	AccessTech string
+	Band       string
+	Channel    string
+	RSSI       *int
+	RSRP       *int
+	RSRQ       *int
+	SINR       *int
+}
+
+type servingRecord struct {
+	servingMetrics
+	PCI      string
+	Complete bool
+}
+
 type Snapshot struct {
 	DeviceID           string      `json:"deviceId"`
 	Port               string      `json:"port"`

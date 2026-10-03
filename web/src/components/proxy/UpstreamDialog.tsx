@@ -82,7 +82,6 @@ export function UpstreamDialog({ open, editing, form, testing, probe, onPatch, o
       open={open}
       onClose={onClose}
       title={editing ? t("编辑前置代理") : t("新增前置代理")}
-      width="max-w-lg"
       footer={
         <>
           <Button className="mr-auto" onClick={onTest} loading={testing} disabled={testing || !form.addr.trim()}>

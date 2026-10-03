@@ -56,7 +56,6 @@ export function NewSmsModal({ open, devices, defaultDeviceId, sending, onClose, 
       open={open}
       onClose={onClose}
       title={t("发送短信")}
-      width="max-w-[min(520px,92vw)]"
       footer={
         <>
           <Button onClick={onClose}>{t("取消")}</Button>

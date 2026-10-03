@@ -2,11 +2,8 @@ package device
 
 import (
 	"context"
-	"encoding/csv"
 	"encoding/hex"
 	"fmt"
-	"io"
-	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -510,102 +507,6 @@ func parseCSQ(response modem.Response) (raw, percent, dbm *int) {
 	return
 }
 
-type qengMetrics struct {
-	PLMN       string
-	AccessTech string
-	Band       string
-	Channel    string
-	RSSI       *int
-	RSRP       *int
-	RSRQ       *int
-	SINR       *int
-}
-
-func parseMUESTATSCell(response modem.Response) qengMetrics {
-	for _, line := range response.Lines {
-		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "+MUESTATS:") {
-			continue
-		}
-		values := csvValues(strings.TrimSpace(strings.SplitN(line, ":", 2)[1]))
-		if len(values) < 7 || !strings.EqualFold(values[0], "scell") {
-			continue
-		}
-		result := qengMetrics{AccessTech: mueAccessTechnology(values[1]), Channel: values[4]}
-		if decimalDigits(values[2], 3, 3) && decimalDigits(values[3], 2, 3) {
-			result.PLMN = values[2] + values[3]
-		}
-		if len(values) >= 11 {
-			result.RSRP = parseDeciMetric(values[7])
-			result.RSRQ = parseDeciMetric(values[8])
-			result.RSSI = parseDeciMetric(values[9])
-			result.SINR = parseDeciMetric(values[10])
-		}
-		return result
-	}
-	return qengMetrics{}
-}
-
-func parseMUESTATSSBand(response modem.Response) string {
-	for _, line := range response.Lines {
-		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "+MUESTATS:") {
-			continue
-		}
-		values := csvValues(strings.TrimSpace(strings.SplitN(line, ":", 2)[1]))
-		if len(values) == 2 && strings.EqualFold(values[0], "sband") && decimalDigits(values[1], 1, 3) {
-			return values[1]
-		}
-	}
-	return ""
-}
-
-func parseDeciMetric(value string) *int {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "-32768" {
-		return nil
-	}
-	raw, err := strconv.ParseInt(value, 10, 32)
-	if err != nil {
-		return nil
-	}
-	result := int(math.Round(float64(raw) / 10))
-	return &result
-}
-
-func parseQENG(response modem.Response) qengMetrics {
-	for _, line := range response.Lines {
-		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(line)), "+QENG:") {
-			continue
-		}
-		values := csvValues(strings.TrimSpace(strings.SplitN(line, ":", 2)[1]))
-		if len(values) < 3 || !strings.EqualFold(values[0], "servingcell") {
-			continue
-		}
-		result := qengMetrics{AccessTech: strings.ToUpper(values[2])}
-		if strings.EqualFold(values[2], "LTE") && len(values) >= 17 {
-			if decimalDigits(values[4], 3, 3) && decimalDigits(values[5], 2, 3) {
-				result.PLMN = values[4] + values[5]
-			}
-			result.Channel = values[8]
-			if values[9] != "" {
-				result.Band = "B" + values[9]
-			}
-			result.RSRP = parseOptionalInt(values[13])
-			result.RSRQ = parseOptionalInt(values[14])
-			result.RSSI = parseOptionalInt(values[15])
-			result.SINR = parseOptionalInt(values[16])
-		}
-		return result
-	}
-	return qengMetrics{}
-}
-
-func decimalDigits(value string, minimum, maximum int) bool {
-	value = strings.TrimSpace(value)
-	return len(value) >= minimum && len(value) <= maximum && strings.IndexFunc(value, func(character rune) bool {
-		return character < '0' || character > '9'
-	}) < 0
-}
-
 type operatorInfo struct {
 	Name       string
 	Code       string
@@ -627,29 +528,6 @@ func parseCOPS(response modem.Response) operatorInfo {
 		result.AccessTech = accessTechnology(values[3])
 	}
 	return result
-}
-
-func mueAccessTechnology(value string) string {
-	switch strings.TrimSpace(value) {
-	case "1":
-		return "GSM"
-	case "2":
-		return "WCDMA"
-	case "3":
-		return "TDSCDMA"
-	case "4":
-		return "LTE"
-	case "5":
-		return "eMTC"
-	case "6":
-		return "NB-IoT"
-	case "7":
-		return "CDMA"
-	case "8":
-		return "EVDO"
-	default:
-		return ""
-	}
 }
 
 func accessTechnology(value string) string {
@@ -686,30 +564,6 @@ func parseCFUN(response modem.Response) (int, bool) {
 
 func isRadioOffMode(mode int) bool {
 	return mode == 0 || mode == 4
-}
-
-func valueAfterPrefix(response modem.Response, prefix string) string {
-	for _, line := range response.Lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToUpper(line), strings.ToUpper(prefix)) {
-			return strings.TrimSpace(line[len(prefix):])
-		}
-	}
-	return ""
-}
-
-func csvValues(value string) []string {
-	reader := csv.NewReader(strings.NewReader(value))
-	reader.TrimLeadingSpace = true
-	reader.LazyQuotes = true
-	record, err := reader.Read()
-	if err != nil && err != io.EOF {
-		return nil
-	}
-	for index := range record {
-		record[index] = strings.TrimSpace(record[index])
-	}
-	return record
 }
 
 func firstDigitLine(response modem.Response, minimum, maximum int) string {
@@ -772,16 +626,4 @@ func parseICCIDIdentifier(
 		}
 	}
 	return ""
-}
-
-func parseOptionalInt(value string) *int {
-	number, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil {
-		return nil
-	}
-	return intPointer(number)
-}
-
-func intPointer(value int) *int {
-	return &value
 }

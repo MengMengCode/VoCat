@@ -299,7 +299,6 @@ export function CardPolicyAPN({ deviceId, iccid, policy, deviceOnline, onSaved }
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
         title={editingProfile ? t("修改 APN 配置") : t("新增 APN 配置")}
-        width="max-w-4xl"
         closeOnOverlay={!adding}
         footer={
           <>

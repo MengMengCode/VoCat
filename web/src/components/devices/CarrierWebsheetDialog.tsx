@@ -106,7 +106,7 @@ export function CarrierWebsheetDialog({ open, websheet, onClose, onDone }: Carri
   }, [open, websheet?.id, token, onClose, onDone]);
 
   return (
-    <Modal open={open} onClose={onClose} title={websheet?.title || t("E911地址")} width="max-w-[min(390px,94vw)]">
+    <Modal open={open} onClose={onClose} title={websheet?.title || t("E911地址")}>
       <div className="websheet-frame-shell relative overflow-hidden rounded border border-gray-200 dark:border-gray-700">
         {!loaded ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 text-sm text-gray-500 dark:bg-gray-900/80">

@@ -529,7 +529,7 @@ export default function AutomaticTasksPage() {
         ) : null}
       </div>
 
-      <Modal open={open} onClose={closeEditor} title={form.id ? t("编辑自动任务") : t("添加自动任务")} width="max-w-3xl">
+      <Modal open={open} onClose={closeEditor} title={form.id ? t("编辑自动任务") : t("添加自动任务")}>
         <div className="grid gap-4 md:grid-cols-2">
           <div className="md:col-span-2"><label className={fieldLabel}>{t("任务名称")}</label><Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={t("例如：每日短信保活")} /></div>
           <div><label className={fieldLabel}>{t("设备")}</label><Select value={form.deviceId} onChange={chooseDevice} options={devices.map((device) => ({ value: device.id, label: `${device.name || device.id} (${device.id})` }))} /></div>

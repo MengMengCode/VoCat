@@ -200,7 +200,7 @@ export function OperatorSelectionDialog({ open, deviceId, scanBlockedReason = ""
     registerAbortRef.current?.abort();
   }, []);
   return (
-    <Modal open={open} onClose={onClose} title={t("运营商网络选择")} width="max-w-[min(500px,92vw)]" className="glass-modal">
+    <Modal open={open} onClose={onClose} title={t("运营商网络选择")}>
       <div className="mt-2 text-sm text-gray-600 dark:text-gray-300">
         <div className="mb-4 rounded-lg border border-gray-100 bg-gray-50 p-4 dark:border-white/5 dark:bg-white/5">
           <div className="mb-2 flex items-center justify-between">
