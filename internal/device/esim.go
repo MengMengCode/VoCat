@@ -884,7 +884,10 @@ func (manager *Manager) resolveProfileAID(ctx context.Context, id string, channe
 	return ""
 }
 
-// ESIMSwitchProfile enables one profile by ICCID via ES10c EnableProfile.
+// ESIMSwitchProfile enables a profile via ES10c and verifies its live ICCID.
+// PC/SC uses refresh=false and a host reset to apply the switch; modem transports
+// retain their own REFRESH handling. Accepting EnableProfile is not sufficient:
+// recovery must expose the requested ICCID before this method reports success.
 func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid string, aidHex string) error {
 	iccid = strings.TrimSpace(iccid)
 	if iccid == "" {

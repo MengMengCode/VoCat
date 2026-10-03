@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -21,13 +23,16 @@ type profileSwitchPCSCBackend struct {
 	targetAID      string
 	rejectICCID    bool
 	resets         int
+	resetErr       error
 	enableRequests [][]byte
 }
 
+// Readers exposes one present eUICC so the manager discovers a PC/SC device.
 func (*profileSwitchPCSCBackend) Readers(context.Context) ([]pcsc.Reader, error) {
 	return []pcsc.Reader{{Name: "test eUICC reader", USBPath: "test-reader", CardPresent: true}}, nil
 }
 
+// Open creates a session that shares the card identity and staged activation.
 func (backend *profileSwitchPCSCBackend) Open(context.Context, pcsc.Selector) (pcsc.Card, error) {
 	return &profileSwitchPCSCCard{backend: backend}, nil
 }
@@ -37,6 +42,8 @@ type profileSwitchPCSCCard struct {
 	selectedFile uint16
 }
 
+// Transmit emulates profile commits and the identity reads used for verification.
+// Requests that require proactive REFRESH are rejected with commandError.
 func (card *profileSwitchPCSCCard) Transmit(_ context.Context, command []byte) ([]byte, uint16, error) {
 	backend := card.backend
 	backend.mu.Lock()
@@ -93,13 +100,19 @@ func (card *profileSwitchPCSCCard) Transmit(_ context.Context, command []byte) (
 	}
 }
 
+// Close releases a test session without applying a staged profile switch.
 func (*profileSwitchPCSCCard) Close() error { return nil }
 
+// CloseWithReset records a reset attempt and applies activation only on success.
+// A simulated reset error leaves the old ICCID visible to subsequent sessions.
 func (card *profileSwitchPCSCCard) CloseWithReset() error {
 	backend := card.backend
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	backend.resets++
+	if backend.resetErr != nil {
+		return backend.resetErr
+	}
 	if backend.pendingICCID != "" {
 		backend.iccid = backend.pendingICCID
 		backend.pendingICCID = ""
@@ -107,6 +120,9 @@ func (card *profileSwitchPCSCCard) CloseWithReset() error {
 	return nil
 }
 
+// TestESIMSwitchProfilePCSCUsesHostResetInsteadOfCardRefresh checks that both
+// ICCID addressing and AID fallback activate a profile through one host reset
+// on a card that rejects proactive REFRESH.
 func TestESIMSwitchProfilePCSCUsesHostResetInsteadOfCardRefresh(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -165,5 +181,48 @@ func TestESIMSwitchProfilePCSCUsesHostResetInsteadOfCardRefresh(t *testing.T) {
 				t.Fatal("second EnableProfile request did not address the profile by AID")
 			}
 		})
+	}
+}
+
+// TestESIMSwitchProfilePCSCRejectsFailedHostReset ensures that an accepted
+// EnableProfile cannot be reported as successful when the reset fails and the
+// reader continues to expose the original ICCID.
+func TestESIMSwitchProfilePCSCRejectsFailedHostReset(t *testing.T) {
+	const originalICCID = "894921007608519524"
+	const targetICCID = "894921007608519523"
+	backend := &profileSwitchPCSCBackend{
+		iccid: originalICCID, targetICCID: targetICCID,
+		targetAID: "a0000005591010ffffffff8900000101",
+		resetErr:  errors.New("simulated PC/SC reset failure"),
+	}
+	manager, err := NewManager(Options{
+		Discoverer: staticDiscoverer{}, Opener: &staticOpener{},
+		CardReaders: pcsc.NewWithBackend(backend),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
+	devices := manager.List()
+	if len(devices) != 1 {
+		t.Fatalf("devices = %d, want one reader", len(devices))
+	}
+
+	err = manager.ESIMSwitchProfile(context.Background(), devices[0].ID, targetICCID, "")
+	if err == nil || !strings.Contains(err.Error(), "did not become active") {
+		t.Fatalf("switch after failed host reset = %v, want live ICCID verification failure", err)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.iccid != originalICCID || backend.pendingICCID != targetICCID {
+		t.Fatalf("card state = active %q, pending %q; want original active, target staged",
+			backend.iccid, backend.pendingICCID)
+	}
+	if backend.resets != 1 || len(backend.enableRequests) != 1 {
+		t.Fatalf("reset attempts = %d, EnableProfile requests = %d; want one of each",
+			backend.resets, len(backend.enableRequests))
 	}
 }
