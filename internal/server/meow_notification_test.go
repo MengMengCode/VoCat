@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestMeowSettingsRoundTrip(t *testing.T) {
@@ -76,6 +78,92 @@ func TestMeowProviderResponse(t *testing.T) {
 			err := postMeowNotification(context.Background(), provider.Client(), provider.URL, "标题", "内容", nil)
 			if (err == nil) != reply.ok {
 				t.Fatalf("unexpected result: %v", err)
+			}
+		})
+	}
+}
+
+func TestMeowMessageBodyDropsRepeatedTitle(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		title string
+		text  string
+		want  string
+	}{
+		{
+			name:  "sms repeats the title verbatim",
+			title: "收到新短信",
+			text:  "收到新短信\n设备  A\n内容  hello",
+			want:  "设备  A\n内容  hello",
+		},
+		{
+			name:  "call prefixes the title with an emoji",
+			title: "收到来电",
+			text:  "📞 收到来电\n设备  A",
+			want:  "设备  A",
+		},
+		{
+			name:  "single line body is kept",
+			title: "VoCat 测试通知",
+			text:  "VoCat 消息推送测试",
+			want:  "VoCat 消息推送测试",
+		},
+		{
+			name:  "body that does not repeat the title is kept",
+			title: "VoCat 测试通知",
+			text:  "第一行\n第二行",
+			want:  "第一行\n第二行",
+		},
+		{
+			name:  "empty title keeps the body",
+			title: "",
+			text:  "第一行\n第二行",
+			want:  "第一行\n第二行",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := meowMessageBody(testCase.title, testCase.text); got != testCase.want {
+				t.Fatalf("got %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestMeowBodiesDoNotRepeatTitle walks the real body of every notification kind
+// and asserts the MeoW payload never repeats the title, which MeoW already
+// renders inside the notification content.
+func TestMeowBodiesDoNotRepeatTitle(t *testing.T) {
+	now := time.Now()
+	message := smsNotification{DeviceLabel: "A", Number: "10086", Time: now, Content: "hi"}
+	call := IncomingCallNotification{DeviceLabel: "A", Caller: "10086", Called: "10010", Time: now}
+	task := automaticTaskNotification{
+		Title: "自动任务执行成功",
+		Text: strings.Join([]string{
+			"自动任务执行成功",
+			"任务  定时上报",
+			"设备  A",
+			"类型  发送短信",
+			"环境  VoWiFi",
+			"时间  " + now.Local().Format("2006-01-02 15:04:05"),
+			"结果  任务已完成",
+		}, "\n"),
+	}
+	for _, testCase := range []struct {
+		name  string
+		title string
+		text  string
+	}{
+		{name: "sms", title: "收到新短信", text: message.Text()},
+		{name: "call", title: call.Title(), text: call.Text()},
+		{name: "automatic task", title: task.Title, text: task.Text},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			body := meowMessageBody(testCase.title, testCase.text)
+			if strings.Contains(body, testCase.title) {
+				t.Fatalf("body %q repeats title %q", body, testCase.title)
+			}
+			if !strings.Contains(body, "\n") {
+				t.Fatalf("body %q lost its detail lines", body)
 			}
 		})
 	}

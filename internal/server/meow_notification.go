@@ -37,7 +37,30 @@ func sendMeowNotification(ctx context.Context, config map[string]any, title, tex
 	if err != nil {
 		return err
 	}
-	return postMeowNotification(ctx, client, parsed.String(), title, text, config)
+	return postMeowNotification(ctx, client, parsed.String(), title, meowMessageBody(title, text), config)
+}
+
+// meowMessageBody drops the leading title line from a notification body. MeoW
+// renders the title field inside the notification content, so a body that
+// repeats the title shows it twice on the device. The title field itself is
+// still sent, so no information is lost. Every MeoW push goes through here,
+// which keeps future notification kinds from reintroducing the duplicate.
+func meowMessageBody(title, text string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) < 2 {
+		// A single-line body cannot carry the title separately.
+		return text
+	}
+	// Some notifications prefix the title with an emoji, for example
+	// "📞 收到来电", so match on the text instead of the raw line.
+	if head := strings.TrimSpace(lines[0]); head != title && !strings.Contains(head, title) {
+		return text
+	}
+	return strings.Join(lines[1:], "\n")
 }
 
 func postMeowNotification(ctx context.Context, client *http.Client, endpoint, title, text string, config map[string]any) error {
