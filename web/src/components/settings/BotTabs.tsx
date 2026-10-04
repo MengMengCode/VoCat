@@ -9,12 +9,12 @@ interface ChannelProps<T> {
   onChange: (patch: Partial<T>) => void;
 }
 
-export function TelegramTab({ value, onChange }: ChannelProps<TelegramForm>) {
+export function TelegramTab({ value, onChange, onClear }: ChannelProps<TelegramForm> & { onClear: () => void }) {
   const { t } = useI18n();
   const off = !value.enabled;
   return (
     <div className="pt-2">
-      <ChannelHeader title={t("启用 Telegram 机器人")} enabled={value.enabled} onToggle={(enabled) => onChange({ enabled })} />
+      <ChannelHeader onClear={onClear} title={t("启用 Telegram 机器人")} enabled={value.enabled} onToggle={(enabled) => onChange({ enabled })} />
       <div className="space-y-4">
         <div className="rounded-lg bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-500 dark:bg-gray-800/60 dark:text-gray-400">
           {t("启用后会推送新短信，并允许指定管理员通过 Bot 查看状态、切卡、管理 WiFi Calling、发送短信和限时拨号。拨号只执行呼叫并自动挂断，不处理音频。")}

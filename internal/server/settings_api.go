@@ -43,9 +43,11 @@ var notificationChannels = []string{
 	"pushplus",
 	"wecom",
 	"lark",
+	"meow",
 }
 
 var notificationFields = map[string]map[string]string{
+	"meow": {"nickname": "string", "url": "string", "img_url": "string"},
 	"telegram": {
 		"bot_token": "string", "chat_id": "string", "admin_id": "string",
 		"base_url": "string", "proxy": "string",
@@ -146,16 +148,39 @@ func (s *Server) handleNotificationSettings(w http.ResponseWriter, r *http.Reque
 			if !present {
 				continue
 			}
+			var document map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &document); err != nil || document == nil {
+				writeError(w, http.StatusBadRequest, "invalid_notification_config", "notification config must be an object")
+				return
+			}
+			clearSecrets := false
+			if flag, present := document["clear_secrets"]; present {
+				if (channel != "telegram" && channel != "email") || string(flag) == "null" || json.Unmarshal(flag, &clearSecrets) != nil {
+					writeError(w, http.StatusBadRequest, "invalid_notification_config", "clear_secrets must be a boolean for a supported channel")
+					return
+				}
+				delete(document, "clear_secrets")
+			}
+			raw, err := json.Marshal(document)
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
 			enabled, config, err := decodeNotificationConfig(channel, raw, true)
 			if err != nil {
 				writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
 				return
 			}
+			clearFields := []string(nil)
+			if clearSecrets {
+				clearFields = store.DefaultNotificationSensitiveFields(channel)
+			}
 			values = append(values, store.NotificationSetting{
-				Channel:         channel,
-				Enabled:         enabled,
-				Config:          config,
-				SensitiveFields: store.DefaultNotificationSensitiveFields(channel),
+				ClearSensitiveFields: clearFields,
+				Channel:              channel,
+				Enabled:              enabled,
+				Config:               config,
+				SensitiveFields:      store.DefaultNotificationSensitiveFields(channel),
 			})
 		}
 		for channel := range request {
@@ -425,7 +450,7 @@ func (s *Server) handleNotificationTest(
 		writeError(w, http.StatusNotFound, "not_found", "notification channel was not found")
 		return
 	}
-	if channel != "webhook" && channel != "telegram" && channel != "email" && channel != "bark" && channel != "wecom" && channel != "lark" {
+	if channel != "webhook" && channel != "telegram" && channel != "email" && channel != "bark" && channel != "wecom" && channel != "lark" && channel != "meow" {
 		writeError(
 			w,
 			http.StatusNotImplemented,
@@ -481,6 +506,8 @@ func (s *Server) handleNotificationTest(
 		err = sendWecomNotificationTest(notificationContext, resolved)
 	case "lark":
 		err = sendLarkNotificationTest(notificationContext, resolved)
+	case "meow":
+		err = sendMeowNotification(notificationContext, resolved, "VoCat 测试通知", "VoCat 消息推送测试")
 	}
 	if err != nil {
 		redacted := store.RedactText(err.Error(), provider)
@@ -616,6 +643,9 @@ func mergeNotificationTestSecretValue(incoming, existing any) any {
 }
 
 func validateNotificationTestConfig(channel string, config map[string]any) error {
+	if channel == "meow" {
+		return validateMeowNotificationConfig(config)
+	}
 	switch channel {
 	case "webhook":
 		urls := configStrings(config, "urls")

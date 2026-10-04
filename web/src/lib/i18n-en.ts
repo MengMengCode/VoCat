@@ -5,6 +5,15 @@
  * 富文本片段（嵌套链接/代码块的说明框）不走字典，在组件里按语言分支渲染。
  */
 export const EN_DICT: Record<string, string> = {
+  "清空配置": "Clear configuration",
+  "清空后将移除该渠道的账号、地址和凭据，其他选项恢复默认值。启用状态保持不变，点击“保存通知配置”后生效。": "This removes accounts, addresses and credentials and restores other options to defaults. The enabled state stays unchanged. Click Save notification settings to apply.",
+  "启用 MeoW 推送": "Enable MeoW notifications",
+  "MeoW 昵称": "MeoW nickname",
+  "MeoW 测试失败": "MeoW test failed",
+  "跳转链接 (url)": "Destination link (url)",
+  "点击通知时打开的链接，选填。": "Optional link to open when the notification is clicked.",
+  "通知图标 (imgUrl)": "Notification icon (imgUrl)",
+  "图标 URL，建议使用 216×216 PNG，选填。": "Optional icon URL. A 216×216 PNG is recommended.",
   "VoWiFi MTU 兼容模式": "VoWiFi MTU compatibility mode",
   "改善部分系统因网络包大小限制导致的注册失败": "Help resolve registration failures caused by packet size limits on some systems",
   "默认关闭。遇到 MTU 不足导致的 VoWiFi 连接问题时可尝试开启。此设置适用于所有设备，保存后请重连 VoWiFi。": "Off by default. Try enabling this if MTU limits cause VoWiFi connection problems. Applies to all devices; reconnect VoWiFi after saving.",
@@ -435,7 +444,7 @@ export const EN_DICT: Record<string, string> = {
   "启用企业微信消息推送": "Enable WeCom Message Push",
   "飞书 / Lark 群机器人": "Feishu / Lark Group Bot",
   "启用飞书 / Lark 群自定义机器人通知": "Enable Feishu / Lark Custom Group Bot Notifications",
-  "Telegram / Bark / Email / Pushplus / Webhook / 企业微信 / 飞书 / Lark 群机器人": "Telegram / Bark / Email / Pushplus / Webhook / WeCom / Feishu / Lark Group Bot",
+  "Telegram / Bark / Email / Pushplus / Webhook / 企业微信 / 飞书 / Lark 群机器人 / MeoW": "Telegram / Bark / Email / Pushplus / Webhook / WeCom / Feishu / Lark Group Bot / MeoW",
   "目标 URLs": "Target URLs",
   "添加 URL": "Add URL",
   "尚未配置任何 Bark URL，点击右侧添加按钮。": "No Bark URLs yet. Click the add button on the right.",

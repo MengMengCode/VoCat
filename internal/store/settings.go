@@ -77,7 +77,21 @@ func upsertNotificationSetting(
 	)
 	if currentErr == nil {
 		fields = uniqueNonemptyStrings(fields, current.SensitiveFields)
-		config, err = mergeJSONSecrets(config, current.Config, fields)
+		// 显式清空时不从旧配置恢复敏感值；重新填写的值照常保存。
+		mergeFields := make([]string, 0, len(fields))
+		for _, field := range fields {
+			clear := false
+			for _, requested := range value.ClearSensitiveFields {
+				if field == requested {
+					clear = true
+					break
+				}
+			}
+			if !clear {
+				mergeFields = append(mergeFields, field)
+			}
+		}
+		config, err = mergeJSONSecrets(config, current.Config, mergeFields)
 		if err != nil {
 			return fmt.Errorf("preserve %s notification secrets: %w", value.Channel, err)
 		}

@@ -319,12 +319,13 @@ type DeviceProxyBinding struct {
 }
 
 type NotificationSetting struct {
-	Channel         string
-	Enabled         bool
-	Config          json.RawMessage
-	SensitiveFields []string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	Channel              string
+	Enabled              bool
+	Config               json.RawMessage
+	SensitiveFields      []string
+	ClearSensitiveFields []string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 func (value NotificationSetting) Redacted() NotificationSetting {

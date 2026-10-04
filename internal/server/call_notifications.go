@@ -127,7 +127,7 @@ func (s *Server) NotifyIncomingCall(ctx context.Context, notification IncomingCa
 	}
 
 	destCtx := s.notificationDestinationContext(ctx)
-	for _, channel := range []string{"telegram", "bark", "email", "pushplus", "webhook", "wecom", "lark"} {
+	for _, channel := range notificationChannels {
 		setting, err := s.store.NotificationSetting(destCtx, channel)
 		if errors.Is(err, store.ErrNotFound) || (err == nil && !setting.Enabled) {
 			continue
@@ -154,6 +154,9 @@ func (s *Server) NotifyIncomingCall(ctx context.Context, notification IncomingCa
 }
 
 func sendCallNotification(ctx context.Context, channel string, config map[string]any, message IncomingCallNotification) error {
+	if channel == "meow" {
+		return sendMeowNotification(ctx, config, message.Title(), message.Text())
+	}
 	switch channel {
 	case "telegram":
 		return sendTelegramTextNotification(ctx, config, message.Text())

@@ -469,6 +469,7 @@ export interface EsimOverview {
 }
 
 export interface NotificationSettings {
+  meow: { enabled: boolean; nickname: string; url: string; imgUrl: string };
   telegram: Record<string, unknown>;
   webhook: Record<string, unknown>;
   bark: Record<string, unknown>;

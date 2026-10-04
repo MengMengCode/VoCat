@@ -14,15 +14,17 @@ import {
   buildBarkPayload,
   buildEmailPayload,
   buildLarkPayload,
+  buildMeowPayload,
   buildNotificationsPayload,
   buildWecomPayload,
   buildWebhookPayload,
   defaultNotifyForms,
   formsFromNotifications,
   type NotifyForms,
+  type ClearableNotificationChannel,
 } from "../components/settings/model";
 import { PushplusTab, TelegramTab } from "../components/settings/BotTabs";
-import { BarkTab, EmailTab, LarkTab, WebhookTab, WecomTab } from "../components/settings/PushTabs";
+import { BarkTab, EmailTab, LarkTab, WebhookTab, WecomTab, MeowTab } from "../components/settings/PushTabs";
 import { PluginsCard } from "../components/settings/PluginsCard";
 import { HTTPSCard } from "../components/settings/HTTPSCard";
 import { DeviceQuotaCard } from "../components/settings/DeviceQuotaCard";
@@ -41,6 +43,7 @@ const NOTIFY_TABS = [
   { key: "webhook", label: "Webhook" },
   { key: "wecom", label: "企业微信消息推送" },
   { key: "lark", label: "飞书 / Lark 群机器人" },
+  { key: "meow", label: "MeoW" },
 ];
 
 const EMPTY_SYSTEM_INFO: SystemInfo = { version: "", buildTime: "", config: "" };
@@ -52,6 +55,18 @@ export default function SettingsPage() {
   const [systemInfo, setSystemInfo] = useState<SystemInfo>(EMPTY_SYSTEM_INFO);
   const [password, setPassword] = useState<PasswordForm>(EMPTY_PASSWORD);
   const [forms, setForms] = useState<NotifyForms>(defaultNotifyForms);
+  const [clearedChannels, setClearedChannels] = useState<ClearableNotificationChannel[]>([]);
+  const clearChannel = async (channel: ClearableNotificationChannel) => {
+    const name = t(NOTIFY_TABS.find(tab => tab.key === channel)!.label);
+    if (!await confirmDialog(
+      t("清空后将移除该渠道的账号、地址和凭据，其他选项恢复默认值。启用状态保持不变，点击“保存通知配置”后生效。"),
+      t("清空配置") + " · " + name,
+      { type: "warning", confirmVariant: "danger", confirmText: t("清空配置"), cancelText: t("取消") },
+    )) return;
+    setForms(prev => ({ ...prev, [channel]: { ...defaultNotifyForms()[channel], enabled: prev[channel].enabled } }));
+    setClearedChannels(prev => prev.includes(channel) ? prev : [...prev, channel]);
+  };
+  const [testingMeow, setTestingMeow] = useState(false);
   const [activeTab, setActiveTab] = useState("telegram");
   const [loadingNotif, setLoadingNotif] = useState(false);
   const [savingNotif, setSavingNotif] = useState(false);
@@ -297,21 +312,35 @@ export default function SettingsPage() {
   }, [password, refresh]);
 
   const onSaveNotifications = useCallback(async () => {
+    if (savingNotif) return;
     setSavingNotif(true);
     try {
       // vocat 后端 PUT 成功即返回完整配置文档（参考实现返回 {applied, warning}）
       const data = await api<NotificationSettings>("/settings/notifications", {
         method: "PUT",
-        body: buildNotificationsPayload(forms),
+        body: buildNotificationsPayload(forms, clearedChannels),
       });
       setForms(formsFromNotifications(data));
+      setClearedChannels([]);
       message.success(t("通知配置已保存"));
     } catch (error) {
       message.error(apiMessage(error) || t("通知配置保存失败"));
     } finally {
       setSavingNotif(false);
     }
-  }, [forms]);
+  }, [forms, clearedChannels, savingNotif]);
+
+  const onTestMeow = async () => {
+    setTestingMeow(true);
+    try {
+      await api("/settings/notifications/meow/test", { method: "POST", body: buildMeowPayload(forms.meow) });
+      message.success(t("测试通知已发送"));
+    } catch (error) {
+      message.error(apiMessage(error) || t("MeoW 测试失败"));
+    } finally {
+      setTestingMeow(false);
+    }
+  };
 
   const onTestWebhook = useCallback(async () => {
     setTestingWebhook(true);
@@ -524,7 +553,7 @@ export default function SettingsPage() {
               <CardIcon>
                 <AlertRegular className="text-[24px]" />
               </CardIcon>
-              <CardTitle title={t("通知")} subtitle={t("Telegram / Bark / Email / Pushplus / Webhook / 企业微信 / 飞书 / Lark 群机器人")} />
+              <CardTitle title={t("通知")} subtitle={t("Telegram / Bark / Email / Pushplus / Webhook / 企业微信 / 飞书 / Lark 群机器人 / MeoW")} />
             </div>
             <Button variant="primary" loading={savingNotif} disabled={loadingNotif} onClick={onSaveNotifications} className="!border-0" icon={<CheckmarkRegular />}>
               {t("保存通知配置")}
@@ -533,16 +562,17 @@ export default function SettingsPage() {
           {loadingNotif ? (
             <div className="p-6 text-sm text-gray-500 dark:text-gray-400">{t("正在加载通知配置…")}</div>
           ) : (
-            <div className="relative z-10 w-full overflow-hidden">
+            <fieldset disabled={savingNotif} className="relative z-10 min-w-0 w-full overflow-hidden">
               <SegmentedTabs tabs={NOTIFY_TABS.map((tab) => ({ ...tab, label: t(tab.label) }))} value={activeTab} onChange={setActiveTab} />
+              {activeTab === "meow" ? <MeowTab value={forms.meow} onChange={(p) => updateChannel("meow", p)} testing={testingMeow} onTest={onTestMeow} /> : null}
               {activeTab === "telegram" ? (
-                <TelegramTab value={forms.telegram} onChange={(p) => updateChannel("telegram", p)} />
+                <TelegramTab onClear={() => void clearChannel("telegram")} value={forms.telegram} onChange={(p) => updateChannel("telegram", p)} />
               ) : null}
               {activeTab === "bark" ? (
                 <BarkTab value={forms.bark} onChange={(p) => updateChannel("bark", p)} testing={testingBark} onTest={onTestBark} />
               ) : null}
               {activeTab === "email" ? (
-                <EmailTab value={forms.email} onChange={(p) => updateChannel("email", p)} testing={testingEmail} onTest={onTestEmail} />
+                <EmailTab onClear={() => void clearChannel("email")} value={forms.email} onChange={(p) => updateChannel("email", p)} testing={testingEmail} onTest={onTestEmail} />
               ) : null}
               {activeTab === "pushplus" ? (
                 <PushplusTab value={forms.pushplus} onChange={(p) => updateChannel("pushplus", p)} />
@@ -561,7 +591,7 @@ export default function SettingsPage() {
               {activeTab === "lark" ? (
                 <LarkTab value={forms.lark} onChange={(p) => updateChannel("lark", p)} testing={testingLark} onTest={onTestLark} />
               ) : null}
-            </div>
+            </fieldset>
           )}
         </div>
       </div>

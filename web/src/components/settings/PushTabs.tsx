@@ -6,7 +6,7 @@ import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { ChannelHeader, EmptyLine, Field, UrlListEditor } from "./controls";
 import { HEADER_NAME_SUGGESTIONS, nextHeaderRowId } from "./model";
-import type { BarkForm, EmailForm, HeaderRow, LarkForm, WebhookForm, WecomForm } from "./model";
+import type { BarkForm, EmailForm, HeaderRow, LarkForm, NotifyForms, WebhookForm, WecomForm } from "./model";
 
 const HEADER_LIST_ID = "vocat-webhook-header-names";
 
@@ -81,13 +81,14 @@ export function BarkTab({ value, onChange, testing, onTest }: PushChannelProps<B
   );
 }
 
-export function EmailTab({ value, onChange, testing, onTest }: PushChannelProps<EmailForm>) {
+export function EmailTab({ value, onChange, testing, onTest, onClear }: PushChannelProps<EmailForm> & { onClear: () => void }) {
   const { t } = useI18n();
   const off = !value.enabled;
   const complete = !!(value.smtpHost && value.smtpPort && value.username && value.password && value.fromAddress && value.toAddresses);
   return (
     <div className="pt-2">
       <ChannelHeader
+        onClear={onClear}
         title={t("启用 Email 推送")}
         enabled={value.enabled}
         onToggle={(enabled) => onChange({ enabled })}
@@ -386,6 +387,37 @@ export function LarkTab({ value, onChange, testing, onTest }: PushChannelProps<L
             rows={12}
             className="font-mono text-xs"
           />
+        </Field>
+      </div>
+    </div>
+  );
+}
+
+export function MeowTab({ value, onChange, testing, onTest }: PushChannelProps<NotifyForms["meow"]>) {
+  const { t } = useI18n();
+  const off = !value.enabled;
+  return (
+    <div className="pt-2">
+      <ChannelHeader
+        title={t("启用 MeoW 推送")}
+        enabled={value.enabled}
+        onToggle={(enabled) => onChange({ enabled })}
+        actions={
+          <Button size="small" variant="primary" plain loading={testing} disabled={off || !value.nickname.trim()} onClick={onTest}>
+            {t("测试通知")}
+          </Button>
+        }
+      />
+      <OneWayNotificationHint />
+      <div className="space-y-4">
+        <Field label={t("MeoW 昵称")}>
+          <Input aria-label={t("MeoW 昵称")} value={value.nickname} onChange={(e) => onChange({ nickname: e.target.value })} disabled={off} />
+        </Field>
+        <Field label={t("跳转链接 (url)")}>
+          <Input aria-label={t("跳转链接 (url)")} value={value.url} onChange={(e) => onChange({ url: e.target.value })} disabled={off} placeholder={t("点击通知时打开的链接，选填。")} />
+        </Field>
+        <Field label={t("通知图标 (imgUrl)")}>
+          <Input aria-label={t("通知图标 (imgUrl)")} value={value.imgUrl} onChange={(e) => onChange({ imgUrl: e.target.value })} disabled={off} placeholder={t("图标 URL，建议使用 216×216 PNG，选填。")} />
         </Field>
       </div>
     </div>

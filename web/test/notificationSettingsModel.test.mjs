@@ -89,3 +89,27 @@ test("includes Lark in the complete notification settings payload", () => {
     payload_template: DEFAULT_LARK_PAYLOAD_TEMPLATE,
   });
 });
+
+test("round-trips MeoW alongside the seven existing channels", () => {
+  const forms = formsFromNotifications({ meow: { enabled: true, nickname: " 昵称 ", url: " https://example.com ", imgUrl: " https://example.com/icon.png " } });
+  assert.deepEqual(buildNotificationsPayload(forms).meow, { enabled: true, nickname: "昵称", url: "https://example.com", imgUrl: "https://example.com/icon.png" });
+  assert.deepEqual(Object.keys(buildNotificationsPayload(forms)).sort(), ["bark", "email", "lark", "meow", "pushplus", "telegram", "webhook", "wecom"].sort());
+});
+
+test("clear markers apply only to explicitly cleared Telegram and Email drafts", () => {
+  const forms = formsFromNotifications({ telegram: { enabled: true, botToken: "********" }, email: { enabled: false, password: "********" } });
+  const normal = buildNotificationsPayload(forms);
+  assert.equal(Object.hasOwn(normal.telegram, "clearSecrets"), false);
+  assert.equal(Object.hasOwn(normal.email, "clearSecrets"), false);
+  forms.telegram.botToken = "";
+  const cleared = buildNotificationsPayload(forms, ["telegram"]);
+  assert.equal(cleared.telegram.enabled, true);
+  assert.equal(cleared.telegram.botToken, "");
+  assert.equal(cleared.telegram.clearSecrets, true);
+  assert.equal(Object.hasOwn(cleared.email, "clearSecrets"), false);
+  forms.email.password = "new-password";
+  const rewritten = buildNotificationsPayload(forms, ["email"]);
+  assert.equal(rewritten.email.enabled, false);
+  assert.equal(rewritten.email.password, "new-password");
+  assert.equal(rewritten.email.clearSecrets, true);
+});

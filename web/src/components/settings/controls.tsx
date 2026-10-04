@@ -151,11 +151,13 @@ export function ChannelHeader({
   enabled,
   onToggle,
   actions,
+  onClear,
 }: {
   title: ReactNode;
   enabled: boolean;
   onToggle: (enabled: boolean) => void;
   actions?: ReactNode;
+  onClear?: () => void;
 }) {
   return (
     <div className="mb-4 flex items-center justify-between">
@@ -163,6 +165,7 @@ export function ChannelHeader({
         <div className="font-bold text-gray-800 dark:text-gray-100">{title}</div>
       </div>
       <div className="flex items-center gap-2">
+        {onClear ? <Button size="small" variant="danger" plain onClick={onClear}>{tl("清空配置")}</Button> : null}
         {actions}
         <Switch checked={enabled} onChange={onToggle} />
       </div>
