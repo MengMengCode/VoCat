@@ -20,6 +20,7 @@ func TestNextAutomaticRunUsesIntervalAndLocalClock(t *testing.T) {
 	}
 }
 
+// 验证任务正文仅移除重复标题，保留普通首行且不修改原始文本。
 func TestAutomaticTaskNotificationDetailTextRemovesTitle(t *testing.T) {
 	message := automaticTaskNotification{
 		Title: "自动任务执行成功",
@@ -28,10 +29,18 @@ func TestAutomaticTaskNotificationDetailTextRemovesTitle(t *testing.T) {
 	if got := message.DetailText(); got != "任务  检查网络\n结果  任务已完成" {
 		t.Fatalf("DetailText() = %q", got)
 	}
+	if message.Text != "自动任务执行成功\n任务  检查网络\n结果  任务已完成" {
+		t.Fatalf("DetailText() changed the original text to %q", message.Text)
+	}
 
 	message.Text = "正文第一行\n正文第二行"
 	if got := message.DetailText(); got != message.Text {
 		t.Fatalf("DetailText() changed non-title body to %q", got)
+	}
+
+	message.Text = "提醒：自动任务执行成功后请确认\n结果  任务已完成"
+	if got := message.DetailText(); got != message.Text {
+		t.Fatalf("DetailText() changed a first line merely mentioning the title to %q", got)
 	}
 }
 

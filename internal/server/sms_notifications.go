@@ -278,9 +278,10 @@ func (s *Server) logSMSNotificationError(channel string, err error) {
 	}
 }
 
+// sendSMSNotification 按渠道发送短信，MeoW 与其他独立标题渠道复用 DetailText。
 func sendSMSNotification(ctx context.Context, channel string, config map[string]any, message smsNotification) error {
 	if channel == "meow" {
-		return sendMeowNotification(ctx, config, "收到新短信", message.DetailText())
+		return meowNotificationSender(ctx, config, "收到新短信", message.DetailText())
 	}
 	switch channel {
 	case "bark":
