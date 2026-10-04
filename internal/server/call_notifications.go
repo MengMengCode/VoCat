@@ -155,7 +155,7 @@ func (s *Server) NotifyIncomingCall(ctx context.Context, notification IncomingCa
 
 func sendCallNotification(ctx context.Context, channel string, config map[string]any, message IncomingCallNotification) error {
 	if channel == "meow" {
-		return sendMeowNotification(ctx, config, message.Title(), message.Text())
+		return sendMeowNotification(ctx, config, message.Title(), message.DetailText())
 	}
 	switch channel {
 	case "telegram":

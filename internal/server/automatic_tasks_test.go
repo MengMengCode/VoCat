@@ -20,6 +20,21 @@ func TestNextAutomaticRunUsesIntervalAndLocalClock(t *testing.T) {
 	}
 }
 
+func TestAutomaticTaskNotificationDetailTextRemovesTitle(t *testing.T) {
+	message := automaticTaskNotification{
+		Title: "自动任务执行成功",
+		Text:  "自动任务执行成功\n任务  检查网络\n结果  任务已完成",
+	}
+	if got := message.DetailText(); got != "任务  检查网络\n结果  任务已完成" {
+		t.Fatalf("DetailText() = %q", got)
+	}
+
+	message.Text = "正文第一行\n正文第二行"
+	if got := message.DetailText(); got != message.Text {
+		t.Fatalf("DetailText() changed non-title body to %q", got)
+	}
+}
+
 func TestUSBSIMReaderAutomaticTasksRequireVoWiFi(t *testing.T) {
 	reader := store.Device{DeviceType: store.DeviceTypeUSBSIMReader}
 	for _, test := range []struct {

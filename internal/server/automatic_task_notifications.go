@@ -30,6 +30,14 @@ type automaticTaskNotification struct {
 	Run   store.AutomaticTaskRun
 }
 
+func (value automaticTaskNotification) DetailText() string {
+	lines := strings.SplitN(value.Text, "\n", 2)
+	if len(lines) == 2 && strings.TrimSpace(lines[0]) == strings.TrimSpace(value.Title) {
+		return lines[1]
+	}
+	return value.Text
+}
+
 func (s *Server) notifyAutomaticTask(ctx context.Context, task store.AutomaticTask, run store.AutomaticTaskRun) {
 	ctx = s.notificationDestinationContext(ctx)
 	deviceLabel := task.DeviceID
@@ -79,7 +87,7 @@ func (s *Server) notifyAutomaticTask(ctx context.Context, task store.AutomaticTa
 
 func sendAutomaticTaskNotification(ctx context.Context, channel string, config map[string]any, message automaticTaskNotification) error {
 	if channel == "meow" {
-		return sendMeowNotification(ctx, config, message.Title, message.Text)
+		return sendMeowNotification(ctx, config, message.Title, message.DetailText())
 	}
 	switch channel {
 	case "telegram":
