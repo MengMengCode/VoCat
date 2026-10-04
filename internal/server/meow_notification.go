@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 )
 
 func validateMeowNotificationConfig(config map[string]any) error {
@@ -55,12 +56,22 @@ func meowMessageBody(title, text string) string {
 		// A single-line body cannot carry the title separately.
 		return text
 	}
-	// Some notifications prefix the title with an emoji, for example
-	// "📞 收到来电", so match on the text instead of the raw line.
-	if head := strings.TrimSpace(lines[0]); head != title && !strings.Contains(head, title) {
+	if !meowTitleLine(lines[0], title) {
 		return text
 	}
 	return strings.Join(lines[1:], "\n")
+}
+
+// meowTitleLine reports whether a body line only repeats the title. Some
+// notifications prefix the title with an emoji, for example "📞 收到来电", so a
+// leading run of non-alphanumeric runes is ignored. Everything after that must
+// equal the title exactly: a line that merely mentions the title inside other
+// text carries real content and has to be kept.
+func meowTitleLine(line, title string) bool {
+	head := strings.TrimSpace(line)
+	return head == title || strings.TrimLeftFunc(head, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) == title
 }
 
 func postMeowNotification(ctx context.Context, client *http.Client, endpoint, title, text string, config map[string]any) error {

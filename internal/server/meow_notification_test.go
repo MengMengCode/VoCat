@@ -120,6 +120,26 @@ func TestMeowMessageBodyDropsRepeatedTitle(t *testing.T) {
 			text:  "第一行\n第二行",
 			want:  "第一行\n第二行",
 		},
+		{
+			// A first line that merely mentions the title inside other text is
+			// real content, not a repeated title, so it must survive.
+			name:  "first line mentioning the title inside other text is kept",
+			title: "收到新短信",
+			text:  "提醒：收到新短信后请确认\n设备  A",
+			want:  "提醒：收到新短信后请确认\n设备  A",
+		},
+		{
+			name:  "title only in a later line is not touched",
+			title: "收到新短信",
+			text:  "第一行\n备注  收到新短信",
+			want:  "第一行\n备注  收到新短信",
+		},
+		{
+			name:  "emoji prefix and trailing space are trimmed",
+			title: "收到来电",
+			text:  "📞  收到来电  \n设备  A",
+			want:  "设备  A",
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			if got := meowMessageBody(testCase.title, testCase.text); got != testCase.want {
