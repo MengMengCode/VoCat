@@ -457,10 +457,17 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 	controller := http.NewResponseController(w)
 	_ = controller.SetWriteDeadline(time.Time{})
 	aidHex := firstNonEmpty(request.AIDHex, request.AIDHexCamel)
-	if err := s.devices.ESIMSwitchProfile(r.Context(), physicalID, iccid, aidHex); err != nil {
+	switchErr := s.devices.ESIMSwitchProfile(r.Context(), physicalID, iccid, aidHex)
+	// The device manager keeps a committed profile change alive across client
+	// disconnects. Apply its verified result to the saved policy and runtime even
+	// when the original request was canceled, with a separate time budget.
+	finalizeContext, cancelFinalize := context.WithTimeout(context.WithoutCancel(r.Context()), 45*time.Second)
+	defer cancelFinalize()
+	r = r.WithContext(finalizeContext)
+	if switchErr != nil {
 		endMaintenance()
 		s.restoreProfileSwitchFailureState(r.Context(), configuredID, physicalID)
-		s.writeDeviceError(w, err)
+		s.writeDeviceError(w, switchErr)
 		return
 	}
 	if _, err := s.devices.SetFlight(r.Context(), physicalID, true); err != nil {

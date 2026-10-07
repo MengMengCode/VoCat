@@ -30,7 +30,9 @@ func openSerialTransport(path string, baudRate int) (Transport, error) {
 	if !ok {
 		return nil, fmt.Errorf("unsupported baud rate %d", baudRate)
 	}
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
+	// Set close-on-exec atomically: a long-lived qmi-proxy or other subprocess
+	// must not retain this descriptor and its TIOCEXCL claim after Close.
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
