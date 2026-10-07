@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -218,6 +219,96 @@ func TestESIMInventoryATTransportDoesNotAddChannelProbe(t *testing.T) {
 		t.Fatalf("inventory error = %v, want no eUICC", err)
 	}
 	client.assertDone(t)
+}
+
+// USB EC20 虽配置为 QMI，现有 eSIM 读取实际使用 AT+CSIM；恢复重试也必须覆盖它。
+func TestESIMInventoryUSBEC20ChannelProbe(t *testing.T) {
+	for _, scenario := range []string{"healthy", "recovers", "ordinary_SIM_stays_empty"} {
+		t.Run(scenario, func(t *testing.T) {
+			step := func(apdu, response string) clientStep {
+				return clientStep{
+					command:  fmt.Sprintf(`AT+CSIM=%d,"%s"`, len(apdu), apdu),
+					response: okResponse(fmt.Sprintf(`+CSIM: %d,"%s"`, len(response), response)),
+				}
+			}
+			open := step("0070000001", "029000")
+			close := step("0070800200", "9000")
+			selectAID := func(aid, result string) clientStep {
+				return step("02A4040010"+aid, result)
+			}
+			var missing []clientStep
+			for _, aid := range []string{estkProductAID, isdRAID, xesimISDRAID, isdRAID} {
+				missing = append(missing, open, selectAID(aid, "6A82"), close)
+			}
+			var readable []clientStep
+			for _, aid := range []string{estkProductAID, estkSE0AID, estkSE1AID} {
+				readable = append(readable, open, selectAID(aid, "9000"), close)
+			}
+			iccid, err := encodeICCID("8900000000000000001")
+			if err != nil {
+				t.Fatal(err)
+			}
+			profilePayload := derConstruct(0xBF2D, derConstruct(0xE3, derEncode(0x5A, iccid)))
+			eidPayload := derConstruct(0xBF3E, derEncode(0x5A, bytes.Repeat([]byte{0x89}, 16)))
+			for _, aid := range []string{estkSE0AID, estkSE1AID} {
+				payload := profilePayload
+				if aid == estkSE1AID {
+					payload = []byte{0xBF, 0x2D, 0x00}
+				}
+				readable = append(readable,
+					open, selectAID(aid, "9000"),
+					// 与现场相同：GetProfilesInfo 返回 6100，再读取完整 GET RESPONSE。
+					step("82E2910003BF2D0000", "6100"),
+					step("82C0000000", strings.ToUpper(hex.EncodeToString(payload))+"9000"),
+					step("82E2910006BF3E035C015A00", strings.ToUpper(hex.EncodeToString(eidPayload))+"9000"),
+					step("82E2910003BF220000", "BF22009000"),
+					step("82E2910003BF3C0000", "BF3C009000"), close,
+				)
+			}
+			steps := readable
+			if scenario != "healthy" {
+				steps = append(append([]clientStep(nil), missing...), open, close)
+				if scenario == "recovers" {
+					steps = append(steps, readable...)
+				} else {
+					steps = append(steps, missing...)
+				}
+			}
+			client := &transcriptClient{steps: steps}
+			manager, id := newStartedTestManager(t, client)
+			state, _ := manager.lookup(id)
+			state.candidate.QMIControl = "/dev/cdc-wdm0"
+			state.candidate.NetworkInterface = "wws27u1i4"
+			if isNativeQMICandidate(state.candidate) {
+				t.Fatal("USB EC20 fixture incorrectly matches native QMI")
+			}
+			if err := manager.SetBackend(id, "qmi"); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.SetESIMTransport(id, "qmi"); err != nil {
+				t.Fatal(err)
+			}
+			manager.qmiRadioOpener = func(context.Context, string) (qmiRadioSession, error) {
+				t.Fatal("USB EC20 eSIM unexpectedly used the native QMI path")
+				return nil, errors.New("unexpected native QMI open")
+			}
+			hub := loghub.New(nil, 100)
+			manager.logger = slog.New(hub)
+			entries, err := manager.ESIMInventory(context.Background(), id)
+			if scenario == "ordinary_SIM_stays_empty" {
+				if !errors.Is(err, ErrNoEUICC) {
+					t.Fatalf("ordinary SIM error = %v, want ErrNoEUICC", err)
+				}
+			} else if err != nil || len(entries) != 2 || len(entries[0].Info.Profiles) != 1 || len(entries[1].Info.Profiles) != 0 {
+				t.Fatalf("AT inventory after probe = %+v, error = %v", entries, err)
+			}
+			if len(hub.History(10, slog.LevelWarn, "")) != 0 {
+				t.Fatal("healthy or ordinary SIM was reported as a hardware failure")
+			}
+			// 严格命令序列同时限制探测为一次，并禁止 CFUN、写 Profile 或关闭他人通道。
+			client.assertDone(t)
+		})
+	}
 }
 
 func TestProbeATLogicalChannelRejectsInvalidResponses(t *testing.T) {

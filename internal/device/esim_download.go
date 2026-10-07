@@ -283,8 +283,8 @@ func readEsimChipInfo(ctx context.Context, channel *euiccChannel, aidHex string)
 }
 
 // ESIMInventory reads every independently addressable eUICC storage exposed by
-// the inserted card without changing profiles. If QMI finds no eUICC, one
-// temporary AT channel open/close may be attempted before reading QMI again.
+// the inserted card without changing profiles. With QMI configured, a missing
+// eUICC permits one temporary AT channel open/close before a fresh inventory.
 func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInventoryEntry, error) {
 	ctx, cancel := boundESIMContext(ctx)
 	defer cancel()
@@ -308,14 +308,14 @@ func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInv
 		return nil, lookupErr
 	}
 	candidate := manager.candidateFor(state)
-	if !strings.EqualFold(manager.esimTransportFor(state), "qmi") ||
-		!isNativeQMICandidate(candidate) || !candidate.HasATPort() {
+	// USB EC20 的 QMI 配置也进入此处，其 eSIM 实际走 AT+CSIM；不能只允许原生 QMI 设备。
+	if !strings.EqualFold(manager.esimTransportFor(state), "qmi") || !candidate.HasATPort() {
 		return entries, err
 	}
 	// 仍持有 UICC 锁；只探测本次分配的通道，不选择应用或重置 SIM。
 	if probeErr := manager.probeATLogicalChannel(ctx, id); probeErr != nil {
 		if manager.logger != nil {
-			manager.logger.Warn("QMI eUICC AT channel probe failed", "device_id", id, "error", HardwareErrorDetail(probeErr))
+			manager.logger.Warn("eUICC AT channel probe failed", "device_id", id, "error", HardwareErrorDetail(probeErr))
 		}
 		return nil, errors.Join(err, probeErr)
 	}
@@ -324,10 +324,13 @@ func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInv
 	}
 	entries, err = manager.esimInventoryOnce(ctx, id)
 	if manager.logger != nil {
-		if err != nil {
-			manager.logger.Warn("QMI eUICC inventory retry after AT channel probe failed", "device_id", id, "error", HardwareErrorDetail(err))
+		if errors.Is(err, ErrNoEUICC) {
+			// 普通 SIM 不支持 eUICC 是正常结果，不记录为硬件故障。
+			manager.logger.Info("eUICC not detected after AT channel probe", "device_id", id, "error", HardwareErrorDetail(err))
+		} else if err != nil {
+			manager.logger.Warn("eUICC inventory retry after AT channel probe failed", "device_id", id, "error", HardwareErrorDetail(err))
 		} else {
-			manager.logger.Info("QMI eUICC inventory recovered after AT channel probe", "device_id", id)
+			manager.logger.Info("eUICC inventory recovered after AT channel probe", "device_id", id)
 		}
 	}
 	return entries, err
