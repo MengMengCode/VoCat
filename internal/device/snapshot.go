@@ -77,19 +77,26 @@ func (manager *Manager) readSnapshot(
 	if !snapshot.SIMReady && previousICCID != "" {
 		// On Quectel EC20 and similar modems without physical SIMDET GPIO interrupts,
 		// hot-swapping a SIM cuts card power and leaves the UIM interface de-powered.
-		// A fast soft cycle (AT+CFUN=0 -> AT+CFUN=1/4) re-powers the SIM interface,
+		// A fast soft cycle (AT+CFUN=0 -> AT+CFUN=4) re-powers the SIM interface,
 		// triggers ATR and card initialization without hardware restart.
-		_, _ = manager.command(ctx, client, "AT+CFUN=0")
+		if manager.logger != nil {
+			manager.logger.Info("recovering SIM with cellular RF disabled", "category", "hardware", "device_id", id,
+				"recovery_source", "snapshot", "target_cfun", 4)
+		}
+		if _, err := manager.command(ctx, client, "AT+CFUN=0"); err != nil {
+			return snapshot, fmt.Errorf("power down SIM for snapshot recovery: %w", err)
+		}
 		select {
 		case <-ctx.Done():
 			return snapshot, ctx.Err()
 		case <-time.After(300 * time.Millisecond):
 		}
-		targetCFUN := "AT+CFUN=1"
-		if snapshot.FlightMode {
-			targetCFUN = "AT+CFUN=4"
+		// CFUN is read near the end of this snapshot: FlightMode still has its
+		// zero value here. Restore RF-off mode; policy reconciliation can later
+		// explicitly enable cellular operation for the identified card.
+		if _, err := manager.command(ctx, client, "AT+CFUN=4"); err != nil {
+			return snapshot, fmt.Errorf("restore RF-off SIM interface: %w", err)
 		}
-		_, _ = manager.command(ctx, client, targetCFUN)
 		select {
 		case <-ctx.Done():
 			return snapshot, ctx.Err()
@@ -134,7 +141,9 @@ func (manager *Manager) readSnapshot(
 		// A different physical SIM must never inherit the previous card's
 		// permission to use cellular RF. Disable RF before reading serving-cell
 		// or operator state; policy reconciliation will then start VoWiFi.
-		_, _ = manager.command(ctx, client, "AT+CFUN=4")
+		if _, err := manager.command(ctx, client, "AT+CFUN=4"); err != nil {
+			return snapshot, fmt.Errorf("protect changed SIM from cellular RF: %w", err)
+		}
 		snapshot.SIMChanged = true
 	}
 	if response, ok := optional("AT+CIMI"); ok {

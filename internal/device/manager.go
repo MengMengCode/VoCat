@@ -865,6 +865,9 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 		manager.setResult(id, state, nil, err)
 		return err
 	}
+	if err := manager.requireOnlineModemRestart(ctx, client); err != nil {
+		return err
+	}
 	state.dataMu.Lock()
 	invalidateQMINetworkSession(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
@@ -882,7 +885,7 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 }
 
 // softResetForProfileSwitch resets the baseband SIM stack using a soft CFUN sequence
-// (AT+CFUN=0 -> AT+CFUN=1/4) instead of rebooting the entire hardware module (AT+CFUN=1,1).
+// (AT+CFUN=0 -> AT+CFUN=4) instead of rebooting the entire hardware module (AT+CFUN=1,1).
 // This causes the baseband to reload the new eSIM profile files within ~1-2 seconds
 // without disconnecting USB/PCIe or dropping serial communication ports.
 func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string) error {
@@ -907,7 +910,13 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 	defer cancel()
 
 	// 1. Cycle SIM interface to minimum functionality / clear cached SIM files
-	_, _ = client.Execute(commandCtx, "AT+CFUN=0")
+	if manager.logger != nil {
+		manager.logger.Info("recovering SIM with cellular RF disabled", "category", "hardware", "device_id", id,
+			"recovery_source", "profile_switch", "target_cfun", 4)
+	}
+	if _, err := client.Execute(commandCtx, "AT+CFUN=0"); err != nil {
+		return fmt.Errorf("power down SIM for profile recovery: %w", err)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -915,12 +924,9 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	// 2. Restore radio to trigger fresh USIM file reading
-	targetCFUN := "AT+CFUN=1"
-	if state.snapshot != nil && state.snapshot.FlightMode {
-		targetCFUN = "AT+CFUN=4"
-	}
-	_, err = client.Execute(commandCtx, targetCFUN)
+	// 2. Reload the USIM without enabling RF. Snapshots can be nil or partial
+	// during REFRESH; their zero-value FlightMode does not authorize CFUN=1.
+	_, err = client.Execute(commandCtx, "AT+CFUN=4")
 
 	manager.clearSnapshot(id, state)
 	manager.setResult(id, state, nil, err)

@@ -408,6 +408,10 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 		state.opMu.Unlock()
 		return fmt.Errorf("open EC20 for MBN validation: %w", err)
 	}
+	if err := manager.requireOnlineModemRestart(ctx, client); err != nil {
+		state.opMu.Unlock()
+		return fmt.Errorf("defer MBN selection requiring online restart: %w", err)
+	}
 	commandContext, cancelCommand := context.WithTimeout(ctx, manager.longTimeout)
 	changed, previous, selected, err := reconcileMBNSelection(commandContext, client, hplmn, override)
 	cancelCommand()
@@ -470,6 +474,10 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 
 func (manager *Manager) reconcileEC20MBNAfterProfileSwitchBestEffort(ctx context.Context, id, expectedICCID string) {
 	if err := manager.ReconcileEC20MBNAfterProfileSwitch(ctx, id, expectedICCID); err != nil && manager.logger != nil {
+		if errors.Is(err, ErrRFOffRestart) {
+			manager.logger.Info("EC20 MBN reconciliation deferred while cellular RF is disabled", "device_id", id)
+			return
+		}
 		// EnableProfile has already been committed and its ICCID verified. Keep
 		// this compatibility repair separate from switch success so callers can
 		// still restore the new card's saved radio, APN and VoWiFi policy.

@@ -479,3 +479,20 @@ func (manager *Manager) updateSnapshotMode(
 	state.snapshot.FlightMode = isRadioOffMode(mode)
 	state.snapshot.RadioOff = state.snapshot.FlightMode
 }
+
+// ErrRFOffRestart indicates that an online restart would violate RF-off mode.
+var ErrRFOffRestart = errors.New("online modem restart is not permitted while cellular RF is disabled")
+
+// CFUN=1,1 is an online restart. Reapplying CFUN=4 after enumeration cannot
+// prevent an attach during boot. Check live mode before changing configuration
+// that requires this restart; stale or incomplete snapshots cannot authorize it.
+func (manager *Manager) requireOnlineModemRestart(ctx context.Context, client modem.Client) error {
+	mode, err := manager.readOperatingMode(ctx, client)
+	if err != nil {
+		return fmt.Errorf("verify RF mode before modem restart: %w", err)
+	}
+	if mode != 1 {
+		return ErrRFOffRestart
+	}
+	return nil
+}

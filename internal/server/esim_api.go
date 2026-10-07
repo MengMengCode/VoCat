@@ -571,38 +571,35 @@ func (s *Server) quiesceVoWiFiForProfileSwitch(ctx context.Context, configuredID
 	}
 }
 
-// restoreProfileSwitchFailureState restores the device's flight mode and VoWiFi
-// runtime state to their pre-switch configurations when ESIMSwitchProfile fails,
-// preventing the modem from remaining disabled/stranded in flight mode.
+// restoreProfileSwitchFailureState keeps RF off unless the live subscription
+// explicitly permits cellular operation. VoWiFi=false alone is insufficient;
+// a rejected switch can leave the old identity cached or the new one unreadable.
 func (s *Server) restoreProfileSwitchFailureState(ctx context.Context, configuredID, physicalID string) {
 	if s.store == nil || s.devices == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+	defer cancel()
 	config, err := s.store.Device(ctx, configuredID)
 	if err != nil {
-		_, _ = s.devices.SetFlight(context.Background(), physicalID, false)
+		_, _ = s.devices.SetFlight(ctx, physicalID, true)
 		return
 	}
 	if config.VoWiFiEnabled && s.vowifi != nil {
 		if _, err := s.vowifi.RequestEnabled(configuredID, true); err != nil {
 			s.logger.Warn("profile switch failed; error restoring VoWiFi runtime", "device_id", configuredID, "error", err)
 		}
-		shouldDisableFlight := false
-		if runtime, rErr := s.store.DeviceRuntime(ctx, configuredID); rErr == nil && runtime.ICCID != "" {
-			if policy, pErr := s.store.CardPolicy(ctx, runtime.ICCID); pErr == nil && !policy.AirplaneEnabled {
-				shouldDisableFlight = true
+	}
+	flightEnabled := true
+	if !config.VoWiFiEnabled {
+		if snapshot, refreshErr := s.devices.Refresh(ctx, physicalID); refreshErr == nil && snapshot.ICCID != "" {
+			if policy, policyErr := s.store.CardPolicy(ctx, snapshot.ICCID); policyErr == nil {
+				flightEnabled = policy.AirplaneEnabled || policy.VoWiFiEnabled
 			}
 		}
-		if shouldDisableFlight {
-			if _, err := s.devices.SetFlight(context.Background(), physicalID, false); err != nil {
-				s.logger.Warn("profile switch failed; error restoring airplane mode", "device_id", configuredID, "error", err)
-			}
-		}
-	} else {
-		// VoWiFi was disabled; restore flight mode to disabled so cellular network can resume.
-		if _, err := s.devices.SetFlight(context.Background(), physicalID, false); err != nil {
-			s.logger.Warn("profile switch failed; error restoring airplane mode", "device_id", configuredID, "error", err)
-		}
+	}
+	if _, err := s.devices.SetFlight(ctx, physicalID, flightEnabled); err != nil {
+		s.logger.Warn("profile switch failed; error restoring airplane mode", "device_id", configuredID, "error", err)
 	}
 }
 

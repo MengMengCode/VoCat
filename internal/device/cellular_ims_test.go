@@ -51,6 +51,7 @@ func TestParseCellularCSRegistration(t *testing.T) {
 func TestSetCellularIMSEnablesAndRebootsOnlyOnce(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{
 		{command: `AT+QCFG="ims"`, response: modem.Response{Lines: []string{`+QCFG: "ims",0,0`}, Final: "OK"}},
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 1")},
 		{command: `AT+QCFG="ims",1`, response: modem.Response{Final: "OK"}},
 		{command: `AT+QCFG="ims"`, response: modem.Response{Lines: []string{`+QCFG: "ims",1,0`}, Final: "OK"}},
 		{command: "AT+CFUN=1,1", response: modem.Response{Final: "OK"}},
@@ -84,6 +85,7 @@ func TestSetCellularIMSNoopDoesNotReboot(t *testing.T) {
 func TestSetCellularIMSForceDisablesWithQCFGValueTwo(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{
 		{command: `AT+QCFG="ims"`, response: modem.Response{Lines: []string{`+QCFG: "ims",1,1`}, Final: "OK"}},
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 1")},
 		{command: `AT+QCFG="ims",2`, response: modem.Response{Final: "OK"}},
 		{command: `AT+QCFG="ims"`, response: modem.Response{Lines: []string{`+QCFG: "ims",2,0`}, Final: "OK"}},
 		{command: "AT+CFUN=1,1", response: modem.Response{Final: "OK"}},

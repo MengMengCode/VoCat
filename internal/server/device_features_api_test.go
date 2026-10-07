@@ -234,6 +234,13 @@ func (c *flightTrackingController) SetFlight(_ context.Context, _ string, enable
 	return device.FlightResult{}, nil
 }
 
+func (c *flightTrackingController) Refresh(context.Context, string) (device.Snapshot, error) {
+	if c.entry.Snapshot != nil {
+		return *c.entry.Snapshot, nil
+	}
+	return device.Snapshot{}, nil
+}
+
 type fakeEsimVoWiFiController struct {
 	enabled bool
 }
@@ -691,9 +698,16 @@ func TestHandleESIMShapes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := failDatabaseCellular.UpsertCardPolicy(context.Background(), store.CardPolicy{
+		ICCID: "8900000000000000003", AirplaneEnabled: false,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	flightRecorderCellular := &flightTrackingController{
-		fakeDeviceController: fakeDeviceController{entry: device.Device{ID: "devCellular"}},
-		switchErr:            device.ErrESIMCommandError,
+		fakeDeviceController: fakeDeviceController{entry: device.Device{
+			ID: "devCellular", Snapshot: &device.Snapshot{ICCID: "8900000000000000003"},
+		}},
+		switchErr: device.ErrESIMCommandError,
 	}
 	failServerCellular := &Server{
 		store:               failDatabaseCellular,
