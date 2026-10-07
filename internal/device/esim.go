@@ -477,8 +477,7 @@ func (manager *Manager) openEuiccOnceAID(ctx context.Context, id, aidHex string)
 		_, sw, err = channel.transmit(ctx, []byte{0x80, 0xC0, 0x00, 0x00, byte(sw & 0xFF)}, 0x80)
 		if err != nil {
 			channel.close(context.Background())
-			// 保持既有“未发现”分类，仅补充此前被丢弃的错误详情。
-			return nil, fmt.Errorf("%w: AT SELECT GET RESPONSE AID=%s: %s", errNoEUICC, aidHex, HardwareErrorDetail(err))
+			return nil, fmt.Errorf("esim: AT SELECT GET RESPONSE AID=%s: %w", aidHex, err)
 		}
 	}
 	if sw != 0x9000 {

@@ -570,6 +570,10 @@ func (adapter *EC20Adapter) authenticateWithApplication(
 			// 仅在 CCHO 明确拒绝时复用已有 CSIM 路径，不降级到 USIM。
 			raw, basicErr := adapter.authenticateBasicApplication(ctx, binding, apdu)
 			if basicErr != nil {
+				if errors.Is(basicErr, ErrEC20AKACommand) {
+					// SELECT 已成功，仅保留 CCHO 原因，不再标记应用不存在。
+					return AKAResult{}, errors.Join(fmt.Errorf("open application: %w", commandErr), basicErr)
+				}
 				return AKAResult{}, errors.Join(err, basicErr)
 			}
 			binding.basicChannel = true

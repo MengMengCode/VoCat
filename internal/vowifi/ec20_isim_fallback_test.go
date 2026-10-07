@@ -180,6 +180,12 @@ func TestEC20ISIMFallbackDoesNotDowngradeOrHideFailures(t *testing.T) {
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("authentication error = %v, want %v", err, test.wantErr)
 			}
+			if test.selectSW == "9000" && errors.Is(err, ErrEC20ApplicationAbsent) {
+				t.Fatalf("selected application must not be classified as absent: %v", err)
+			}
+			if test.authErr != nil && !errors.Is(err, openErr) {
+				t.Fatalf("authentication error lost the CCHO cause: %v", err)
+			}
 			if strings.Contains(err.Error(), secret) {
 				t.Fatalf("authentication error exposed sensitive details: %v", err)
 			}
