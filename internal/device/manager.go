@@ -33,7 +33,7 @@ type Manager struct {
 	uiccMu             sync.Mutex // serializes all multi-command UICC/APDU transactions
 	esimMu             sync.Mutex // serializes eSIM card access (list/switch/download)
 	esimRecoveryMu     sync.Mutex
-	esimRecoveries     map[string]chan struct{}
+	esimRecoveries     map[string]*esimRecovery
 	esimCacheMu        sync.RWMutex
 	esimCache          map[string]EsimInfo
 	discoverer         modem.Discoverer
@@ -184,7 +184,7 @@ func NewManager(options Options) (*Manager, error) {
 
 		devices:        make(map[string]*managedDevice),
 		ussdSessions:   make(map[string]ussdSession),
-		esimRecoveries: make(map[string]chan struct{}),
+		esimRecoveries: make(map[string]*esimRecovery),
 		esimCache:      make(map[string]EsimInfo),
 	}, nil
 }

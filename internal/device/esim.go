@@ -1084,12 +1084,12 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 	// The eUICC accepted the target profile. Reset and repopulate the modem in
 	// a detached recovery so it survives an HTTP disconnect, but keep this API
 	// call pending until the live modem ICCID proves that the switch took effect.
-	manager.startProfileSwitchRecovery(id)
+	recovery := manager.startProfileSwitchRecovery(id)
 	manager.unlockESIM()
 
 	verifyContext, cancelVerify := context.WithTimeout(context.WithoutCancel(ctx), profileSwitchVerificationTimeout(manager))
 	defer cancelVerify()
-	if err := manager.waitForESIMRecovery(verifyContext, id); err != nil {
+	if err := manager.waitForESIMRecoveryResult(verifyContext, recovery); err != nil {
 		return err
 	}
 	if err := manager.verifySwitchedICCID(verifyContext, id, iccid); err != nil {
@@ -1103,39 +1103,52 @@ func (manager *Manager) ESIMSwitchProfile(ctx context.Context, id string, iccid 
 
 type esimCATBusyRetryKey struct{}
 
-func (manager *Manager) startProfileSwitchRecovery(id string) {
-	done := make(chan struct{})
+// esimRecovery retains an initiating operation's result after the active entry
+// is removed. Closing done publishes err to all waiters.
+type esimRecovery struct {
+	done chan struct{}
+	err  error
+}
+
+func (manager *Manager) startProfileSwitchRecovery(id string) *esimRecovery {
+	recovery := &esimRecovery{done: make(chan struct{})}
 	manager.esimRecoveryMu.Lock()
 	if manager.esimRecoveries == nil {
-		manager.esimRecoveries = make(map[string]chan struct{})
+		manager.esimRecoveries = make(map[string]*esimRecovery)
 	}
-	if manager.esimRecoveries[id] != nil {
+	if active := manager.esimRecoveries[id]; active != nil {
 		manager.esimRecoveryMu.Unlock()
-		return
+		return active
 	}
-	manager.esimRecoveries[id] = done
+	manager.esimRecoveries[id] = recovery
 	manager.esimRecoveryMu.Unlock()
 	go func() {
-		manager.recoverAfterProfileSwitch(id)
+		err := manager.recoverAfterProfileSwitch(id)
 		manager.esimRecoveryMu.Lock()
-		if manager.esimRecoveries[id] == done {
+		recovery.err = err
+		if manager.esimRecoveries[id] == recovery {
 			delete(manager.esimRecoveries, id)
-			close(done)
 		}
+		close(recovery.done)
 		manager.esimRecoveryMu.Unlock()
 	}()
+	return recovery
 }
 
 func (manager *Manager) waitForESIMRecovery(ctx context.Context, id string) error {
 	manager.esimRecoveryMu.Lock()
-	done := manager.esimRecoveries[id]
+	recovery := manager.esimRecoveries[id]
 	manager.esimRecoveryMu.Unlock()
-	if done == nil {
+	return manager.waitForESIMRecoveryResult(ctx, recovery)
+}
+
+func (manager *Manager) waitForESIMRecoveryResult(ctx context.Context, recovery *esimRecovery) error {
+	if recovery == nil {
 		return nil
 	}
 	select {
-	case <-done:
-		return nil
+	case <-recovery.done:
+		return recovery.err
 	case <-ctx.Done():
 		return fmt.Errorf("esim: wait for profile-switch recovery: %w", ctx.Err())
 	}
@@ -1237,7 +1250,7 @@ func (manager *Manager) renameCachedProfile(id, iccid, nickname string) {
 
 // recoverAfterProfileSwitch owns the post-commit SIM reset independently of the
 // initiating HTTP request.
-func (manager *Manager) recoverAfterProfileSwitch(id string) {
+func (manager *Manager) recoverAfterProfileSwitch(id string) error {
 	resetContext, cancelReset := context.WithTimeout(context.Background(), manager.longTimeout)
 	if native, err := manager.powerCycleNativeQMISIM(resetContext, id); native {
 		cancelReset()
@@ -1247,15 +1260,17 @@ func (manager *Manager) recoverAfterProfileSwitch(id string) {
 		// Native WWAN identity and profile verification are both QMI-backed.
 		// Do not enter the AT refresh path: OpenStick firmware can accept the
 		// switch while timing out every EC20-specific AT identity command.
-		return
+		return err
 	}
 	cancelReset()
+	var resetErr error
 	if !manager.isPCSCDevice(id) {
 		resetContext, cancelReset := context.WithTimeout(context.Background(), manager.commandTimeout*2)
-		_ = manager.softResetForProfileSwitch(resetContext, id)
+		resetErr = manager.softResetForProfileSwitch(resetContext, id)
 		cancelReset()
 	}
 	manager.refreshAfterProfileSwitch(id)
+	return resetErr
 }
 
 // refreshAfterProfileSwitch repopulates the device snapshot in the background

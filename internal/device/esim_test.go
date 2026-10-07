@@ -588,11 +588,11 @@ func TestOpenEuiccRecoversOrphanedSingleLogicalChannel(t *testing.T) {
 }
 
 func TestWaitForESIMRecovery(t *testing.T) {
-	done := make(chan struct{})
-	manager := &Manager{esimRecoveries: map[string]chan struct{}{"dev": done}}
+	done := &esimRecovery{done: make(chan struct{})}
+	manager := &Manager{esimRecoveries: map[string]*esimRecovery{"dev": done}}
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		close(done)
+		close(done.done)
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -600,7 +600,7 @@ func TestWaitForESIMRecovery(t *testing.T) {
 		t.Fatalf("waitForESIMRecovery: %v", err)
 	}
 
-	blocked := make(chan struct{})
+	blocked := &esimRecovery{done: make(chan struct{})}
 	manager.esimRecoveries["blocked"] = blocked
 	timeoutContext, cancelTimeout := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancelTimeout()
@@ -610,9 +610,9 @@ func TestWaitForESIMRecovery(t *testing.T) {
 }
 
 func TestESIMListProfilesReturnsCacheDuringRecovery(t *testing.T) {
-	done := make(chan struct{})
+	done := &esimRecovery{done: make(chan struct{})}
 	manager := &Manager{
-		esimRecoveries: map[string]chan struct{}{"dev": done},
+		esimRecoveries: map[string]*esimRecovery{"dev": done},
 		esimCache: map[string]EsimInfo{
 			"dev": {Profiles: []EsimProfile{{ICCID: "old", State: 1}}},
 		},
