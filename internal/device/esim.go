@@ -346,6 +346,31 @@ func (manager *Manager) csim(ctx context.Context, id string, apdu []byte) ([]byt
 	return parseCSIM(response)
 }
 
+// probeATLogicalChannel requires the UICC lock. It only opens and closes its
+// own temporary channel; no application is selected and no profile is changed.
+func (manager *Manager) probeATLogicalChannel(ctx context.Context, id string) error {
+	probeContext, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
+	payload, sw, err := manager.csim(probeContext, id, []byte{0x00, 0x70, 0x00, 0x00, 0x01})
+	cancelProbe()
+	if err != nil {
+		return fmt.Errorf("esim: open temporary AT channel: %w", err)
+	}
+	if sw != 0x9000 || len(payload) != 1 || payload[0] == 0 || payload[0] > 19 {
+		return fmt.Errorf("esim: invalid temporary AT channel response (SW=%04X)", sw)
+	}
+	// 即使页面请求已取消，也用独立且有界的上下文清理刚分配的通道。
+	closeContext, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancelClose()
+	_, sw, err = manager.csim(closeContext, id, []byte{0x00, 0x70, 0x80, payload[0], 0x00})
+	if err != nil {
+		return fmt.Errorf("esim: close temporary AT channel %d: %w", payload[0], err)
+	}
+	if sw != 0x9000 {
+		return fmt.Errorf("esim: close temporary AT channel %d (SW=%04X)", payload[0], sw)
+	}
+	return nil
+}
+
 // openEuicc opens a logical channel and selects the ISD-R AID on it.
 func (manager *Manager) openEuicc(ctx context.Context, id string) (*euiccChannel, error) {
 	return manager.openEuiccAID(ctx, id, isdRAID)

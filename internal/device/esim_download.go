@@ -283,8 +283,8 @@ func readEsimChipInfo(ctx context.Context, channel *euiccChannel, aidHex string)
 }
 
 // ESIMInventory reads every independently addressable eUICC storage exposed by
-// the inserted card. It is entirely read-only: only SELECT, GetProfilesInfo,
-// GetEuiccData, GetEuiccInfo2 and GetEuiccConfiguredAddresses are issued.
+// the inserted card without changing profiles. If QMI finds no eUICC, one
+// temporary AT channel open/close may be attempted before reading QMI again.
 func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInventoryEntry, error) {
 	ctx, cancel := boundESIMContext(ctx)
 	defer cancel()
@@ -296,6 +296,45 @@ func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInv
 		return nil, errESIMRecovering
 	}
 
+	entries, err := manager.esimInventoryOnce(ctx, id)
+	if !errors.Is(err, ErrNoEUICC) {
+		return entries, err
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	state, lookupErr := manager.lookup(id)
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	candidate := manager.candidateFor(state)
+	if !strings.EqualFold(manager.esimTransportFor(state), "qmi") ||
+		!isNativeQMICandidate(candidate) || !candidate.HasATPort() {
+		return entries, err
+	}
+	// 仍持有 UICC 锁；只探测本次分配的通道，不选择应用或重置 SIM。
+	if probeErr := manager.probeATLogicalChannel(ctx, id); probeErr != nil {
+		if manager.logger != nil {
+			manager.logger.Warn("QMI eUICC AT channel probe failed", "device_id", id, "error", HardwareErrorDetail(probeErr))
+		}
+		return nil, errors.Join(err, probeErr)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	entries, err = manager.esimInventoryOnce(ctx, id)
+	if manager.logger != nil {
+		if err != nil {
+			manager.logger.Warn("QMI eUICC inventory retry after AT channel probe failed", "device_id", id, "error", HardwareErrorDetail(err))
+		} else {
+			manager.logger.Info("QMI eUICC inventory recovered after AT channel probe", "device_id", id)
+		}
+	}
+	return entries, err
+}
+
+// esimInventoryOnce requires the caller to hold the eSIM and UICC locks.
+func (manager *Manager) esimInventoryOnce(ctx context.Context, id string) ([]EsimInventoryEntry, error) {
 	aids := manager.discoverEuiccAIDs(ctx, id)
 	entries := make([]EsimInventoryEntry, 0, len(aids))
 	var lastErr error
