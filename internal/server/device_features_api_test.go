@@ -194,6 +194,31 @@ func TestManualModemRebootInvalidatesConnectedDataRuntime(t *testing.T) {
 	}
 }
 
+func TestWriteDeviceErrorExplainsRFOffRestart(t *testing.T) {
+	t.Parallel()
+	server := &Server{logger: regionTestLogger()}
+	for _, cause := range []error{
+		device.ErrRFOffRestart,
+		errors.Join(errors.New("defer MBN selection requiring online restart"), device.ErrRFOffRestart),
+	} {
+		recorder := httptest.NewRecorder()
+		server.writeDeviceError(recorder, cause)
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body = %s", recorder.Code, recorder.Body)
+		}
+		var envelope errorEnvelope
+		if err := json.NewDecoder(recorder.Body).Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Error.Code != "rf_off_restart_blocked" {
+			t.Fatalf("error code = %q, want rf_off_restart_blocked", envelope.Error.Code)
+		}
+		if !strings.Contains(envelope.Error.Message, "enable cellular RF") {
+			t.Fatalf("error does not explain the RF consequence: %q", envelope.Error.Message)
+		}
+	}
+}
+
 type esimAIDCaptureController struct {
 	fakeDeviceController
 	switchAID  string
