@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -297,6 +298,14 @@ func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInv
 	}
 
 	entries, err := manager.esimInventoryOnce(ctx, id)
+	if err != nil && manager.logger != nil {
+		if errors.Is(err, ErrNoEUICC) {
+			// 此时尚不能区分普通 SIM 与暂时检测失败，使用信息级别并保留首次读取详情。
+			manager.logger.Info("eUICC inventory initial: not detected", "device_id", id, "error", HardwareErrorDetail(err))
+		} else {
+			manager.logger.Warn("eUICC inventory initial: read failed", "device_id", id, "error", HardwareErrorDetail(err))
+		}
+	}
 	if !errors.Is(err, ErrNoEUICC) {
 		return entries, err
 	}
@@ -338,24 +347,24 @@ func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInv
 
 // esimInventoryOnce requires the caller to hold the eSIM and UICC locks.
 func (manager *Manager) esimInventoryOnce(ctx context.Context, id string) ([]EsimInventoryEntry, error) {
-	aids := manager.discoverEuiccAIDs(ctx, id)
+	aids, discoveryErr := manager.discoverEuiccAIDsWithErrors(ctx, id)
 	entries := make([]EsimInventoryEntry, 0, len(aids))
 	var lastErr error
 	for _, aid := range aids {
 		channel, err := manager.openEuiccAID(ctx, id, aid)
 		if err != nil {
-			lastErr = err
+			lastErr = fmt.Errorf("esim: open application AID=%s: %w", aid, err)
 			continue
 		}
 		profilePayload, profileErr := channel.es10(ctx, []byte{0xBF, 0x2D, 0x00})
 		chip, chipErr := readEsimChipInfo(ctx, channel, aid)
 		channel.close(context.Background())
 		if profileErr != nil {
-			lastErr = profileErr
+			lastErr = fmt.Errorf("esim: GetProfilesInfo AID=%s: %w", aid, profileErr)
 			continue
 		}
 		if chipErr != nil {
-			lastErr = chipErr
+			lastErr = fmt.Errorf("esim: read chip info AID=%s: %w", aid, chipErr)
 			continue
 		}
 		info := EsimInfo{EID: chip.EID, AID: aid, Profiles: parseProfilesInfo(profilePayload)}
@@ -363,6 +372,10 @@ func (manager *Manager) esimInventoryOnce(ctx context.Context, id string) ([]Esi
 	}
 	if len(entries) == 0 {
 		if lastErr != nil {
+			if discoveryErr != nil {
+				// 只补充已脱敏的诊断文本，保持 lastErr 原有的错误分类与恢复条件。
+				return nil, fmt.Errorf("%w; discovery: %s", lastErr, HardwareErrorDetail(discoveryErr))
+			}
 			return nil, lastErr
 		}
 		return nil, ErrNoEUICC

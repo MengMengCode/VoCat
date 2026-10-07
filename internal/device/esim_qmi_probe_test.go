@@ -193,11 +193,29 @@ func TestESIMInventoryQMIATChannelProbe(t *testing.T) {
 				if opensBeforeProbe == 0 || (qmiOpens > opensBeforeProbe) != test.wantRetry {
 					t.Fatalf("QMI opens before/after probe = %d/%d, retry=%v", opensBeforeProbe, qmiOpens, test.wantRetry)
 				}
-				if len(hub.History(10, slog.LevelInfo, "")) != 1 && !test.cancelAfterOpen {
+				if len(hub.History(10, slog.LevelInfo, "AT channel probe")) != 1 && !test.cancelAfterOpen {
 					t.Fatal("probe outcome was not logged exactly once")
 				}
-			} else if len(hub.History(10, slog.LevelInfo, "")) != 0 {
+			} else if len(hub.History(10, slog.LevelInfo, "AT channel probe")) != 0 {
 				t.Fatal("inventory logged a probe that was not attempted")
+			}
+			initialLogs := hub.History(10, slog.LevelInfo, "eUICC inventory initial")
+			if test.initiallyReady && test.profileErr == nil {
+				if len(initialLogs) != 0 {
+					t.Fatal("healthy inventory logged an initial failure")
+				}
+			} else {
+				if len(initialLogs) != 1 {
+					t.Fatalf("initial inventory failure logs = %d, want one", len(initialLogs))
+				}
+				detail := fmt.Sprint(initialLogs[0].Fields["error"])
+				if test.profileErr != nil {
+					if initialLogs[0].Level != "warn" || !strings.Contains(detail, "GetProfilesInfo") || !strings.Contains(detail, estkSE1AID) {
+						t.Fatalf("missing profile failure context: %+v", initialLogs[0])
+					}
+				} else if initialLogs[0].Level != "info" || !strings.Contains(detail, "QMI OpenLogicalChannel") || !strings.Contains(detail, estkSE0AID) {
+					t.Fatalf("missing discovery failure context: %+v", initialLogs[0])
+				}
 			}
 			client.assertDone(t)
 		})
@@ -223,7 +241,7 @@ func TestESIMInventoryATTransportDoesNotAddChannelProbe(t *testing.T) {
 
 // USB EC20 虽配置为 QMI，现有 eSIM 读取实际使用 AT+CSIM；恢复重试也必须覆盖它。
 func TestESIMInventoryUSBEC20ChannelProbe(t *testing.T) {
-	for _, scenario := range []string{"healthy", "recovers", "ordinary_SIM_stays_empty"} {
+	for _, scenario := range []string{"healthy", "recovers", "recovers_with_discovery_CME", "healthy_then_missing_recovers", "ordinary_SIM_stays_empty"} {
 		t.Run(scenario, func(t *testing.T) {
 			step := func(apdu, response string) clientStep {
 				return clientStep{
@@ -239,6 +257,9 @@ func TestESIMInventoryUSBEC20ChannelProbe(t *testing.T) {
 			var missing []clientStep
 			for _, aid := range []string{estkProductAID, isdRAID, xesimISDRAID, isdRAID} {
 				missing = append(missing, open, selectAID(aid, "6A82"), close)
+			}
+			if scenario == "recovers_with_discovery_CME" {
+				missing[1].err = &modem.CommandError{Command: missing[1].command, Final: "+CME ERROR: 13"}
 			}
 			var readable []clientStep
 			for _, aid := range []string{estkProductAID, estkSE0AID, estkSE1AID} {
@@ -268,11 +289,14 @@ func TestESIMInventoryUSBEC20ChannelProbe(t *testing.T) {
 			steps := readable
 			if scenario != "healthy" {
 				steps = append(append([]clientStep(nil), missing...), open, close)
-				if scenario == "recovers" {
+				if scenario != "ordinary_SIM_stays_empty" {
 					steps = append(steps, readable...)
 				} else {
 					steps = append(steps, missing...)
 				}
+			}
+			if scenario == "healthy_then_missing_recovers" {
+				steps = append(append([]clientStep(nil), readable...), steps...)
 			}
 			client := &transcriptClient{steps: steps}
 			manager, id := newStartedTestManager(t, client)
@@ -294,6 +318,14 @@ func TestESIMInventoryUSBEC20ChannelProbe(t *testing.T) {
 			}
 			hub := loghub.New(nil, 100)
 			manager.logger = slog.New(hub)
+			if scenario == "healthy_then_missing_recovers" {
+				if entries, err := manager.ESIMInventory(context.Background(), id); err != nil || len(entries) != 2 {
+					t.Fatalf("initially healthy inventory = %+v, error = %v", entries, err)
+				}
+				if len(hub.History(10, slog.LevelInfo, "")) != 0 {
+					t.Fatal("healthy inventory added diagnostic logs")
+				}
+			}
 			entries, err := manager.ESIMInventory(context.Background(), id)
 			if scenario == "ordinary_SIM_stays_empty" {
 				if !errors.Is(err, ErrNoEUICC) {
@@ -304,6 +336,36 @@ func TestESIMInventoryUSBEC20ChannelProbe(t *testing.T) {
 			}
 			if len(hub.History(10, slog.LevelWarn, "")) != 0 {
 				t.Fatal("healthy or ordinary SIM was reported as a hardware failure")
+			}
+			logs := hub.History(10, slog.LevelInfo, "")
+			if scenario == "healthy" {
+				if len(logs) != 0 {
+					t.Fatalf("healthy inventory added logs: %+v", logs)
+				}
+			} else {
+				initialLogs := hub.History(10, slog.LevelInfo, "eUICC inventory initial: not detected")
+				if len(logs) != 2 || len(initialLogs) != 1 {
+					t.Fatalf("expected initial failure and probe outcome: %+v", logs)
+				}
+				detail := fmt.Sprint(initialLogs[0].Fields["error"])
+				for _, want := range []string{"AT SELECT", "SW=6A82", estkProductAID, isdRAID, xesimISDRAID} {
+					if !strings.Contains(detail, loghub.RedactString(want)) {
+						t.Fatalf("initial failure detail %q missing %q", detail, want)
+					}
+				}
+				if initialLogs[0].Fields["device_id"] != id || strings.Contains(detail, "AT+CSIM=") {
+					t.Fatalf("invalid or unredacted initial failure log: %+v", initialLogs[0])
+				}
+				if scenario == "recovers_with_discovery_CME" && !strings.Contains(detail, "AT+CSIM failed: +CME ERROR: 13") {
+					t.Fatalf("discarded discovery CME error was not retained: %q", detail)
+				}
+				wantOutcome := "eUICC inventory recovered after AT channel probe"
+				if scenario == "ordinary_SIM_stays_empty" {
+					wantOutcome = "eUICC not detected after AT channel probe"
+				}
+				if outcomes := hub.History(10, slog.LevelInfo, wantOutcome); len(outcomes) != 1 {
+					t.Fatalf("expected one %q outcome: %+v", wantOutcome, logs)
+				}
 			}
 			// 严格命令序列同时限制探测为一次，并禁止 CFUN、写 Profile 或关闭他人通道。
 			client.assertDone(t)
