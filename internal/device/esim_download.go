@@ -326,7 +326,8 @@ func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInv
 		if manager.logger != nil {
 			manager.logger.Warn("eUICC AT channel probe failed", "device_id", id, "error", HardwareErrorDetail(probeErr))
 		}
-		return nil, errors.Join(err, probeErr)
+		// 首次未发现的详情已记录；不能保留 ErrNoEUICC，否则 HTTP 层会将探测异常当作正常空结果。
+		return nil, probeErr
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()

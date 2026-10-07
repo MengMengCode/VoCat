@@ -108,6 +108,7 @@ func TestESIMInventoryQMIATChannelProbe(t *testing.T) {
 		closeErr          error
 		closeResponse     string
 		wantErr           error
+		wantErrText       string
 		wantProbe         bool
 		wantRetry         bool
 	}{
@@ -119,8 +120,13 @@ func TestESIMInventoryQMIATChannelProbe(t *testing.T) {
 		{name: "canceled_before_probe", cancelBeforeProbe: true, wantErr: context.Canceled},
 		{name: "canceled_after_open_still_closes", cancelAfterOpen: true, wantProbe: true, wantErr: context.Canceled},
 		{name: "open_failed", openErr: openFailure, wantProbe: true, wantErr: openFailure},
+		{name: "open_deadline", openErr: context.DeadlineExceeded, wantProbe: true, wantErr: context.DeadlineExceeded},
+		{name: "open_command_timeout", openErr: modem.ErrCommandTimeout, wantProbe: true, wantErr: modem.ErrCommandTimeout},
+		{name: "open_canceled", openErr: context.Canceled, wantProbe: true, wantErr: context.Canceled},
 		{name: "close_failed", closeErr: closeFailure, wantProbe: true, wantErr: closeFailure},
-		{name: "close_rejected", closeResponse: `+CSIM: 4,"6A81"`, wantProbe: true, wantErr: ErrNoEUICC},
+		{name: "close_deadline", closeErr: context.DeadlineExceeded, wantProbe: true, wantErr: context.DeadlineExceeded},
+		{name: "close_command_timeout", closeErr: modem.ErrCommandTimeout, wantProbe: true, wantErr: modem.ErrCommandTimeout},
+		{name: "close_rejected", closeResponse: `+CSIM: 4,"6A81"`, wantProbe: true, wantErrText: "close temporary AT channel 2 (SW=6A81)"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manager, opener, id := newStartedNativeQMITestManager(t)
@@ -183,8 +189,16 @@ func TestESIMInventoryQMIATChannelProbe(t *testing.T) {
 			}
 
 			entries, err := manager.ESIMInventory(ctx, id)
-			if !errors.Is(err, test.wantErr) {
+			if test.wantErrText != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErrText) {
+					t.Fatalf("inventory error = %v, want %q", err, test.wantErrText)
+				}
+			} else if !errors.Is(err, test.wantErr) {
 				t.Fatalf("inventory error = %v, want %v", err, test.wantErr)
+			}
+			// 探测异常不能同时被归类为普通 SIM 的正常缺失，否则 HTTP 层会吞掉异常。
+			if errors.Is(err, ErrNoEUICC) != errors.Is(test.wantErr, ErrNoEUICC) {
+				t.Fatalf("inventory error has unexpected no-eUICC classification: %v", err)
 			}
 			if err == nil && (len(entries) != 2 || len(entries[0].Info.Profiles) != 1 || len(entries[1].Info.Profiles) != 1) {
 				t.Fatalf("expected a fresh QMI inventory with two storages: %#v", entries)
