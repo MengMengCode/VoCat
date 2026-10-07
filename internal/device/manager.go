@@ -866,6 +866,7 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 		return err
 	}
 	if err := manager.requireOnlineModemRestart(ctx, client); err != nil {
+		manager.setResult(id, state, nil, err)
 		return err
 	}
 	state.dataMu.Lock()
@@ -915,7 +916,10 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 			"recovery_source", "profile_switch", "target_cfun", 4)
 	}
 	if _, err := client.Execute(commandCtx, "AT+CFUN=0"); err != nil {
-		return fmt.Errorf("power down SIM for profile recovery: %w", err)
+		err = fmt.Errorf("power down SIM for profile recovery: %w", err)
+		manager.clearSnapshot(id, state)
+		manager.setResult(id, state, nil, err)
+		return err
 	}
 
 	select {

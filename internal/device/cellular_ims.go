@@ -158,6 +158,7 @@ func (manager *Manager) SetCellularIMS(ctx context.Context, id string, mode Cell
 		return status, nil
 	}
 	if err := manager.requireOnlineModemRestart(ctx, client); err != nil {
+		manager.setResult(id, state, nil, err)
 		return status, err
 	}
 	if _, err = manager.command(ctx, client, fmt.Sprintf(`AT+QCFG="ims",%d`, target)); err != nil {
