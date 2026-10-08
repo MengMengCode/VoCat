@@ -310,9 +310,6 @@ func (s *Server) pollCellularCalls(ctx context.Context) {
 		return
 	}
 	for _, config := range devices {
-		if !config.NetworkEnabled {
-			continue
-		}
 		// If VoWiFi is active, incoming calls are handled directly by SIP INVITE in real time.
 		if s.callTransport(config.ID) == "vowifi" {
 			continue
