@@ -64,6 +64,18 @@ var (
 // HTTP layer can render the empty state instead of an error.
 var ErrNoEUICC = errNoEUICC
 
+// ErrESIMManagementUnavailable 表示 eSTK 产品应用可访问，但两个管理应用均返回 6A82。
+// 普通 SIM 的 ErrNoEUICC 不属于此类异常，不能据此重置 SIM。
+var ErrESIMManagementUnavailable = errors.New("esim: eSTK management applications are unavailable (SW=6A82)")
+
+type euiccSelectError struct{ sw int }
+
+func (err *euiccSelectError) Error() string {
+	return fmt.Sprintf("%s (SELECT SW=%04X)", errNoEUICC, err.sw)
+}
+
+func (*euiccSelectError) Unwrap() error { return errNoEUICC }
+
 // ErrEUICCChannelStuck means the modem kept rejecting MANAGE CHANNEL or
 // SELECT ISD-R with the EC20's non-descriptive +CME ERROR: 0 after retries.
 // This is observed after SIM hot-swap and requires a modem restart; repeating
@@ -453,7 +465,7 @@ func (manager *Manager) openEuiccOnceAID(ctx context.Context, id, aidHex string)
 	}
 	if sw != 0x9000 {
 		channel.close(context.Background())
-		return nil, errNoEUICC
+		return nil, &euiccSelectError{sw: sw}
 	}
 	return channel, nil
 }
@@ -530,22 +542,37 @@ func (manager *Manager) openPCSCEuiccOnceAID(ctx context.Context, id string, can
 // OpenEUICC's eSTK integration, generic AIDs are not appended after an eSTK SE
 // opens, because the standard AID aliases one of the same storages.
 func (manager *Manager) discoverEuiccAIDs(ctx context.Context, id string) []string {
+	aids, err := manager.discoverEuiccAIDsForInventory(ctx, id)
+	if err != nil {
+		return []string{isdRAID}
+	}
+	return aids
+}
+
+func (manager *Manager) discoverEuiccAIDsForInventory(ctx context.Context, id string) ([]string, error) {
+	managementMissing := false
 	product, err := manager.openEuiccAID(ctx, id, estkProductAID)
 	if err == nil {
 		product.close(context.Background())
 
 		var found []string
+		missing := 0
 		for _, aid := range []string{estkSE0AID, estkSE1AID} {
 			channel, err := manager.openEuiccAID(ctx, id, aid)
 			if err != nil {
+				var selectErr *euiccSelectError
+				if errors.As(err, &selectErr) && selectErr.sw == 0x6A82 {
+					missing++
+				}
 				continue
 			}
 			channel.close(context.Background())
 			found = append(found, aid)
 		}
 		if len(found) > 0 {
-			return found
+			return found, nil
 		}
+		managementMissing = missing == 2
 	}
 
 	var found []string
@@ -558,11 +585,14 @@ func (manager *Manager) discoverEuiccAIDs(ctx context.Context, id string) []stri
 		found = append(found, aid)
 	}
 	if len(found) > 0 {
-		return found
+		return found, nil
+	}
+	if managementMissing {
+		return nil, ErrESIMManagementUnavailable
 	}
 	// Preserve the old error path for a physical SIM with no eUICC. The caller
 	// retries the standard AID once and returns ErrNoEUICC to the HTTP layer.
-	return []string{isdRAID}
+	return []string{isdRAID}, nil
 }
 
 func isTransientEuiccCME(err error) bool {

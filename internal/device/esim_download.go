@@ -296,7 +296,10 @@ func (manager *Manager) ESIMInventory(ctx context.Context, id string) ([]EsimInv
 		return nil, errESIMRecovering
 	}
 
-	aids := manager.discoverEuiccAIDs(ctx, id)
+	aids, err := manager.discoverEuiccAIDsForInventory(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	entries := make([]EsimInventoryEntry, 0, len(aids))
 	var lastErr error
 	for _, aid := range aids {

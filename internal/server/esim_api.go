@@ -33,7 +33,7 @@ func (s *Server) handleESIM(w http.ResponseWriter, r *http.Request, rest []strin
 		if !requireMethod(w, r, http.MethodGet) {
 			return true
 		}
-		s.writeEsimOverview(w, r, physicalID, physicalPresent)
+		s.writeEsimOverview(w, r, physicalID, physicalPresent, configuredID)
 		return true
 	}
 
@@ -43,7 +43,7 @@ func (s *Server) handleESIM(w http.ResponseWriter, r *http.Request, rest []strin
 			if !requireMethod(w, r, http.MethodGet) {
 				return true
 			}
-			s.writeEsimGroups(w, r, physicalID, physicalPresent)
+			s.writeEsimGroups(w, r, physicalID, physicalPresent, configuredID)
 			return true
 		}
 		if len(rest) == 2 && r.Method == http.MethodDelete {
@@ -148,11 +148,11 @@ func (s *Server) handleEsimNotificationRetry(w http.ResponseWriter, r *http.Requ
 // esimInfo loads the eUICC profile list. The string result is "ok" (use info),
 // "empty" (no usable eUICC — render the empty state), or "error" (an error
 // response has already been written).
-func (s *Server) esimInfo(w http.ResponseWriter, r *http.Request, physicalID string, physicalPresent bool) (string, []device.EsimInventoryEntry) {
+func (s *Server) esimInfo(w http.ResponseWriter, r *http.Request, physicalID string, physicalPresent bool, configuredID string) (string, []device.EsimInventoryEntry) {
 	if s.devices == nil || !physicalPresent {
 		return "empty", nil
 	}
-	info, err := s.devices.ESIMInventory(r.Context(), physicalID)
+	info, err := s.readESIMInventory(r.Context(), configuredID, physicalID)
 	if err != nil {
 		if errors.Is(err, device.ErrNoEUICC) {
 			return "empty", nil
@@ -164,8 +164,8 @@ func (s *Server) esimInfo(w http.ResponseWriter, r *http.Request, physicalID str
 }
 
 // writeEsimOverview returns { chipInfo, profiles } for the eSIM tab.
-func (s *Server) writeEsimOverview(w http.ResponseWriter, r *http.Request, physicalID string, physicalPresent bool) {
-	status, info := s.esimInfo(w, r, physicalID, physicalPresent)
+func (s *Server) writeEsimOverview(w http.ResponseWriter, r *http.Request, physicalID string, physicalPresent bool, configuredID string) {
+	status, info := s.esimInfo(w, r, physicalID, physicalPresent, configuredID)
 	switch status {
 	case "error":
 		return
@@ -276,8 +276,8 @@ func (s *Server) esimChipInfo(r *http.Request, physicalID string) map[string]any
 }
 
 // writeEsimGroups returns just the profile groups for the /esim/profiles call.
-func (s *Server) writeEsimGroups(w http.ResponseWriter, r *http.Request, physicalID string, physicalPresent bool) {
-	status, info := s.esimInfo(w, r, physicalID, physicalPresent)
+func (s *Server) writeEsimGroups(w http.ResponseWriter, r *http.Request, physicalID string, physicalPresent bool, configuredID string) {
+	status, info := s.esimInfo(w, r, physicalID, physicalPresent, configuredID)
 	switch status {
 	case "error":
 		return

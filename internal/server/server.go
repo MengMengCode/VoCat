@@ -90,6 +90,7 @@ type Server struct {
 	lookupPublicIP            func(context.Context, string) (exportproxy.PublicIPInfo, error)
 	automaticTasks            *automaticTaskScheduler
 	smsSyncMu                 sync.Mutex
+	esimSIMResetAttempted     map[string]bool // 由 smsSyncMu 保护；读取成功后允许下一次故障恢复。
 	smsStorageMu              sync.Mutex
 	smsStorage                map[string]device.SMSStorageUsage
 	cellularDataOnce          sync.Once
