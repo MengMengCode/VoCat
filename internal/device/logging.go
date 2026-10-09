@@ -39,6 +39,10 @@ func HardwareErrorDetail(err error) string {
 func redactCommandErrors(detail string, err error) string {
 	if commandErr, ok := err.(*modem.CommandError); ok {
 		detail = strings.ReplaceAll(detail, commandErr.Error(), safeCommandError(commandErr))
+		// 外层包装可能再次包含完整命令，也需要脱敏。
+		if commandErr.Command != "" {
+			detail = strings.ReplaceAll(detail, commandErr.Command, safeATCommandName(commandErr.Command))
+		}
 	}
 	switch wrapped := err.(type) {
 	case interface{ Unwrap() []error }:

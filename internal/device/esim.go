@@ -461,7 +461,11 @@ func (manager *Manager) openEuiccOnceAID(ctx context.Context, id, aidHex string)
 		// Drain the select FCP the card is holding with a proper GET RESPONSE
 		// (CLA=0x80|channel, INS=0xC0). transmit() injects the channel into the
 		// CLA low nibble, so the first byte here stays 0x80.
-		_, sw, _ = channel.transmit(ctx, []byte{0x80, 0xC0, 0x00, 0x00, byte(sw & 0xFF)}, 0x80)
+		_, sw, err = channel.transmit(ctx, []byte{0x80, 0xC0, 0x00, 0x00, byte(sw & 0xFF)}, 0x80)
+		if err != nil {
+			channel.close(context.Background())
+			return nil, fmt.Errorf("esim: AT SELECT GET RESPONSE AID=%s: %w", aidHex, err)
+		}
 	}
 	if sw != 0x9000 {
 		channel.close(context.Background())

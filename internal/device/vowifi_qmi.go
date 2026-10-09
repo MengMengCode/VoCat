@@ -98,7 +98,10 @@ func (manager *Manager) AuthenticateNativeQMI(ctx context.Context, id string, ai
 				step = 4
 			}
 		}
-		closeErr := session.CloseLogicalChannel(ctx, 1, channel)
+		// 请求取消后仍释放本次打开的通道，清理最多等待两秒。
+		closeContext, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		closeErr := session.CloseLogicalChannel(closeContext, 1, channel)
+		cancelClose()
 		return errors.Join(err, closeErr)
 	})
 	return
