@@ -98,18 +98,7 @@ func (manager *Manager) AuthenticateNativeQMI(ctx context.Context, id string, ai
 				step = 4
 			}
 		}
-		// 鉴权超时或取消后仍须尝试释放本次打开的通道，清理最多等待两秒。
-		closeContext, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		closeErr := session.CloseLogicalChannel(closeContext, 1, channel)
-		cancelClose()
-		if closeErr != nil && manager.logger != nil {
-			manager.logger.Warn("close QMI UIM authentication channel failed",
-				"device_id", id,
-				"slot", 1,
-				"channel", channel,
-				"error", HardwareErrorDetail(closeErr),
-			)
-		}
+		closeErr := session.CloseLogicalChannel(ctx, 1, channel)
 		return errors.Join(err, closeErr)
 	})
 	return

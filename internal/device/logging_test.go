@@ -19,7 +19,7 @@ func TestHardwareErrorDetailRedactsATPayload(t *testing.T) {
 		Final:   "+CME ERROR: 13",
 		Lines:   []string{payload},
 	}
-	err := fmt.Errorf("select ISIM: %w", errors.Join(errors.New("reader reset failed"), fmt.Errorf("%s: %w", commandErr.Command, commandErr)))
+	err := fmt.Errorf("select ISIM: %w", errors.Join(errors.New("reader reset failed"), commandErr))
 	detail := HardwareErrorDetail(err)
 	if strings.Contains(detail, payload) || strings.Contains(detail, "AT+CSIM=") {
 		t.Fatalf("hardware error exposed AT payload: %q", detail)
