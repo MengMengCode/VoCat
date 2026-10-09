@@ -1870,8 +1870,6 @@ func (s *Server) writeDeviceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid_apn", "APN must contain only letters, digits, dots, underscores, or hyphens")
 	case errors.Is(err, device.ErrRegionBlocked):
 		writeError(w, http.StatusForbidden, "region_blocked", err.Error())
-	case errors.Is(err, device.ErrRFOffRestart):
-		writeError(w, http.StatusConflict, "rf_off_restart_blocked", "Cellular RF is disabled, so the modem restart was blocked. Disable VoWiFi and airplane mode before restarting; this will enable cellular RF.")
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, modem.ErrCommandTimeout):
 		writeError(w, http.StatusGatewayTimeout, "modem_timeout", "the modem did not answer before the command timeout")
 	case errors.Is(err, context.Canceled):

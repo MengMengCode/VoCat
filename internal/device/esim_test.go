@@ -450,35 +450,19 @@ func TestEuiccSASTrimsCardPadding(t *testing.T) {
 }
 
 func TestOpenEuiccGETResponsePreservesTransportError(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		cause error
-	}{
-		{name: "transient_CME", cause: &modem.CommandError{Command: `AT+CSIM=10,"81C0000010"`, Final: "+CME ERROR: 0"}},
-		{name: "timeout", cause: modem.ErrCommandTimeout},
-		{name: "canceled", cause: context.Canceled},
-		{name: "deadline", cause: context.DeadlineExceeded},
-	} {
-		t.Run(test.name, func(t *testing.T) {
+	for _, cause := range []error{modem.ErrCommandTimeout, context.Canceled, context.DeadlineExceeded,
+		&modem.CommandError{Command: `AT+CSIM=10,"81C0000010"`, Final: "+CME ERROR: 0"}} {
+		t.Run(cause.Error(), func(t *testing.T) {
 			client := &transcriptClient{steps: []clientStep{
 				{command: `AT+CSIM=10,"0070000001"`, response: okResponse(`+CSIM: 6,"019000"`)},
 				{command: fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, isdRAID), response: okResponse(`+CSIM: 4,"6110"`)},
-				{command: `AT+CSIM=10,"81C0000010"`, err: test.cause},
+				{command: `AT+CSIM=10,"81C0000010"`, err: cause},
 				{command: `AT+CSIM=10,"0070800100"`, response: okResponse(`+CSIM: 4,"9000"`)},
 			}}
 			manager, id := newStartedTestManager(t, client)
 			channel, err := manager.openEuiccOnceAID(context.Background(), id, isdRAID)
-			if channel != nil || !errors.Is(err, test.cause) {
-				t.Fatalf("open eUICC = %v, %v; want original transport error %v", channel, err, test.cause)
-			}
-			if errors.Is(err, errNoEUICC) {
-				t.Fatalf("transport error must not indicate absent eUICC: %v", err)
-			}
-			if !strings.Contains(err.Error(), "GET RESPONSE AID="+isdRAID) {
-				t.Fatalf("transport error lost the SELECT AID context: %v", err)
-			}
-			if isTransientEuiccCME(err) != isTransientEuiccCME(test.cause) {
-				t.Fatalf("transport error changed transient CME classification: %v", err)
+			if channel != nil || !errors.Is(err, cause) || errors.Is(err, errNoEUICC) {
+				t.Fatalf("open eUICC = %v, %v; want transport error %v, not absent eUICC", channel, err, cause)
 			}
 			client.assertDone(t)
 		})

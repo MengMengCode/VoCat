@@ -515,10 +515,7 @@ func (adapter *EC20Adapter) authenticateWithApplication(
 		}
 		binding.aid = aid
 		binding.application = application
-		// 保留已验证的 CSIM 访问方式；仍须成功选择 ISIM 后才能鉴权。
-		adapter.mu.Lock()
-		adapter.bindings[binding.iccid] = binding
-		adapter.mu.Unlock()
+		// 保留已验证的 CSIM 访问方式，验证新应用成功后再缓存绑定。
 	}
 	if binding.aid == "" {
 		if _, err := adapter.CheckReady(ctx, identity); err != nil {
@@ -567,44 +564,48 @@ func (adapter *EC20Adapter) authenticateWithApplication(
 				!errors.As(err, &commandErr) || commandErr.Final != "ERROR" {
 				return AKAResult{}, err
 			}
-			// 仅在 CCHO 明确拒绝时复用已有 CSIM 路径，不降级到 USIM。
-			raw, basicErr := adapter.authenticateBasicApplication(ctx, binding, apdu)
+			// 仅在 CCHO 明确拒绝时尝试 CSIM，严格 ISIM 不降级为 USIM。
+			var basicErr error
+			raw, basicErr = adapter.authenticateBasicApplication(ctx, binding, apdu)
 			if basicErr != nil {
 				if errors.Is(basicErr, ErrEC20AKACommand) {
-					// SELECT 已成功，仅保留 CCHO 原因，不再标记应用不存在。
 					return AKAResult{}, errors.Join(fmt.Errorf("open application: %w", commandErr), basicErr)
 				}
 				return AKAResult{}, errors.Join(err, basicErr)
 			}
 			binding.basicChannel = true
-			adapter.mu.Lock()
-			adapter.bindings[binding.iccid] = binding
-			adapter.mu.Unlock()
-			return parseUSIMAuthenticateResponse(raw)
-		}
-		var commandErr error
-		raw, commandErr = adapter.transmitLogicalAPDU(
-			ctx,
-			binding.deviceID,
-			channel,
-			apdu,
-			true,
-		)
-		closeErr := adapter.closeLogicalChannelWithCleanup(
-			binding.deviceID,
-			channel,
-		)
-		if commandErr != nil {
-			if closeErr != nil {
-				return AKAResult{}, errors.Join(commandErr, closeErr)
+		} else {
+			var commandErr error
+			raw, commandErr = adapter.transmitLogicalAPDU(
+				ctx,
+				binding.deviceID,
+				channel,
+				apdu,
+				true,
+			)
+			closeErr := adapter.closeLogicalChannelWithCleanup(
+				binding.deviceID,
+				channel,
+			)
+			if commandErr != nil {
+				if closeErr != nil {
+					return AKAResult{}, errors.Join(commandErr, closeErr)
+				}
+				return AKAResult{}, commandErr
 			}
-			return AKAResult{}, commandErr
-		}
-		if closeErr != nil {
-			return AKAResult{}, closeErr
+			if closeErr != nil {
+				return AKAResult{}, closeErr
+			}
 		}
 	}
-	return parseUSIMAuthenticateResponse(raw)
+	result, err := parseUSIMAuthenticateResponse(raw)
+	if err != nil {
+		return AKAResult{}, err
+	}
+	adapter.mu.Lock()
+	adapter.bindings[binding.iccid] = binding
+	adapter.mu.Unlock()
+	return result, nil
 }
 
 func (adapter *EC20Adapter) authenticateBasicApplication(ctx context.Context, binding ec20SIMBinding, apdu []byte) ([]byte, error) {
@@ -1075,7 +1076,7 @@ func (adapter *EC20Adapter) discoverPreferredAKAApplication(
 	aidPrefix string,
 	application string,
 ) (string, string, error) {
-	// CUAD 不可用时会读 EF_DIR，多条基本通道命令必须持有同一事务锁。
+	// EF_DIR 发现使用多条基本通道命令，必须持有同一事务锁。
 	adapter.apduMu.Lock()
 	defer adapter.apduMu.Unlock()
 	if locker, ok := adapter.executor.(EC20UICCLocker); ok {

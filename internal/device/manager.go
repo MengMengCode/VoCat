@@ -904,18 +904,30 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 		manager.setResult(id, state, nil, err)
 		return err
 	}
+	return manager.softResetSIMLocked(ctx, id, state, client)
+}
+
+// softResetSIMLocked 要求持有 opMu，使模式验证与 SIM 重置不能被其他模组操作插入。
+func (manager *Manager) softResetSIMLocked(ctx context.Context, id string, state *managedDevice, client modem.Client) error {
 	state.dataMu.Lock()
 	invalidateQMINetworkSession(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
-	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
+	commandCtx, cancel := context.WithTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 
 	// 1. Cycle SIM interface to minimum functionality / clear cached SIM files
 	if manager.logger != nil {
 		manager.logger.Info("recovering SIM with cellular RF disabled", "category", "hardware", "device_id", id,
-			"recovery_source", "profile_switch", "target_cfun", 4)
+			"recovery_source", "sim_reset", "target_cfun", 4)
 	}
 	if _, err := client.Execute(commandCtx, "AT+CFUN=0"); err != nil {
+		// 超时或取消时不能确认 CFUN=0 是否已生效，仍尝试恢复到 RF 关闭的工作模式。
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, modem.ErrCommandTimeout) {
+			reloadCtx, cancelReload := context.WithTimeout(context.WithoutCancel(ctx), manager.commandTimeout)
+			_, reloadErr := client.Execute(reloadCtx, "AT+CFUN=4")
+			cancelReload()
+			err = errors.Join(err, reloadErr)
+		}
 		err = fmt.Errorf("power down SIM for profile recovery: %w", err)
 		manager.clearSnapshot(id, state)
 		manager.setResult(id, state, nil, err)
@@ -924,13 +936,16 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
 	case <-time.After(500 * time.Millisecond):
 	}
 
 	// 2. Reload the USIM without enabling RF. Snapshots can be nil or partial
 	// during REFRESH; their zero-value FlightMode does not authorize CFUN=1.
-	_, err = client.Execute(commandCtx, "AT+CFUN=4")
+	// CFUN=0 成功后必须独立完成重新上电，不能因页面取消或原命令超时留在最低功能模式。
+	reloadCtx, cancelReload := context.WithTimeout(context.WithoutCancel(ctx), manager.commandTimeout)
+	defer cancelReload()
+	_, err := client.Execute(reloadCtx, "AT+CFUN=4")
+	err = errors.Join(ctx.Err(), err)
 
 	manager.clearSnapshot(id, state)
 	manager.setResult(id, state, nil, err)

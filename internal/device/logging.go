@@ -39,7 +39,7 @@ func HardwareErrorDetail(err error) string {
 func redactCommandErrors(detail string, err error) string {
 	if commandErr, ok := err.(*modem.CommandError); ok {
 		detail = strings.ReplaceAll(detail, commandErr.Error(), safeCommandError(commandErr))
-		// manager.command 等外层包装也可能再次带上完整命令，不能只脱敏最内层错误。
+		// 外层包装可能再次包含完整命令，也需要脱敏。
 		if commandErr.Command != "" {
 			detail = strings.ReplaceAll(detail, commandErr.Command, safeATCommandName(commandErr.Command))
 		}

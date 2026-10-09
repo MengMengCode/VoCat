@@ -219,10 +219,7 @@ export function updateLoggingSettings(settings: {
 export function apiMessage(error: unknown) {
   if (error instanceof ApiError) {
     const suffix = error.requestId ? `（${tl("请求")} ${error.requestId}）` : "";
-    const message = error.code === "rf_off_restart_blocked"
-      ? tl("蜂窝射频已关闭，已阻止整机重启。关闭 VoWiFi 和飞行模式后才能重启，这会开启蜂窝射频。")
-      : error.message;
-    return `${message}${suffix}`;
+    return `${error.message}${suffix}`;
   }
   if (error instanceof Error) return error.message;
   return tl("请求未完成，检查服务状态后重试");
