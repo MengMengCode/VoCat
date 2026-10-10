@@ -232,7 +232,10 @@ func larkSigningSecret(config map[string]any) string {
 	return configString(config, "secret")
 }
 
-func sendLarkNotification(ctx context.Context, config map[string]any, values larkTemplateValues) error {
+func sendLarkNotification(ctx context.Context, config map[string]any, deviceID *string, values larkTemplateValues) error {
+	if deviceID != nil && !notificationMatchesDevice(configStrings(config, "device_ids"), *deviceID) {
+		return nil
+	}
 	payload, err := renderLarkPayload(configString(config, "payload_template"), values)
 	if err != nil {
 		return err
@@ -288,5 +291,5 @@ func sanitizeLarkRequestError(err error) error {
 }
 
 func sendLarkNotificationTest(ctx context.Context, config map[string]any) error {
-	return sendLarkNotification(ctx, config, larkTestValues(time.Now()))
+	return sendLarkNotification(ctx, config, nil, larkTestValues(time.Now()))
 }

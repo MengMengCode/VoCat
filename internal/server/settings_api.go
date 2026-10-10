@@ -217,7 +217,7 @@ func (s *Server) writeNotificationSettings(w http.ResponseWriter, r *http.Reques
 	}
 	response := make(map[string]any, len(notificationChannels))
 	for _, channel := range notificationChannels {
-		document := map[string]any{"enabled": false}
+		document := map[string]any{"enabled": false, "device_ids": nil}
 		if setting, ok := stored[channel]; ok {
 			redacted := setting.Redacted()
 			if err := json.Unmarshal(redacted.Config, &document); err != nil {
@@ -265,6 +265,9 @@ func decodeNotificationConfig(
 	fields := notificationFields[channel]
 	for name, value := range document {
 		kind, known := fields[name]
+		if name == "device_ids" {
+			kind, known = "device_ids", true
+		}
 		if !known {
 			return false, nil, fmt.Errorf("%s.%s is not supported", channel, name)
 		}
@@ -301,6 +304,16 @@ func validateNotificationField(
 ) error {
 	field := channel + "." + name
 	switch kind {
+	case "device_ids":
+		var ids []string
+		if json.Unmarshal(raw, &ids) != nil {
+			return fmt.Errorf("%s must be null or an array of device IDs", field)
+		}
+		for _, id := range ids {
+			if strings.TrimSpace(id) == "" {
+				return fmt.Errorf("%s contains an empty device ID", field)
+			}
+		}
 	case "boolean":
 		var value bool
 		if err := json.Unmarshal(raw, &value); err != nil {
@@ -507,7 +520,7 @@ func (s *Server) handleNotificationTest(
 	case "lark":
 		err = sendLarkNotificationTest(notificationContext, resolved)
 	case "meow":
-		err = sendMeowNotification(notificationContext, resolved, "VoCat 测试通知", "VoCat 消息推送测试")
+		err = sendMeowNotification(notificationContext, resolved, nil, "VoCat 测试通知", "VoCat 消息推送测试")
 	}
 	if err != nil {
 		redacted := store.RedactText(err.Error(), provider)

@@ -36,11 +36,12 @@ const (
 var telegramTokenInURLPattern = regexp.MustCompile(`bot[0-9]{5,20}:[A-Za-z0-9_-]{20,128}`)
 
 type telegramRuntimeConfig struct {
-	Token   string
-	ChatID  string
-	AdminID int64
-	BaseURL string
-	Proxy   string
+	Token     string
+	ChatID    string
+	AdminID   int64
+	BaseURL   string
+	Proxy     string
+	DeviceIDs []string
 }
 
 type telegramBot struct {
@@ -2260,6 +2261,15 @@ func (bot *telegramBot) finishAction(ctx context.Context, config telegramRuntime
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", action.AdminID), auditAction, "device", action.DeviceID, outcome, "telegram")
 }
 
+func (bot *telegramBot) sendSMSNotification(ctx context.Context, config telegramRuntimeConfig, message store.SMSMessage) error {
+	notification := bot.server.newSMSNotification(ctx, message)
+	if !notificationMatchesDevice(config.DeviceIDs, notification.DeviceID) {
+		return nil
+	}
+	text := fmt.Sprintf("📩 新短信\n设备：%s\n来自：%s\n时间：%s\n\n%s", message.DeviceID, message.Peer, message.Timestamp.Local().Format("2006-01-02 15:04:05"), message.Body)
+	return bot.sendText(ctx, config, 0, text, nil)
+}
+
 func (bot *telegramBot) notifyInboundSMS(ctx context.Context) {
 	cursorInitialized := false
 	var cursor int64
@@ -2295,8 +2305,7 @@ func (bot *telegramBot) notifyInboundSMS(ctx context.Context) {
 						cursor = message.ID
 						continue
 					}
-					text := fmt.Sprintf("📩 新短信\n设备：%s\n来自：%s\n时间：%s\n\n%s", message.DeviceID, message.Peer, message.Timestamp.Local().Format("2006-01-02 15:04:05"), message.Body)
-					if sendErr := bot.sendText(ctx, config, 0, text, nil); sendErr != nil {
+					if sendErr := bot.sendSMSNotification(ctx, config, message); sendErr != nil {
 						bot.warn("send Telegram SMS notification", sendErr)
 						break
 					}
@@ -2346,10 +2355,11 @@ func (bot *telegramBot) loadConfig(ctx context.Context) (telegramRuntimeConfig, 
 		return telegramRuntimeConfig{}, false, fmt.Errorf("decode Telegram config: %w", err)
 	}
 	config := telegramRuntimeConfig{
-		Token:   configString(raw, "bot_token"),
-		ChatID:  configString(raw, "chat_id"),
-		BaseURL: configString(raw, "base_url"),
-		Proxy:   configString(raw, "proxy"),
+		Token:     configString(raw, "bot_token"),
+		ChatID:    configString(raw, "chat_id"),
+		BaseURL:   configString(raw, "base_url"),
+		Proxy:     configString(raw, "proxy"),
+		DeviceIDs: configStrings(raw, "device_ids"),
 	}
 	if config.BaseURL == "" {
 		config.BaseURL = defaultTelegramBaseURL
