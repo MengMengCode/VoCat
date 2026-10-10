@@ -21,6 +21,15 @@ const (
 	quectelVendorID = "2c7c"
 )
 
+var ml307USBIDs = [...]struct {
+	vendorID    string
+	productID   string
+	atInterface int
+}{
+	{"2ecc", "3012", 2},
+	{"2c91", "0002", 3},
+}
+
 type SysFSDiscoverer struct {
 	SysRoot string
 	DevRoot string
@@ -166,13 +175,11 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			}
 			return left.Name < right.Name
 		})
-		if IsML307(state.candidate) {
-			// ML307 USB compositions expose AT endpoints on interfaces 02 and 03.
-			// Prefer interface 02, matching the tested ML307A composition.
+		if atInterface, ok := ml307ATInterface(state.candidate); ok {
 			for index := range state.candidate.Ports {
 				port := &state.candidate.Ports[index]
 				port.Role = PortRoleUnknown
-				if port.InterfaceNumber == 2 {
+				if port.InterfaceNumber == atInterface {
 					port.Role = PortRoleAT
 					state.candidate.ATPort = *port
 				}
@@ -210,11 +217,22 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 
 // IsML307 identifies the ML307 USB modem family by its USB identity or product string.
 func IsML307(candidate Candidate) bool {
-	if strings.EqualFold(strings.TrimSpace(candidate.VendorID), "2ecc") &&
-		strings.EqualFold(strings.TrimSpace(candidate.ProductID), "3012") {
-		return true
+	_, ok := ml307ATInterface(candidate)
+	return ok
+}
+
+func ml307ATInterface(candidate Candidate) (int, bool) {
+	vendorID := strings.TrimSpace(candidate.VendorID)
+	productID := strings.TrimSpace(candidate.ProductID)
+	for _, id := range ml307USBIDs {
+		if vendorID == id.vendorID && productID == id.productID {
+			return id.atInterface, true
+		}
 	}
-	return strings.Contains(strings.ToUpper(candidate.Product), "ML307")
+	if strings.Contains(strings.ToUpper(candidate.Product), "ML307") {
+		return 2, true
+	}
+	return 0, false
 }
 
 // IsDJI4GUSB reports whether a USB identity belongs to the first-generation

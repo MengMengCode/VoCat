@@ -807,7 +807,12 @@ func (manager *Manager) ExecuteAT(
 	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 	response, err := client.Execute(commandCtx, command)
-	manager.setResult(id, state, nil, err)
+	// An unsupported CLCC query does not indicate an unhealthy control channel.
+	var commandErr *modem.CommandError
+	if !strings.EqualFold(strings.TrimSpace(command), "AT+CLCC") ||
+		!errors.As(err, &commandErr) || strings.TrimSpace(commandErr.Final) != "+CME ERROR: 4" {
+		manager.setResult(id, state, nil, err)
+	}
 	return response, err
 }
 
