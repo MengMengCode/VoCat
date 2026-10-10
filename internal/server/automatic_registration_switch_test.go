@@ -84,7 +84,7 @@ func TestCellularRegistrationDisablesDataBeforeProfileSwitch(t *testing.T) {
 			if err := s.store.UpsertCardPolicy(ctx, store.CardPolicy{ICCID: "test-card", NetworkEnabled: true, Source: "user"}); err != nil {
 				t.Fatal(err)
 			}
-			config, _, _, err := s.ensureAutomaticTaskProfile(ctx, store.AutomaticTask{DeviceID: "dev1", ProfileICCID: "test-card", TaskType: "cellular_attach", Environment: "cellular"}, func(string) {})
+			config, _, _, _, err := s.ensureAutomaticTaskProfile(ctx, store.AutomaticTask{DeviceID: "dev1", ProfileICCID: "test-card", TaskType: "cellular_attach", Environment: "cellular"}, func(string) {})
 			if tc.wantError == "" {
 				if err != nil || config.NetworkEnabled {
 					t.Fatalf("config=%+v error=%v", config, err)

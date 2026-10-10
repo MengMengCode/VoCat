@@ -462,7 +462,17 @@ func migrationStatements(version int) []string {
 				updated_at INTEGER NOT NULL,
 				FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
 			)`,
-			`INSERT INTO automatic_tasks SELECT * FROM automatic_tasks_v24`,
+			`INSERT INTO automatic_tasks (
+				id, name, enabled, device_id, profile_iccid, profile_aid, task_type,
+				environment, interval_days, start_date, run_time, timezone, payload_json,
+				retry_count, notify, next_run_at, last_run_at, last_status, last_error,
+				created_at, updated_at
+			) SELECT
+				id, name, enabled, device_id, profile_iccid, profile_aid, task_type,
+				environment, interval_days, start_date, run_time, timezone, payload_json,
+				retry_count, notify, next_run_at, last_run_at, last_status, last_error,
+				created_at, updated_at
+			FROM automatic_tasks_v24`,
 			`CREATE TABLE automatic_task_runs (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				task_id INTEGER NOT NULL,
@@ -487,6 +497,12 @@ func migrationStatements(version int) []string {
 			`CREATE INDEX automatic_tasks_device_idx ON automatic_tasks(device_id, next_run_at, id)`,
 			`CREATE INDEX automatic_task_runs_task_idx ON automatic_task_runs(task_id, id DESC)`,
 			`CREATE INDEX automatic_task_runs_status_idx ON automatic_task_runs(status, id)`,
+		}
+	case 26:
+		return []string{
+			`ALTER TABLE automatic_tasks
+				ADD COLUMN revert_profile INTEGER NOT NULL DEFAULT 1
+				CHECK (revert_profile IN (0, 1))`,
 		}
 	default:
 		return nil

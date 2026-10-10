@@ -12,7 +12,7 @@ import (
 const automaticTaskSelect = `
 	SELECT id, name, enabled, device_id, profile_iccid, profile_aid,
 		task_type, environment, interval_days, start_date, run_time,
-		timezone, payload_json, retry_count, notify, next_run_at, last_run_at,
+		timezone, payload_json, retry_count, notify, revert_profile, next_run_at, last_run_at,
 		last_status, last_error, created_at, updated_at
 	FROM automatic_tasks`
 
@@ -32,14 +32,14 @@ func (s *Store) SaveAutomaticTask(ctx context.Context, value AutomaticTask) (Aut
 		result, err := s.db.ExecContext(ctx, `INSERT INTO automatic_tasks (
 			name, enabled, device_id, profile_iccid, profile_aid, task_type,
 			environment, interval_days, start_date, run_time, timezone, payload_json,
-			retry_count, notify, next_run_at, last_run_at, last_status,
+			retry_count, notify, revert_profile, next_run_at, last_run_at, last_status,
 			last_error, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			strings.TrimSpace(value.Name), value.Enabled, strings.TrimSpace(value.DeviceID),
 			strings.TrimSpace(value.ProfileICCID), strings.TrimSpace(value.ProfileAID),
 			value.TaskType, value.Environment, value.IntervalDays, value.StartDate,
 			value.RunTime, value.Timezone, string(value.Payload), value.RetryCount, value.Notify,
-			value.NextRunAt.Unix(), unixOrZero(value.LastRunAt), value.LastStatus,
+			value.RevertProfile, value.NextRunAt.Unix(), unixOrZero(value.LastRunAt), value.LastStatus,
 			value.LastError, value.CreatedAt.Unix(), value.UpdatedAt.Unix())
 		if err != nil {
 			return AutomaticTask{}, fmt.Errorf("create automatic task: %w", err)
@@ -50,12 +50,12 @@ func (s *Store) SaveAutomaticTask(ctx context.Context, value AutomaticTask) (Aut
 			name = ?, enabled = ?, device_id = ?, profile_iccid = ?, profile_aid = ?,
 			task_type = ?, environment = ?, interval_days = ?, start_date = ?,
 			run_time = ?, timezone = ?, payload_json = ?, retry_count = ?, notify = ?,
-			next_run_at = ?, updated_at = ? WHERE id = ?`,
+			revert_profile = ?, next_run_at = ?, updated_at = ? WHERE id = ?`,
 			strings.TrimSpace(value.Name), value.Enabled, strings.TrimSpace(value.DeviceID),
 			strings.TrimSpace(value.ProfileICCID), strings.TrimSpace(value.ProfileAID),
 			value.TaskType, value.Environment, value.IntervalDays, value.StartDate,
 			value.RunTime, value.Timezone, string(value.Payload), value.RetryCount, value.Notify,
-			value.NextRunAt.Unix(), value.UpdatedAt.Unix(), value.ID)
+			value.RevertProfile, value.NextRunAt.Unix(), value.UpdatedAt.Unix(), value.ID)
 		if err != nil {
 			return AutomaticTask{}, fmt.Errorf("update automatic task %d: %w", value.ID, err)
 		}
@@ -306,19 +306,19 @@ func scanAutomaticTaskRuns(rows *sql.Rows) ([]AutomaticTaskRun, error) {
 
 func scanAutomaticTask(row rowScanner) (AutomaticTask, error) {
 	var value AutomaticTask
-	var enabled, notify bool
+	var enabled, notify, revertProfile bool
 	var payload string
 	var nextRun, lastRun, created, updated int64
 	if err := row.Scan(&value.ID, &value.Name, &enabled, &value.DeviceID, &value.ProfileICCID,
 		&value.ProfileAID, &value.TaskType, &value.Environment, &value.IntervalDays,
 		&value.StartDate, &value.RunTime, &value.Timezone, &payload, &value.RetryCount, &notify,
-		&nextRun, &lastRun, &value.LastStatus, &value.LastError, &created, &updated); err != nil {
+		&revertProfile, &nextRun, &lastRun, &value.LastStatus, &value.LastError, &created, &updated); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AutomaticTask{}, ErrNotFound
 		}
 		return AutomaticTask{}, err
 	}
-	value.Enabled, value.Notify = enabled, notify
+	value.Enabled, value.Notify, value.RevertProfile = enabled, notify, revertProfile
 	value.Payload = []byte(payload)
 	value.NextRunAt, value.LastRunAt = time.Unix(nextRun, 0).UTC(), timeFromUnix(lastRun)
 	value.CreatedAt, value.UpdatedAt = time.Unix(created, 0).UTC(), time.Unix(updated, 0).UTC()

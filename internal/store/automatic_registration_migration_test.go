@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 )
@@ -33,23 +32,26 @@ func TestMigration25PreservesTasksAndRuns(t *testing.T) {
 	}
 	legacy := &Store{db: raw}
 	mustSaveDevice(t, legacy, "modem", "Modem")
-	task, err := legacy.SaveAutomaticTask(ctx, AutomaticTask{Name: "Existing SMS", Enabled: true, DeviceID: "modem", ProfileICCID: "card", TaskType: "sms", Environment: "cellular", IntervalDays: 1, StartDate: "2026-10-02", RunTime: "12:00", Timezone: "UTC", Payload: []byte(`{"phone":"10086","message":"test"}`), NextRunAt: time.Now().Add(time.Hour)})
+	taskNextRun := time.Now().Add(time.Hour).Unix()
+	nowUnix := time.Now().Unix()
+	res, err := raw.ExecContext(ctx, `INSERT INTO automatic_tasks (
+		name, enabled, device_id, profile_iccid, profile_aid, task_type,
+		environment, interval_days, start_date, run_time, timezone, payload_json,
+		retry_count, notify, next_run_at, last_run_at, last_status,
+		last_error, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"Existing SMS", 1, "modem", "card", "", "sms", "cellular", 1,
+		"2026-10-02", "12:00", "UTC", `{"phone":"10086","message":"test"}`, 0, 0,
+		taskNextRun, 0, "", "", nowUnix, nowUnix)
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := legacy.QueueAutomaticTaskNow(ctx, task)
-	if err != nil {
-		t.Fatal(err)
-	}
-	run.Status, run.Output = "success", "old result"
-	if err := legacy.UpdateAutomaticTaskRun(ctx, run); err != nil {
-		t.Fatal(err)
-	}
-	beforeTask, err := legacy.AutomaticTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeRuns, err := legacy.ListAutomaticTaskRuns(ctx, 10)
+	taskID, _ := res.LastInsertId()
+	_, err = raw.ExecContext(ctx, `INSERT INTO automatic_task_runs (
+		task_id, device_id, scheduled_at, started_at, finished_at, status,
+		attempts, output, error, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		taskID, "modem", nowUnix, nowUnix, nowUnix, "success", 1, "old result", "", nowUnix, nowUnix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,14 +63,15 @@ func TestMigration25PreservesTasksAndRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	database := openTestStore(t, path)
-	afterTask, err := database.AutomaticTask(ctx, task.ID)
-	if err != nil || !reflect.DeepEqual(beforeTask, afterTask) {
-		t.Fatalf("task changed: %+v error=%v", afterTask, err)
+	afterTask, err := database.AutomaticTask(ctx, taskID)
+	if err != nil || afterTask.Name != "Existing SMS" || !afterTask.RevertProfile {
+		t.Fatalf("task changed unexpectedly or revert_profile not migrated: %+v error=%v", afterTask, err)
 	}
 	afterRuns, err := database.ListAutomaticTaskRuns(ctx, 10)
-	if err != nil || !reflect.DeepEqual(beforeRuns, afterRuns) {
+	if err != nil || len(afterRuns) != 1 || afterRuns[0].Output != "old result" {
 		t.Fatalf("runs changed: %+v error=%v", afterRuns, err)
 	}
+	task := afterTask
 	task.ID, task.TaskType, task.Payload = 0, "cellular_attach", []byte(`{}`)
 	task.NextRunAt = time.Now().Add(-time.Minute)
 	added, err := database.SaveAutomaticTask(ctx, task)
@@ -83,11 +86,54 @@ func TestMigration25PreservesTasksAndRuns(t *testing.T) {
 	if err := database.db.QueryRowContext(ctx, "PRAGMA foreign_key_check").Scan(&table); err != sql.ErrNoRows {
 		t.Fatalf("foreign key check=%v", err)
 	}
-	if err := database.DeleteAutomaticTask(ctx, beforeTask.ID); err != nil {
+	if err := database.DeleteAutomaticTask(ctx, afterTask.ID); err != nil {
 		t.Fatal(err)
 	}
 	remaining, err := database.ListAutomaticTaskRuns(ctx, 10)
 	if err != nil || len(remaining) != 1 || remaining[0].TaskID != added.ID {
 		t.Fatalf("cascade deletion: runs=%+v error=%v", remaining, err)
+	}
+}
+
+func TestMigration26AddsRevertProfile(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v25.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw.SetMaxOpenConns(1)
+	defer raw.Close()
+	for version := 1; version <= 25; version++ {
+		for _, statement := range migrationStatements(version) {
+			if _, err := raw.ExecContext(ctx, statement); err != nil {
+				t.Fatalf("schema %d: %v", version, err)
+			}
+		}
+	}
+	if _, err := raw.ExecContext(ctx, "PRAGMA user_version = 25"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO devices (id, name, created_at, updated_at) VALUES ('d1', 'D1', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO automatic_tasks (
+		name, enabled, device_id, profile_iccid, profile_aid, task_type,
+		environment, interval_days, start_date, run_time, timezone, payload_json,
+		retry_count, notify, next_run_at, last_run_at, last_status,
+		last_error, created_at, updated_at
+	) VALUES ('Test Task', 1, 'd1', 'iccid1', '', 'sms', 'cellular', 1, '2026-10-10', '12:00', 'UTC', '{}', 0, 0, 1000, 0, '', '', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db := openTestStore(t, path)
+	task, err := db.AutomaticTask(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !task.RevertProfile {
+		t.Fatalf("expected RevertProfile to default to true after migration 26, got false")
 	}
 }

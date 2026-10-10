@@ -141,6 +141,7 @@ type AutomaticTask struct {
 	Payload      json.RawMessage `json:"payload"`
 	RetryCount   int             `json:"retry_count"`
 	Notify       bool            `json:"notify"`
+	RevertProfile bool           `json:"revert_profile"`
 	NextRunAt    time.Time       `json:"next_run_at"`
 	LastRunAt    time.Time       `json:"last_run_at,omitempty"`
 	LastStatus   string          `json:"last_status"`

@@ -53,6 +53,7 @@ interface AutomaticTask {
   payload: AutomaticTaskPayload;
   retryCount: number;
   notify: boolean;
+  revertProfile?: boolean;
   nextRunAt: string;
   lastRunAt?: string;
   lastStatus: string;
@@ -86,6 +87,7 @@ interface TaskForm {
   runTime: string;
   retryCount: number;
   notify: boolean;
+  revertProfile: boolean;
   phone: string;
   message: string;
   durationSeconds: number;
@@ -123,6 +125,7 @@ function emptyForm(deviceId = ""): TaskForm {
     runTime: localTime(),
     retryCount: 1,
     notify: true,
+    revertProfile: true,
     phone: "",
     message: "",
     durationSeconds: 30,
@@ -296,6 +299,7 @@ export default function AutomaticTasksPage() {
       runTime: task.runTime,
       retryCount: task.retryCount,
       notify: task.notify,
+      revertProfile: task.revertProfile ?? true,
       phone: task.payload?.phone || "",
       message: task.payload?.message || "",
       durationSeconds: task.payload?.durationSeconds || 30,
@@ -363,6 +367,7 @@ export default function AutomaticTasksPage() {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
         retryCount: Number(form.retryCount),
         notify: form.notify,
+        revertProfile: form.revertProfile,
         payload: form.taskType === "cellular_attach" ? {} : {
           phone: form.phone,
           message: form.message,
@@ -467,7 +472,7 @@ export default function AutomaticTasksPage() {
                 <tr key={task.id} className="hover:bg-sky-50/40 dark:hover:bg-sky-500/[0.04]">
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2"><Switch checked={task.enabled} loading={busy === task.id} size="small" onChange={() => void toggle(task)} /><span className="font-semibold">{task.name}</span></div>
-                    <div className="mt-1 text-xs text-gray-400">{task.notify ? t("完成后推送通知") : t("不推送通知")} · {t("失败重试 {count} 次").replace("{count}", String(task.retryCount))}</div>
+                    <div className="mt-1 text-xs text-gray-400">{task.notify ? t("完成后推送通知") : t("不推送通知")} · {task.revertProfile !== false ? t("完成后切回原卡") : t("保持当前卡")} · {t("失败重试 {count} 次").replace("{count}", String(task.retryCount))}</div>
                   </td>
                   <td className="px-4 py-3">
                     <div>{deviceByID.get(task.deviceId)?.name || task.deviceId}</div>
@@ -551,6 +556,7 @@ export default function AutomaticTasksPage() {
           <div><label className={fieldLabel}>{t("任务失败重试次数")}</label><Select value={String(form.retryCount)} onChange={(value) => setForm({ ...form, retryCount: Number(value) })} options={Array.from({ length: 11 }, (_, count) => ({ value: String(count), label: t("{count} 次").replace("{count}", String(count)) }))} /></div>
           <div className="flex items-center justify-between rounded-lg border border-gray-200 p-3 dark:border-white/10"><div><div className="text-sm font-semibold">{t("启用任务")}</div><div className="text-xs text-gray-400">{t("停用后不会进入执行队列")}</div></div><Switch checked={form.enabled} onChange={(enabled) => setForm({ ...form, enabled })} /></div>
           <div className="flex items-center justify-between rounded-lg border border-gray-200 p-3 dark:border-white/10"><div><div className="text-sm font-semibold">{t("完成后推送通知")}</div><div className="text-xs text-gray-400">{t("发送到全部已配置并启用的通知渠道")}</div></div><Switch checked={form.notify} onChange={(notify) => setForm({ ...form, notify })} /></div>
+          <div className="md:col-span-2 flex items-center justify-between rounded-lg border border-gray-200 p-3 dark:border-white/10"><div><div className="text-sm font-semibold">{t("任务完成后切回原卡")}</div><div className="text-xs text-gray-400">{t("若执行前活跃卡与任务卡不同，任务完成后自动切回执行前的 SIM / Profile 并恢复其网络策略")}</div></div><Switch checked={form.revertProfile} onChange={(revertProfile) => setForm({ ...form, revertProfile })} /></div>
         </div>
         <div className="mt-5 flex justify-end gap-2"><Button onClick={closeEditor}>{t("取消")}</Button><Button variant="primary" loading={saving} onClick={() => void save()}>{t("保存")}</Button></div>
       </Modal>
