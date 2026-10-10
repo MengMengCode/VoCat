@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/smtp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -201,6 +202,11 @@ func (s *Server) deliverSMSNotificationsOnce(
 	return smsNotificationRetryDelay(state.consecutiveFailures)
 }
 
+// A missing/null scope keeps the existing all-device behavior; [] sends nothing.
+func notificationMatchesDevice(deviceIDs []string, deviceID string) bool {
+	return deviceIDs == nil || slices.Contains(deviceIDs, deviceID)
+}
+
 func smsMessageReadyToNotify(message store.SMSMessage) bool {
 	return strings.TrimSpace(message.Body) != "" &&
 		store.ConcatSMSReadyToNotify(message.MessageID, message.Extra)
@@ -281,7 +287,7 @@ func (s *Server) logSMSNotificationError(channel string, err error) {
 // sendSMSNotification 按渠道发送短信，MeoW 与其他独立标题渠道复用 DetailText。
 func sendSMSNotification(ctx context.Context, channel string, config map[string]any, message smsNotification) error {
 	if channel == "meow" {
-		return meowNotificationSender(ctx, config, "收到新短信", message.DetailText())
+		return sendMeowNotification(ctx, config, &message.DeviceID, "收到新短信", message.DetailText())
 	}
 	switch channel {
 	case "bark":
@@ -293,15 +299,18 @@ func sendSMSNotification(ctx context.Context, channel string, config map[string]
 	case "webhook":
 		return sendWebhookSMSNotification(ctx, config, message)
 	case "wecom":
-		return sendWecomNotification(ctx, config, wecomSMSValues(message))
+		return sendWecomNotification(ctx, config, &message.DeviceID, wecomSMSValues(message))
 	case "lark":
-		return sendLarkNotification(ctx, config, larkSMSValues(message))
+		return sendLarkNotification(ctx, config, &message.DeviceID, larkSMSValues(message))
 	default:
 		return fmt.Errorf("unsupported SMS notification channel %q", channel)
 	}
 }
 
 func sendBarkSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+		return nil
+	}
 	client, err := restrictedHTTPClient(ctx, 6*time.Second, "")
 	if err != nil {
 		return err
@@ -332,6 +341,9 @@ func sendBarkSMSNotification(ctx context.Context, config map[string]any, message
 }
 
 func sendWebhookSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+		return nil
+	}
 	rendered := message.Text()
 	if template := configString(config, "text_template"); strings.TrimSpace(template) != "" {
 		rendered = renderSMSWebhookTemplate(template, message)
@@ -420,6 +432,9 @@ func buildPushplusPayload(token, title, content, topic, channel string) map[stri
 }
 
 func sendPushplusSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+		return nil
+	}
 	destination, err := validateOutboundURL(ctx, "https://www.pushplus.plus/send", true)
 	if err != nil {
 		return err
@@ -462,6 +477,9 @@ func sendPushplusSMSNotification(ctx context.Context, config map[string]any, mes
 }
 
 func sendEmailSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+		return nil
+	}
 	host := strings.TrimSpace(configString(config, "smtp_host"))
 	port := configInt(config, "smtp_port")
 	if port == 0 {
