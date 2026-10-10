@@ -212,6 +212,7 @@ export function updateLoggingSettings(settings: {
   mode: LoggingSettings["mode"];
   count: number;
   days: number;
+  level: LoggingSettings["level"];
 }) {
   return api<LoggingSettings>("/settings/logging", { method: "PUT", body: settings });
 }

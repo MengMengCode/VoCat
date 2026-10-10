@@ -197,6 +197,63 @@ func TestHandleLoggingSettingsRoundTripAndEnforceCount(t *testing.T) {
 	if count != 4 {
 		t.Fatalf("stored log count = %d, want 4 after retention", count)
 	}
+
+	// Verify GET returns level as well
+	getReq := httptest.NewRequest(http.MethodGet, "/api/settings/logging", nil)
+	getRec := httptest.NewRecorder()
+	server.handleLoggingSettings(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d", getRec.Code)
+	}
+	if !strings.Contains(getRec.Body.String(), `"level":"debug"`) {
+		t.Fatalf("GET body = %s, want default level debug", getRec.Body.String())
+	}
+}
+
+func TestHandleLoggingSettingsLevelRetention(t *testing.T) {
+	server := newSettingsTestServer(t)
+	ctx := context.Background()
+
+	// Seed logs with various levels
+	for _, lvl := range []string{"debug", "info", "warn", "error"} {
+		if _, err := server.store.AppendLogEvent(ctx, store.LogEvent{Level: lvl, Message: lvl}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Set level to warn
+	request := httptest.NewRequest(http.MethodPut, "/api/settings/logging", strings.NewReader(`{"mode":"unlimited","level":"warn"}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.handleLoggingSettings(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"level":"warn"`) {
+		t.Fatalf("body = %s, want level warn", recorder.Body.String())
+	}
+
+	// Existing debug and info logs should have been pruned -> count should be 2 (warn, error)
+	count, err := server.store.CountLogEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("count after prune = %d, want 2", count)
+	}
+
+	// New debug log should be ignored
+	if _, err := server.store.AppendLogEvent(ctx, store.LogEvent{Level: "debug", Message: "new debug"}); err != nil {
+		t.Fatal(err)
+	}
+	// New error log should be persisted
+	if _, err := server.store.AppendLogEvent(ctx, store.LogEvent{Level: "error", Message: "new error"}); err != nil {
+		t.Fatal(err)
+	}
+	count, _ = server.store.CountLogEvents(ctx)
+	if count != 3 {
+		t.Fatalf("count after new logs = %d, want 3", count)
+	}
 }
 
 func TestLoggingCountIsClampedToHardLimit(t *testing.T) {

@@ -9,13 +9,15 @@ import { Select } from "../ui/Select";
 import { message } from "../ui/message";
 
 type RetentionMode = LoggingSettings["mode"];
+type RetentionLevel = LoggingSettings["level"];
 
-// 运行日志保留策略：默认不限制，可按条数或天数限制，服务端据此裁剪历史日志。
+// 运行日志保留策略：默认不限制，可按条数或天数限制，并可按最低日志级别保留。
 export function LogRetentionCard({ refreshKey = 0 }: { refreshKey?: number }) {
   const { t } = useI18n();
   const [mode, setMode] = useState<RetentionMode>("unlimited");
   const [count, setCount] = useState(10000);
   const [days, setDays] = useState(30);
+  const [level, setLevel] = useState<RetentionLevel>("debug");
   const [storedLogs, setStoredLogs] = useState(0);
   const [maxLogs, setMaxLogs] = useState(10000);
   const [loading, setLoading] = useState(false);
@@ -25,6 +27,7 @@ export function LogRetentionCard({ refreshKey = 0 }: { refreshKey?: number }) {
     setMode(data.mode);
     setCount(data.count);
     setDays(data.days);
+    setLevel(data.level || "debug");
     setStoredLogs(data.storedLogs);
     setMaxLogs(data.maxLogs || 10000);
   }, []);
@@ -52,6 +55,7 @@ export function LogRetentionCard({ refreshKey = 0 }: { refreshKey?: number }) {
         mode,
         count: Math.min(maxLogs, Math.max(1, Math.trunc(count) || 1)),
         days: Math.max(1, Math.trunc(days) || 1),
+        level,
       });
       apply(data);
       message.success(t("日志保留策略已保存"));
@@ -60,7 +64,7 @@ export function LogRetentionCard({ refreshKey = 0 }: { refreshKey?: number }) {
     } finally {
       setSaving(false);
     }
-  }, [mode, count, days, maxLogs, apply]);
+  }, [mode, count, days, level, maxLogs, apply]);
 
   const onNumber = (setter: (value: number) => void) => (event: React.ChangeEvent<HTMLInputElement>) => {
     const parsed = parseInt(event.target.value, 10);
@@ -112,6 +116,21 @@ export function LogRetentionCard({ refreshKey = 0 }: { refreshKey?: number }) {
             <span className="text-sm text-gray-500 dark:text-gray-400">{t("天")}</span>
           </label>
         ) : null}
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-400">{t("类型保留")}</span>
+          <Select
+            value={level}
+            onChange={(value) => setLevel(value as RetentionLevel)}
+            className="w-44"
+            disabled={loading}
+            options={[
+              { value: "debug", label: t("DEBUG 及以上") },
+              { value: "info", label: t("INFO 及以上") },
+              { value: "warn", label: t("WARN 及以上") },
+              { value: "error", label: t("ERROR (仅严重报错)") },
+            ]}
+          />
+        </div>
         <span className="text-sm text-gray-400">
           {t("当前已存储")} {storedLogs} / {maxLogs} {t("条")}
         </span>

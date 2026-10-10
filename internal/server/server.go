@@ -158,6 +158,7 @@ func New(options Options) (*Server, error) {
 	server.cellularDataRuntime()
 	server.loadAccessConfig(context.Background())
 	server.loadUILanguage(context.Background())
+	server.loadLoggingConfig(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.handleLiveness)

@@ -18,10 +18,11 @@ type loggingConfig struct {
 	Mode  string `json:"mode"`  // "unlimited" (default) | "count" | "days"
 	Count int    `json:"count"` // keep newest N entries when mode is "count"
 	Days  int    `json:"days"`  // keep entries from the last N days when mode is "days"
+	Level string `json:"level"` // "debug" (default) | "info" | "warn" | "error"
 }
 
 func defaultLoggingConfig() loggingConfig {
-	return loggingConfig{Mode: "unlimited", Count: 10000, Days: 30}
+	return loggingConfig{Mode: "unlimited", Count: 10000, Days: 30, Level: "debug"}
 }
 
 func parseLoggingConfig(config loggingConfig) (loggingConfig, error) {
@@ -42,6 +43,17 @@ func parseLoggingConfig(config loggingConfig) (loggingConfig, error) {
 	if config.Days < 1 {
 		config.Days = 30
 	}
+	level := strings.ToLower(strings.TrimSpace(config.Level))
+	if level == "" || level == "all" {
+		level = "debug"
+	}
+	if level != "debug" && level != "info" && level != "warn" && level != "warning" && level != "error" {
+		return loggingConfig{}, errors.New("level must be \"debug\", \"info\", \"warn\", or \"error\"")
+	}
+	if level == "warning" {
+		level = "warn"
+	}
+	config.Level = level
 	return config, nil
 }
 
@@ -58,6 +70,9 @@ func (s *Server) loadLoggingConfig(ctx context.Context) loggingConfig {
 			}
 		}
 	}
+	if s.store != nil {
+		s.store.SetLogMinLevel(config.Level)
+	}
 	return config
 }
 
@@ -65,6 +80,9 @@ func (s *Server) loadLoggingConfig(ctx context.Context) loggingConfig {
 // log events. The "unlimited" mode prunes nothing.
 func (s *Server) applyLogRetention(ctx context.Context) error {
 	config := s.loadLoggingConfig(ctx)
+	if _, err := s.store.PruneLogEventsBelowLevel(ctx, config.Level); err != nil {
+		return err
+	}
 	switch config.Mode {
 	case "days":
 		cutoff := time.Now().UTC().Add(-time.Duration(config.Days) * 24 * time.Hour)
@@ -123,6 +141,7 @@ func (s *Server) handleLoggingSettings(w http.ResponseWriter, r *http.Request) {
 				"mode":        config.Mode,
 				"count":       config.Count,
 				"days":        config.Days,
+				"level":       config.Level,
 				"stored_logs": stored,
 				"max_logs":    store.MaxLogEvents,
 			},
@@ -160,6 +179,7 @@ func (s *Server) handleLoggingSettings(w http.ResponseWriter, r *http.Request) {
 				"mode":        config.Mode,
 				"count":       config.Count,
 				"days":        config.Days,
+				"level":       config.Level,
 				"stored_logs": stored,
 				"max_logs":    store.MaxLogEvents,
 			},

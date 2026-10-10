@@ -149,6 +149,9 @@ func (s *Store) AppendLogEvent(ctx context.Context, value LogEvent) (LogEvent, e
 		// so an in-flight persistence worker cannot resurrect cleared history.
 		return value, nil
 	}
+	if s.logMinLevel != "" && isLogLevelBelow(value.Level, s.logMinLevel) {
+		return value, nil
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return LogEvent{}, fmt.Errorf("begin log append: %w", err)
@@ -309,6 +312,74 @@ func (s *Store) PruneLogEventsToCount(ctx context.Context, keep int) (int64, err
 		return 0, fmt.Errorf("read pruned log count: %w", err)
 	}
 	return affected, nil
+}
+
+// SetLogMinLevel configures the minimum log severity to persist.
+// Events below this level are ignored by AppendLogEvent.
+func (s *Store) SetLogMinLevel(level string) {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	s.logMinLevel = strings.ToLower(strings.TrimSpace(level))
+}
+
+// LogMinLevel returns the current minimum log level threshold.
+func (s *Store) LogMinLevel() string {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	return s.logMinLevel
+}
+
+// PruneLogEventsBelowLevel deletes persisted log events with a severity lower
+// than minLevel ("debug", "info", "warn", "error").
+func (s *Store) PruneLogEventsBelowLevel(ctx context.Context, minLevel string) (int64, error) {
+	minSev := logLevelSeverity(minLevel)
+	if minSev <= 1 {
+		return 0, nil
+	}
+	var excluded []string
+	for _, lvl := range []string{"debug", "info", "warn", "warning"} {
+		if logLevelSeverity(lvl) < minSev {
+			excluded = append(excluded, lvl)
+		}
+	}
+	if len(excluded) == 0 {
+		return 0, nil
+	}
+	placeholders := make([]string, len(excluded))
+	args := make([]any, len(excluded))
+	for i, lvl := range excluded {
+		placeholders[i] = "?"
+		args[i] = lvl
+	}
+	query := fmt.Sprintf(`DELETE FROM log_events WHERE LOWER(level) IN (%s)`, strings.Join(placeholders, ","))
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("prune log events below level: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read pruned log count: %w", err)
+	}
+	return affected, nil
+}
+
+func isLogLevelBelow(level, minLevel string) bool {
+	return logLevelSeverity(level) < logLevelSeverity(minLevel)
+}
+
+func logLevelSeverity(level string) int {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "error":
+		return 4
+	case "warn", "warning":
+		return 3
+	case "info":
+		return 2
+	case "debug":
+		return 1
+	default:
+		return 2
+	}
 }
 
 func deleteEventsBefore(

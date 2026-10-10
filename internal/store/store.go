@@ -23,6 +23,7 @@ type Store struct {
 	db           *sql.DB
 	logMu        sync.Mutex
 	logClearedAt time.Time
+	logMinLevel  string
 }
 
 type Admin struct {

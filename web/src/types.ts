@@ -493,6 +493,7 @@ export interface LoggingSettings {
   mode: "unlimited" | "count" | "days";
   count: number;
   days: number;
+  level: "debug" | "info" | "warn" | "error";
   storedLogs: number;
   maxLogs: number;
 }

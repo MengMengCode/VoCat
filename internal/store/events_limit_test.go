@@ -71,3 +71,81 @@ func TestClearLogEventsRejectsAlreadyQueuedEntries(t *testing.T) {
 		t.Fatalf("CountLogEvents = %d, %v; want 1", count, err)
 	}
 }
+
+func TestAppendLogEventMinLevelFilter(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	database.SetLogMinLevel("warn")
+	ctx := context.Background()
+
+	// Debug should be filtered out
+	debugEvt, err := database.AppendLogEvent(ctx, LogEvent{Level: "debug", Message: "debug msg"})
+	if err != nil || debugEvt.ID != 0 {
+		t.Fatalf("debug append should be filtered out, got ID=%d err=%v", debugEvt.ID, err)
+	}
+
+	// Info should be filtered out
+	infoEvt, err := database.AppendLogEvent(ctx, LogEvent{Level: "info", Message: "info msg"})
+	if err != nil || infoEvt.ID != 0 {
+		t.Fatalf("info append should be filtered out, got ID=%d err=%v", infoEvt.ID, err)
+	}
+
+	// Warn should be appended
+	warnEvt, err := database.AppendLogEvent(ctx, LogEvent{Level: "warn", Message: "warn msg"})
+	if err != nil || warnEvt.ID == 0 {
+		t.Fatalf("warn append should succeed, got ID=%d err=%v", warnEvt.ID, err)
+	}
+
+	// Error should be appended
+	errEvt, err := database.AppendLogEvent(ctx, LogEvent{Level: "error", Message: "error msg"})
+	if err != nil || errEvt.ID == 0 {
+		t.Fatalf("error append should succeed, got ID=%d err=%v", errEvt.ID, err)
+	}
+
+	count, err := database.CountLogEvents(ctx)
+	if err != nil || count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+}
+
+func TestPruneLogEventsBelowLevel(t *testing.T) {
+	database, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx := context.Background()
+	// Insert rows directly without filter
+	for _, lvl := range []string{"debug", "info", "warn", "error"} {
+		if _, err := database.AppendLogEvent(ctx, LogEvent{Level: lvl, Message: lvl + " message"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Prune below warn -> should delete debug and info (2 rows)
+	pruned, err := database.PruneLogEventsBelowLevel(ctx, "warn")
+	if err != nil {
+		t.Fatalf("prune error: %v", err)
+	}
+	if pruned != 2 {
+		t.Fatalf("pruned = %d, want 2", pruned)
+	}
+
+	remaining, err := database.ListLogEvents(ctx, LogFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("remaining logs count = %d, want 2", len(remaining))
+	}
+	for _, r := range remaining {
+		if r.Level != "warn" && r.Level != "error" {
+			t.Fatalf("unexpected remaining level: %s", r.Level)
+		}
+	}
+}
