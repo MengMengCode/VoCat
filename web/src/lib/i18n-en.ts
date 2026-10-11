@@ -6,7 +6,11 @@
  */
 export const EN_DICT: Record<string, string> = {
   "清空配置": "Clear configuration",
-  "清空后将移除该渠道的账号、地址和凭据，其他选项恢复默认值。启用状态保持不变，点击“保存通知配置”后生效。": "This removes accounts, addresses and credentials and restores other options to defaults. The enabled state stays unchanged. Click Save notification settings to apply.",
+  "清空后将移除该渠道的账号、地址和凭据，其他选项恢复默认值。启用状态和适用设备保持不变，点击“保存通知配置”后生效。": "This removes accounts, addresses and credentials and restores other options to defaults. The enabled state and device scope stay unchanged. Click Save notification settings to apply.",
+  "仅推送指定设备": "Only notify for selected devices",
+  "关闭时推送全部设备的通知。": "When off, notifications are sent for all devices.",
+  "正在加载设备…": "Loading devices…",
+  "设备列表加载失败，已保留适用设备范围。": "Could not load devices. The device scope is unchanged.",
   "启用 MeoW 推送": "Enable MeoW notifications",
   "MeoW 昵称": "MeoW nickname",
   "MeoW 测试失败": "MeoW test failed",
