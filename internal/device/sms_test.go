@@ -260,8 +260,11 @@ func TestManagerSendSMSTimeoutNeverClaimsAcceptanceOrDelivery(t *testing.T) {
 	client.mu.Lock()
 	closeCount := client.closeCount
 	client.mu.Unlock()
-	if closeCount != 1 {
-		t.Fatalf("close count = %d, want 1 after uncertain timeout", closeCount)
+	if closeCount != 0 {
+		t.Fatalf("close count = %d, want 0 after uncertain timeout", closeCount)
+	}
+	if manager.devices[id].client != client {
+		t.Fatal("client not retained after uncertain timeout")
 	}
 	client.assertDone(t)
 }

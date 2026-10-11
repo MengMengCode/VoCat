@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 // read bounded and lets Session observe its context deadline without closing
 // a transport that is in use.
 type linuxSerialTransport struct {
+	mu          sync.RWMutex
 	fd          atomic.Int64
 	readTimeout atomic.Int64
 }
@@ -109,6 +111,8 @@ func (transport *linuxSerialTransport) Read(buffer []byte) (int, error) {
 	if len(buffer) == 0 {
 		return 0, nil
 	}
+	transport.mu.RLock()
+	defer transport.mu.RUnlock()
 	fd, err := transport.currentFD()
 	if err != nil {
 		return 0, err
@@ -119,13 +123,16 @@ func (transport *linuxSerialTransport) Read(buffer []byte) (int, error) {
 		deadline = time.Now().Add(timeout)
 	}
 	for {
-		wait := -1
+		if transport.fd.Load() < 0 {
+			return 0, os.ErrClosed
+		}
+		wait := 100
 		if !deadline.IsZero() {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				return 0, nil
 			}
-			wait = int((remaining + time.Millisecond - 1) / time.Millisecond)
+			wait = int((min(remaining, 100*time.Millisecond) + time.Millisecond - 1) / time.Millisecond)
 		}
 		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN | unix.POLLERR | unix.POLLHUP}}
 		_, err = unix.Poll(fds, wait)
@@ -135,8 +142,11 @@ func (transport *linuxSerialTransport) Read(buffer []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		if transport.fd.Load() < 0 {
+			return 0, os.ErrClosed
+		}
 		if fds[0].Revents == 0 {
-			return 0, nil
+			continue
 		}
 		if fds[0].Revents&unix.POLLNVAL != 0 {
 			return 0, os.ErrClosed
@@ -154,11 +164,16 @@ func (transport *linuxSerialTransport) Read(buffer []byte) (int, error) {
 }
 
 func (transport *linuxSerialTransport) Write(buffer []byte) (int, error) {
+	transport.mu.RLock()
+	defer transport.mu.RUnlock()
 	fd, err := transport.currentFD()
 	if err != nil {
 		return 0, err
 	}
 	for {
+		if transport.fd.Load() < 0 {
+			return 0, os.ErrClosed
+		}
 		count, writeErr := unix.Write(fd, buffer)
 		if errors.Is(writeErr, unix.EINTR) {
 			continue
@@ -170,19 +185,32 @@ func (transport *linuxSerialTransport) Write(buffer []byte) (int, error) {
 			}
 			continue
 		}
-		return count, writeErr
+		return max(count, 0), writeErr
 	}
 }
 
 func (transport *linuxSerialTransport) Drain() error {
+	transport.mu.RLock()
+	defer transport.mu.RUnlock()
 	fd, err := transport.currentFD()
 	if err != nil {
 		return err
 	}
-	return unix.IoctlSetInt(fd, unix.TCSBRK, 1)
+	for {
+		if transport.fd.Load() < 0 {
+			return os.ErrClosed
+		}
+		pending, err := unix.IoctlGetInt(fd, unix.TIOCOUTQ)
+		if err != nil || pending == 0 {
+			return err
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func (transport *linuxSerialTransport) ResetInputBuffer() error {
+	transport.mu.RLock()
+	defer transport.mu.RUnlock()
 	fd, err := transport.currentFD()
 	if err != nil {
 		return err
@@ -199,7 +227,10 @@ func (transport *linuxSerialTransport) SetReadTimeout(timeout time.Duration) err
 }
 
 func (transport *linuxSerialTransport) Close() error {
+	// Signal pending I/O before waiting; do not release its descriptor early.
 	fd := int(transport.fd.Swap(-1))
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
 	if fd < 0 {
 		return nil
 	}

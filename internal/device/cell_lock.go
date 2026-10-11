@@ -226,18 +226,13 @@ func (manager *Manager) prepareCellLock(ctx context.Context, id string) (*manage
 	return state, queries, nil
 }
 
-// Called with opMu held; discard the client on missing finals to isolate late replies.
 func (manager *Manager) cellLockCommand(ctx context.Context, state *managedDevice, command string) (modem.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return modem.Response{}, err
 	}
 	response, err := manager.command(ctx, state.client, command)
-	if response.Final == "" {
-		_ = state.client.Close()
-		state.client = nil
-		if err == nil {
-			err = fmt.Errorf("%s: modem command completed without a final result", command)
-		}
+	if response.Final == "" && err == nil {
+		err = fmt.Errorf("%s: modem command completed without a final result", command)
 	}
 	return response, err
 }

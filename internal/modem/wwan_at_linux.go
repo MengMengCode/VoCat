@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -19,7 +20,7 @@ type nativeWWANATTransport struct {
 	mu          sync.RWMutex
 	fd          int
 	readTimeout time.Duration
-	closed      bool
+	closed      atomic.Bool
 }
 
 func openNativeWWANATTransport(path string) (Transport, error) {
@@ -33,7 +34,7 @@ func openNativeWWANATTransport(path string) (Transport, error) {
 func (transport *nativeWWANATTransport) Read(buffer []byte) (int, error) {
 	transport.mu.RLock()
 	defer transport.mu.RUnlock()
-	if transport.closed {
+	if transport.closed.Load() {
 		return 0, io.ErrClosedPipe
 	}
 
@@ -42,13 +43,16 @@ func (transport *nativeWWANATTransport) Read(buffer []byte) (int, error) {
 		deadline = time.Now().Add(transport.readTimeout)
 	}
 	for {
-		timeout := -1
+		if transport.closed.Load() {
+			return 0, io.ErrClosedPipe
+		}
+		timeout := 100
 		if !deadline.IsZero() {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				return 0, nil
 			}
-			timeout = int((remaining + time.Millisecond - 1) / time.Millisecond)
+			timeout = int((min(remaining, 100*time.Millisecond) + time.Millisecond - 1) / time.Millisecond)
 		}
 		fds := []unix.PollFd{{Fd: int32(transport.fd), Events: unix.POLLIN}}
 		ready, err := unix.Poll(fds, timeout)
@@ -58,8 +62,11 @@ func (transport *nativeWWANATTransport) Read(buffer []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		if transport.closed.Load() {
+			return 0, io.ErrClosedPipe
+		}
 		if ready == 0 {
-			return 0, nil
+			continue
 		}
 		if fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 &&
 			fds[0].Revents&unix.POLLIN == 0 {
@@ -72,6 +79,9 @@ func (transport *nativeWWANATTransport) Read(buffer []byte) (int, error) {
 		if count < 0 {
 			count = 0
 		}
+		if len(buffer) > 0 && count == 0 && err == nil && fds[0].Revents&(unix.POLLHUP|unix.POLLERR) != 0 {
+			return 0, io.EOF
+		}
 		return count, err
 	}
 }
@@ -79,17 +89,17 @@ func (transport *nativeWWANATTransport) Read(buffer []byte) (int, error) {
 func (transport *nativeWWANATTransport) Write(buffer []byte) (int, error) {
 	transport.mu.RLock()
 	defer transport.mu.RUnlock()
-	if transport.closed {
-		return 0, io.ErrClosedPipe
-	}
 	for {
+		if transport.closed.Load() {
+			return 0, io.ErrClosedPipe
+		}
 		count, err := unix.Write(transport.fd, buffer)
 		if errors.Is(err, unix.EINTR) {
 			continue
 		}
 		if errors.Is(err, unix.EAGAIN) {
 			fds := []unix.PollFd{{Fd: int32(transport.fd), Events: unix.POLLOUT}}
-			if _, pollErr := unix.Poll(fds, 1000); pollErr != nil {
+			if _, pollErr := unix.Poll(fds, 100); pollErr != nil && !errors.Is(pollErr, unix.EINTR) {
 				return 0, pollErr
 			}
 			continue
@@ -104,41 +114,25 @@ func (transport *nativeWWANATTransport) Write(buffer []byte) (int, error) {
 func (transport *nativeWWANATTransport) Drain() error {
 	transport.mu.RLock()
 	defer transport.mu.RUnlock()
-	if transport.closed {
+	if transport.closed.Load() {
 		return io.ErrClosedPipe
 	}
-	// WWAN character-device writes are handed to the modem synchronously and
-	// have no termios output queue to drain. A previous command that timed out
-	// can leave late bytes in the input buffer (e.g. a slow CGSN reply that
-	// arrives after the command deadline); discard them here so the next
-	// command starts from a clean stream instead of mis-parsing stale output.
-	buffer := make([]byte, 4096)
-	for {
-		fds := []unix.PollFd{{Fd: int32(transport.fd), Events: unix.POLLIN}}
-		ready, err := unix.Poll(fds, 0)
-		if err != nil {
-			return err
-		}
-		if ready == 0 || fds[0].Revents&unix.POLLIN == 0 {
-			return nil
-		}
-		if _, err := unix.Read(transport.fd, buffer); err != nil {
-			if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) {
-				continue
-			}
-			return err
-		}
-	}
+	// WWAN writes have no termios output queue. Input belongs to Session;
+	// discarding it here could lose a pending final or an unsolicited event.
+	return nil
 }
 
 func (transport *nativeWWANATTransport) ResetInputBuffer() error {
 	transport.mu.RLock()
 	defer transport.mu.RUnlock()
-	if transport.closed {
+	if transport.closed.Load() {
 		return io.ErrClosedPipe
 	}
 	buffer := make([]byte, 4096)
 	for {
+		if transport.closed.Load() {
+			return io.ErrClosedPipe
+		}
 		fds := []unix.PollFd{{Fd: int32(transport.fd), Events: unix.POLLIN}}
 		ready, err := unix.Poll(fds, 0)
 		if err != nil {
@@ -162,7 +156,7 @@ func (transport *nativeWWANATTransport) SetReadTimeout(timeout time.Duration) er
 	}
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
-	if transport.closed {
+	if transport.closed.Load() {
 		return io.ErrClosedPipe
 	}
 	transport.readTimeout = timeout
@@ -170,11 +164,13 @@ func (transport *nativeWWANATTransport) SetReadTimeout(timeout time.Duration) er
 }
 
 func (transport *nativeWWANATTransport) Close() error {
+	transport.closed.Store(true)
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
-	if transport.closed {
+	if transport.fd < 0 {
 		return nil
 	}
-	transport.closed = true
-	return unix.Close(transport.fd)
+	err := unix.Close(transport.fd)
+	transport.fd = -1
+	return err
 }

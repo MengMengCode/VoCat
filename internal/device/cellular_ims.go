@@ -186,10 +186,12 @@ func (manager *Manager) SetCellularIMS(ctx context.Context, id string, mode Cell
 	rebootCtx, cancel := manager.withTimeout(ctx, manager.longTimeout)
 	_, err = client.Execute(rebootCtx, "AT+CFUN=1,1")
 	cancel()
-	if closeErr := client.Close(); err == nil {
-		err = closeErr
+	if !isCommandInterrupted(err) {
+		if closeErr := client.Close(); err == nil {
+			err = closeErr
+		}
+		state.client = nil
 	}
-	state.client = nil
 	state.preFlightMode = nil
 	manager.clearSnapshot(id, state)
 	manager.setResult(id, state, nil, err)
