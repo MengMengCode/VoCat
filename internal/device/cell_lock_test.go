@@ -84,10 +84,9 @@ func TestSetCellLockFailures(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		setter clientStep
-		closes int
 	}{
 		{name: "setter rejected", setter: rejectedCommand(command)},
-		{name: "missing final", setter: clientStep{command: command, err: context.DeadlineExceeded}, closes: 1},
+		{name: "missing final", setter: clientStep{command: command, err: context.DeadlineExceeded}},
 		{name: "readback mismatch", setter: clientStep{command: command, response: okResponse()}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -108,8 +107,11 @@ func TestSetCellLockFailures(t *testing.T) {
 			if test.setter.err != nil && !errors.Is(err, test.setter.err) {
 				t.Fatalf("lost modem error: %v", err)
 			}
-			if client.closeCount != test.closes {
-				t.Fatalf("client closed %d times, want %d", client.closeCount, test.closes)
+			if client.closeCount != 0 {
+				t.Fatalf("client closed %d times, want 0", client.closeCount)
+			}
+			if manager.devices[id].client != client {
+				t.Fatal("client not retained after unconfirmed write")
 			}
 			client.assertDone(t)
 		})

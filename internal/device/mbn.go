@@ -429,8 +429,10 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 	rebootContext, cancelReboot := context.WithTimeout(ctx, manager.longTimeout)
 	_, rebootErr := client.Execute(rebootContext, "AT+CFUN=1,1")
 	cancelReboot()
-	_ = client.Close()
-	state.client = nil
+	if !isCommandInterrupted(rebootErr) {
+		_ = client.Close()
+		state.client = nil
+	}
 	state.preFlightMode = nil
 	manager.clearSnapshot(id, state)
 	state.opMu.Unlock()

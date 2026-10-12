@@ -131,15 +131,6 @@ func (manager *Manager) SendSMS(
 		default:
 			result.SubmissionStatus = "unknown"
 		}
-		if errors.Is(submitErr, modem.ErrCommandTimeout) ||
-			errors.Is(submitErr, context.Canceled) ||
-			errors.Is(submitErr, context.DeadlineExceeded) {
-			// A timeout after Ctrl-Z has an inherently uncertain outcome. Close
-			// this session so a late +CMGS/OK cannot corrupt the next command;
-			// callers must decide whether it is safe to retry.
-			_ = client.Close()
-			state.client = nil
-		}
 		partErr := fmt.Errorf(
 			"submit SMS part %d/%d: %w",
 			part.part,

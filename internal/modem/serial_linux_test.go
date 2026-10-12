@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +42,82 @@ func TestLinuxSerialExecHelper(t *testing.T) {
 	fmt.Fprintln(os.Stdout, "ready")
 	_, _ = io.Copy(io.Discard, os.Stdin)
 	os.Exit(0)
+}
+
+func TestLinuxNativeTransportCloseInterruptsIO(t *testing.T) {
+	for _, kind := range []string{"serial", "wwan"} {
+		for _, operation := range []string{"read", "write", "drain"} {
+			if kind == "wwan" && operation == "drain" {
+				continue // WWAN Drain never waits for output.
+			}
+			t.Run(kind+"/"+operation, func(t *testing.T) {
+				fd, peer := socketpair(t)
+				serial := &linuxSerialTransport{}
+				serial.fd.Store(int64(fd))
+				serial.readTimeout.Store(int64(time.Hour))
+				var transport Transport = serial
+				mu, wantErr := &serial.mu, os.ErrClosed
+				if kind == "wwan" {
+					wwan := &nativeWWANATTransport{fd: fd, readTimeout: -1}
+					transport, mu, wantErr = wwan, &wwan.mu, io.ErrClosedPipe
+				}
+				defer transport.Close()
+				defer unix.Close(peer)
+				if operation != "read" {
+					for {
+						_, err := unix.Write(fd, make([]byte, 4096))
+						if errors.Is(err, unix.EAGAIN) {
+							break
+						}
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				ioDone := make(chan error, 1)
+				go func() {
+					var err error
+					switch operation {
+					case "read":
+						_, err = transport.Read(make([]byte, 1))
+					case "write":
+						_, err = transport.Write([]byte("AT\r"))
+					case "drain":
+						err = transport.Drain()
+					}
+					ioDone <- err
+				}()
+				waitForTransportReadLock(t, mu)
+				closeDone := make(chan error, 1)
+				go func() { closeDone <- transport.Close() }()
+				for _, result := range []struct {
+					done chan error
+					want error
+				}{{closeDone, nil}, {ioDone, wantErr}} {
+					select {
+					case err := <-result.done:
+						if !errors.Is(err, result.want) {
+							t.Fatalf("Close/IO error = %v, want %v", err, result.want)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("Close did not interrupt pending I/O")
+					}
+				}
+			})
+		}
+	}
+}
+
+func waitForTransportReadLock(t *testing.T, mu *sync.RWMutex) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for mu.TryLock() {
+		mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("I/O did not acquire transport lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestLinuxSerialCloseReleasesTTYWhileExecChildRemainsAlive(t *testing.T) {
