@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertRegular, CheckmarkRegular } from "@fluentui/react-icons";
 import { api, apiMessage, getSecuritySettings, updateSecuritySettings } from "../api";
-import type { DeveloperSettings, HTTPSSettings, NotificationSettings, SecuritySettings, SMSSettings, SystemInfo } from "../types";
+import type { DeveloperSettings, DeviceListItem, DevicesResponse, HTTPSSettings, NotificationSettings, SecuritySettings, SMSSettings, SystemInfo } from "../types";
 import { Button, PageHeader, confirmDialog, message } from "../components/ui";
 import { CardDecor, CardIcon, CardTitle, SecurityCard, SystemInfoCard } from "../components/settings/Cards";
 import type { PasswordForm, UpdateInfo } from "../components/settings/Cards";
 import { NetworkAccessCard } from "../components/settings/NetworkAccessCard";
 import type { NetworkAccessForm } from "../components/settings/NetworkAccessCard";
-import { SegmentedTabs } from "../components/settings/controls";
+import { NotificationDeviceScope, SegmentedTabs } from "../components/settings/controls";
 import { useI18n } from "../lib/i18n";
 import { useAuth } from "../store/auth";
 import {
@@ -55,15 +55,18 @@ export default function SettingsPage() {
   const [systemInfo, setSystemInfo] = useState<SystemInfo>(EMPTY_SYSTEM_INFO);
   const [password, setPassword] = useState<PasswordForm>(EMPTY_PASSWORD);
   const [forms, setForms] = useState<NotifyForms>(defaultNotifyForms);
+  const [devices, setDevices] = useState<DeviceListItem[] | null>(null);
+  const [devicesFailed, setDevicesFailed] = useState(false);
+  const devicesRequested = useRef(false);
   const [clearedChannels, setClearedChannels] = useState<ClearableNotificationChannel[]>([]);
   const clearChannel = async (channel: ClearableNotificationChannel) => {
     const name = t(NOTIFY_TABS.find(tab => tab.key === channel)!.label);
     if (!await confirmDialog(
-      t("清空后将移除该渠道的账号、地址和凭据，其他选项恢复默认值。启用状态保持不变，点击“保存通知配置”后生效。"),
+      t("清空后将移除该渠道的账号、地址和凭据，其他选项恢复默认值。启用状态和适用设备保持不变，点击“保存通知配置”后生效。"),
       t("清空配置") + " · " + name,
       { type: "warning", confirmVariant: "danger", confirmText: t("清空配置"), cancelText: t("取消") },
     )) return;
-    setForms(prev => ({ ...prev, [channel]: { ...defaultNotifyForms()[channel], enabled: prev[channel].enabled } }));
+    setForms(prev => ({ ...prev, [channel]: { ...defaultNotifyForms()[channel], enabled: prev[channel].enabled, deviceIds: prev[channel].deviceIds } }));
     setClearedChannels(prev => prev.includes(channel) ? prev : [...prev, channel]);
   };
   const [testingMeow, setTestingMeow] = useState(false);
@@ -99,6 +102,13 @@ export default function SettingsPage() {
 
   const updateChannel = useCallback(<K extends keyof NotifyForms>(key: K, patch: Partial<NotifyForms[K]>) => {
     setForms((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+  }, []);
+
+  useEffect(() => {
+    if (devicesRequested.current) return;
+    devicesRequested.current = true;
+    void api<DevicesResponse>("/devices").then(data => setDevices(data.devices ?? []))
+      .catch(() => setDevicesFailed(true));
   }, []);
 
   const fetchSystemInfo = useCallback(async () => {
@@ -591,6 +601,8 @@ export default function SettingsPage() {
               {activeTab === "lark" ? (
                 <LarkTab value={forms.lark} onChange={(p) => updateChannel("lark", p)} testing={testingLark} onTest={onTestLark} />
               ) : null}
+              <NotificationDeviceScope value={forms[activeTab as keyof NotifyForms].deviceIds} devices={devices} failed={devicesFailed}
+                onChange={deviceIds => updateChannel(activeTab as keyof NotifyForms, { deviceIds })} />
             </fieldset>
           )}
         </div>
