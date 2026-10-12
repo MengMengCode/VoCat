@@ -217,13 +217,16 @@ export function WebhookTab({ value, onChange, testing, onTest }: PushChannelProp
             lang === "zh" ? (
               <>
                 支持占位符：<code>{"{{text}}"}</code>、<code>{"{{event}}"}</code>、<code>{"{{timestamp}}"}</code>、<code>{"{{device_id}}"}</code>、
-                <code>{"{{device_name}}"}</code>、<code>{"{{device_label}}"}</code>、<code>{"{{number}}"}</code>、<code>{"{{time}}"}</code>。留空则使用标准短信模板。
+                <code>{"{{device_name}}"}</code>、<code>{"{{device_label}}"}</code>、<code>{"{{number}}"}</code>、<code>{"{{local_phone}}"}</code>、
+                <code>{"{{iccid}}"}</code>、<code>{"{{recipient}}"}</code>、<code>{"{{time}}"}</code>。
+                number 为发送方；local_phone 为本机号码；recipient 为本机号码或 ICCID，无信息时为“未知”。留空则使用标准短信模板。
               </>
             ) : (
               <>
                 Supported placeholders: <code>{"{{text}}"}</code>, <code>{"{{event}}"}</code>, <code>{"{{timestamp}}"}</code>,{" "}
-                <code>{"{{device_id}}"}</code>, <code>{"{{device_name}}"}</code>, <code>{"{{device_label}}"}</code>, <code>{"{{number}}"}</code>, and
-                <code>{"{{time}}"}</code>. Leave empty to use the standard SMS template.
+                <code>{"{{device_id}}"}</code>, <code>{"{{device_name}}"}</code>, <code>{"{{device_label}}"}</code>, <code>{"{{number}}"}</code>,{" "}
+                <code>{"{{local_phone}}"}</code>, <code>{"{{iccid}}"}</code>, <code>{"{{recipient}}"}</code>, and <code>{"{{time}}"}</code>.
+                number is the sender; local_phone is the local number; recipient uses the local number, ICCID, or “未知” if unavailable. Leave empty to use the standard SMS template.
               </>
             )
           }
@@ -233,7 +236,7 @@ export function WebhookTab({ value, onChange, testing, onTest }: PushChannelProp
             onChange={(e) => onChange({ textTemplate: e.target.value })}
             disabled={off}
             rows={2}
-            placeholder={"收到新短信\n设备  {{device_label}}\n号码  {{number}}\n时间  {{time}}\n内容  {{text}}"}
+            placeholder={"收到新短信\n设备  {{device_label}}\n收信卡  {{recipient}}\n号码  {{number}}\n时间  {{time}}\n内容  {{text}}"}
           />
         </Field>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -302,7 +305,8 @@ export function WecomTab({ value, onChange, testing, onTest }: PushChannelProps<
           hint={
             <>
               {t("支持完整企业微信消息推送 JSON。变量必须作为 JSON 值使用，例如")} <code>{"{{message}}"}</code>{lang === "zh" ? "。" : ". "}
-              {t("可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。")}
+              {t("可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{local_phone}}、{{iccid}}、{{recipient}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。")}
+              {t("number 为发送方；local_phone 为本机号码；recipient 为本机号码或 ICCID，无信息时为“未知”。")}
             </>
           }
         >
@@ -376,7 +380,8 @@ export function LarkTab({ value, onChange, testing, onTest }: PushChannelProps<L
           hint={
             <>
               {t("支持完整飞书 / Lark 群自定义机器人 JSON。变量必须作为 JSON 值使用，例如")} <code>{"{{message}}"}</code>{lang === "zh" ? "。" : ". "}
-              {t("可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。")}
+              {t("可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{local_phone}}、{{iccid}}、{{recipient}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。")}
+              {t("number 为发送方；local_phone 为本机号码；recipient 为本机号码或 ICCID，无信息时为“未知”。")}
             </>
           }
         >

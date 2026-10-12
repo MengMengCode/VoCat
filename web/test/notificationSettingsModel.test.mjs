@@ -93,6 +93,18 @@ test("includes Lark in the complete notification settings payload", () => {
   });
 });
 
+test("default webhook template identifies the receiving card and preserves custom templates", () => {
+  const defaults = formsFromNotifications({});
+  assert.match(defaults.webhook.textTemplate, /收信卡  \{\{recipient\}\}/);
+  assert.match(buildNotificationsPayload(defaults).webhook.textTemplate, /\{\{recipient\}\}/);
+
+  for (const textTemplate of ["", "legacy {{number}}: {{text}}", "{{local_phone}} / {{iccid}} / {{recipient}}"]) {
+    const forms = formsFromNotifications({ webhook: { textTemplate } });
+    assert.equal(forms.webhook.textTemplate, textTemplate);
+    assert.equal(buildNotificationsPayload(forms).webhook.textTemplate, textTemplate);
+  }
+});
+
 test("round-trips MeoW alongside the seven existing channels", () => {
   const forms = formsFromNotifications({ meow: { enabled: true, nickname: " 昵称 ", url: " https://example.com ", imgUrl: " https://example.com/icon.png " } });
   assert.deepEqual(buildNotificationsPayload(forms).meow, { enabled: true, nickname: "昵称", url: "https://example.com", imgUrl: "https://example.com/icon.png", deviceIds: null });

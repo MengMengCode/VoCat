@@ -51,7 +51,8 @@ func TestMeowCallersSendDetailText(t *testing.T) {
 	now := time.Date(2026, 8, 20, 10, 30, 0, 0, time.Local)
 	sms := smsNotification{
 		DeviceLabel: "EC20", Number: "+447386", Time: now,
-		Content: "收到新短信后请确认\n第二行",
+		LocalPhone: "+85291234567",
+		Content:    "收到新短信后请确认\n第二行",
 	}
 	call := IncomingCallNotification{
 		DeviceLabel: "EC20", Caller: "+447386", Called: "+441234",
@@ -70,7 +71,7 @@ func TestMeowCallersSendDetailText(t *testing.T) {
 	}{
 		{
 			name: "SMS", title: "收到新短信",
-			msg: "设备  EC20\n号码  +447386\n时间  2026-08-20 10:30:00\n内容  收到新短信后请确认\n第二行",
+			msg: "设备  EC20\n本机号码  +85291234567\n号码  +447386\n时间  2026-08-20 10:30:00\n内容  收到新短信后请确认\n第二行",
 			send: func(ctx context.Context, config map[string]any) error {
 				return sendSMSNotification(ctx, "meow", config, sms)
 			},

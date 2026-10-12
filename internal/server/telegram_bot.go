@@ -2266,7 +2266,7 @@ func (bot *telegramBot) sendSMSNotification(ctx context.Context, config telegram
 	if !notificationMatchesDevice(config.DeviceIDs, notification.DeviceID) {
 		return nil
 	}
-	text := fmt.Sprintf("📩 新短信\n设备：%s\n来自：%s\n时间：%s\n\n%s", notification.DeviceID, message.Peer, message.Timestamp.Local().Format("2006-01-02 15:04:05"), message.Body)
+	text := notification.TelegramText()
 	return bot.sendText(ctx, config, 0, text, nil)
 }
 

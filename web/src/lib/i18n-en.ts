@@ -462,8 +462,10 @@ export const EN_DICT: Record<string, string> = {
   "尚未配置任何企业微信消息推送 Webhook URL，点击右侧添加按钮。": "No WeCom message push Webhook URLs yet. Click the add button on the right.",
   "JSON 请求体模板": "JSON Request Body Template",
   "支持完整企业微信消息推送 JSON。变量必须作为 JSON 值使用，例如": "Supports a complete WeCom message push JSON payload. Use variables as JSON values, for example",
-  "可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。":
-    "Available variables: {{event}}, {{title}}, {{message}}, {{timestamp}}, {{content}}, {{number}}, {{device_id}}, {{device_name}}, {{device_label}}, {{time}}.",
+  "可用变量：{{event}}、{{title}}、{{message}}、{{timestamp}}、{{content}}、{{number}}、{{local_phone}}、{{iccid}}、{{recipient}}、{{device_id}}、{{device_name}}、{{device_label}}、{{time}}。":
+    "Available variables: {{event}}, {{title}}, {{message}}, {{timestamp}}, {{content}}, {{number}}, {{local_phone}}, {{iccid}}, {{recipient}}, {{device_id}}, {{device_name}}, {{device_label}}, {{time}}.",
+  "number 为发送方；local_phone 为本机号码；recipient 为本机号码或 ICCID，无信息时为“未知”。":
+    "number is the sender; local_phone is the local number; recipient uses the local number, ICCID, or “未知” if unavailable.",
   "支持飞书 open.feishu.cn 与国际版 Lark open.larksuite.com 的群自定义机器人 Webhook，无需创建应用。":
     "Supports custom group bot Webhooks for Feishu at open.feishu.cn and international Lark at open.larksuite.com; no app is required.",
   "群机器人 Webhook URL": "Group Bot Webhook URL",

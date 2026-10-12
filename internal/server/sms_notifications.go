@@ -63,6 +63,8 @@ type smsNotification struct {
 	DeviceName  string
 	DeviceLabel string
 	Number      string
+	LocalPhone  string
+	ICCID       string
 	Time        time.Time
 	Content     string
 }
@@ -71,10 +73,32 @@ func (value smsNotification) Text() string {
 	return strings.Join([]string{
 		"收到新短信",
 		"设备  " + value.DeviceLabel,
+		value.recipientLine("  "),
 		"号码  " + value.Number,
 		"时间  " + value.Time.Local().Format("2006-01-02 15:04:05"),
 		"内容  " + value.Content,
 	}, "\n")
+}
+
+// Recipient identifies the receiving subscription even when its number is unknown.
+func (value smsNotification) Recipient() string {
+	return firstNonEmpty(value.LocalPhone, value.ICCID, "未知")
+}
+
+func (value smsNotification) recipientLine(separator string) string {
+	label := "收信卡"
+	if value.LocalPhone != "" {
+		label = "本机号码"
+	} else if value.ICCID != "" {
+		label = "ICCID"
+	}
+	return label + separator + value.Recipient()
+}
+
+func (value smsNotification) TelegramText() string {
+	return fmt.Sprintf("📩 新短信\n设备：%s\n%s\n来自：%s\n时间：%s\n\n%s",
+		value.DeviceLabel, value.recipientLine("："), value.Number,
+		value.Time.Local().Format("2006-01-02 15:04:05"), value.Content)
 }
 
 func (value smsNotification) DetailText() string {
@@ -268,11 +292,24 @@ func (s *Server) newSMSNotification(ctx context.Context, message store.SMSMessag
 	if device, err := s.store.Device(ctx, deviceID); err == nil {
 		name = strings.TrimSpace(device.Name)
 	}
+	// Use the message's historical subscription, never the device's current
+	// SIM: dispatch and retries can happen after an eSIM profile switch.
+	iccid := strings.TrimSpace(message.ICCID)
+	localPhone := strings.TrimSpace(message.LocalPhone)
+	if localPhone == "" && iccid != "" {
+		if number, err := s.store.PhoneNumberForICCID(ctx, iccid); err == nil {
+			localPhone = number
+		} else if !errors.Is(err, store.ErrNotFound) && s.logger != nil {
+			s.logger.Warn("read SMS notification phone number", "iccid", iccid, "error", err)
+		}
+	}
 	return smsNotification{
 		DeviceID:    deviceID,
 		DeviceName:  name,
 		DeviceLabel: firstNonEmpty(name, deviceID, "--"),
 		Number:      firstNonEmpty(message.Peer, "--"),
+		LocalPhone:  localPhone,
+		ICCID:       iccid,
 		Time:        message.Timestamp,
 		Content:     smsdecode.Preview(message.Body),
 	}
@@ -344,20 +381,7 @@ func sendWebhookSMSNotification(ctx context.Context, config map[string]any, mess
 	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
 		return nil
 	}
-	rendered := message.Text()
-	if template := configString(config, "text_template"); strings.TrimSpace(template) != "" {
-		rendered = renderSMSWebhookTemplate(template, message)
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"event":        "sms.received",
-		"message":      rendered,
-		"timestamp":    message.Time.UTC().Format(time.RFC3339),
-		"device_id":    message.DeviceID,
-		"device_name":  message.DeviceName,
-		"device_label": message.DeviceLabel,
-		"number":       message.Number,
-		"content":      message.Content,
-	})
+	payload := buildSMSWebhookPayload(configString(config, "text_template"), message)
 	timeout := durationMilliseconds(configInt(config, "timeout_ms"), 5*time.Second)
 	client, err := restrictedHTTPClient(ctx, timeout, "")
 	if err != nil {
@@ -397,6 +421,27 @@ func sendWebhookSMSNotification(ctx context.Context, config map[string]any, mess
 	return nil
 }
 
+func buildSMSWebhookPayload(template string, message smsNotification) []byte {
+	rendered := message.Text()
+	if strings.TrimSpace(template) != "" {
+		rendered = renderSMSWebhookTemplate(template, message)
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"event":        "sms.received",
+		"message":      rendered,
+		"timestamp":    message.Time.UTC().Format(time.RFC3339),
+		"device_id":    message.DeviceID,
+		"device_name":  message.DeviceName,
+		"device_label": message.DeviceLabel,
+		"number":       message.Number,
+		"local_phone":  message.LocalPhone,
+		"iccid":        message.ICCID,
+		"recipient":    message.Recipient(),
+		"content":      message.Content,
+	})
+	return payload
+}
+
 func renderSMSWebhookTemplate(template string, message smsNotification) string {
 	replacements := map[string]string{
 		"{{text}}":         message.Content,
@@ -405,6 +450,9 @@ func renderSMSWebhookTemplate(template string, message smsNotification) string {
 		"{{timestamp}}":    message.Time.UTC().Format(time.RFC3339),
 		"{{time}}":         message.Time.Local().Format("2006-01-02 15:04:05"),
 		"{{number}}":       message.Number,
+		"{{local_phone}}":  message.LocalPhone,
+		"{{iccid}}":        message.ICCID,
+		"{{recipient}}":    message.Recipient(),
 		"{{device_id}}":    message.DeviceID,
 		"{{device_name}}":  message.DeviceName,
 		"{{device_label}}": message.DeviceLabel,
