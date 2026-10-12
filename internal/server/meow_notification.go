@@ -25,9 +25,16 @@ func validateMeowNotificationConfig(config map[string]any) error {
 }
 
 // 默认调用原有 MeoW 发送函数；测试中可替换为本地接收端，不访问真实收件人。
-var meowNotificationSender = sendMeowNotification
+var meowNotificationSender = deliverMeowNotification
 
-func sendMeowNotification(ctx context.Context, config map[string]any, title, text string) error {
+func sendMeowNotification(ctx context.Context, config map[string]any, deviceID *string, title, text string) error {
+	if deviceID != nil && !notificationMatchesDevice(configStrings(config, "device_ids"), *deviceID) {
+		return nil
+	}
+	return meowNotificationSender(ctx, config, title, text)
+}
+
+func deliverMeowNotification(ctx context.Context, config map[string]any, title, text string) error {
 	if err := validateMeowNotificationConfig(config); err != nil {
 		return err
 	}

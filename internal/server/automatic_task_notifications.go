@@ -89,29 +89,32 @@ func (s *Server) notifyAutomaticTask(ctx context.Context, task store.AutomaticTa
 // sendAutomaticTaskNotification 按渠道发送任务结果，仅 MeoW 使用无标题正文。
 func sendAutomaticTaskNotification(ctx context.Context, channel string, config map[string]any, message automaticTaskNotification) error {
 	if channel == "meow" {
-		return meowNotificationSender(ctx, config, message.Title, message.DetailText())
+		return sendMeowNotification(ctx, config, &message.Task.DeviceID, message.Title, message.DetailText())
 	}
 	switch channel {
 	case "telegram":
-		return sendTelegramTextNotification(ctx, config, message.Text)
+		return sendTelegramTextNotification(ctx, config, message.Task.DeviceID, message.Text)
 	case "bark":
-		return sendBarkTextNotification(ctx, config, message.Title, message.Text)
+		return sendBarkTextNotification(ctx, config, message.Task.DeviceID, message.Title, message.Text)
 	case "email":
-		return sendEmailTextNotification(ctx, config, message.Title, message.Text)
+		return sendEmailTextNotification(ctx, config, message.Task.DeviceID, message.Title, message.Text)
 	case "pushplus":
-		return sendPushplusTextNotification(ctx, config, message.Title, message.Text)
+		return sendPushplusTextNotification(ctx, config, message.Task.DeviceID, message.Title, message.Text)
 	case "webhook":
 		return sendAutomaticTaskWebhook(ctx, config, message)
 	case "wecom":
-		return sendWecomNotification(ctx, config, wecomAutomaticTaskValues(message))
+		return sendWecomNotification(ctx, config, &message.Task.DeviceID, wecomAutomaticTaskValues(message))
 	case "lark":
-		return sendLarkNotification(ctx, config, larkAutomaticTaskValues(message))
+		return sendLarkNotification(ctx, config, &message.Task.DeviceID, larkAutomaticTaskValues(message))
 	default:
 		return fmt.Errorf("unsupported notification channel %q", channel)
 	}
 }
 
-func sendTelegramTextNotification(ctx context.Context, config map[string]any, text string) error {
+func sendTelegramTextNotification(ctx context.Context, config map[string]any, deviceID, text string) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), deviceID) {
+		return nil
+	}
 	token := configString(config, "bot_token")
 	parsed, err := validateTelegramAPIURL(ctx, configString(config, "base_url"), token, "sendMessage")
 	if err != nil {
@@ -131,7 +134,10 @@ func sendTelegramTextNotification(ctx context.Context, config map[string]any, te
 	return performNotificationRequest(client, request, true)
 }
 
-func sendBarkTextNotification(ctx context.Context, config map[string]any, title, text string) error {
+func sendBarkTextNotification(ctx context.Context, config map[string]any, deviceID, title, text string) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), deviceID) {
+		return nil
+	}
 	client, err := restrictedHTTPClient(ctx, 8*time.Second, "")
 	if err != nil {
 		return err
@@ -161,7 +167,10 @@ func sendBarkTextNotification(ctx context.Context, config map[string]any, title,
 	return nil
 }
 
-func sendPushplusTextNotification(ctx context.Context, config map[string]any, title, text string) error {
+func sendPushplusTextNotification(ctx context.Context, config map[string]any, deviceID, title, text string) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), deviceID) {
+		return nil
+	}
 	destination, err := validateOutboundURL(ctx, "https://www.pushplus.plus/send", true)
 	if err != nil {
 		return err
@@ -201,6 +210,9 @@ func sendPushplusTextNotification(ctx context.Context, config map[string]any, ti
 }
 
 func sendAutomaticTaskWebhook(ctx context.Context, config map[string]any, message automaticTaskNotification) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.Task.DeviceID) {
+		return nil
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"event": "automatic_task.completed", "message": message.Text,
 		"timestamp": message.Time.UTC().Format(time.RFC3339), "task_id": message.Task.ID,
@@ -239,7 +251,10 @@ func sendAutomaticTaskWebhook(ctx context.Context, config map[string]any, messag
 	return nil
 }
 
-func sendEmailTextNotification(ctx context.Context, config map[string]any, subject, text string) error {
+func sendEmailTextNotification(ctx context.Context, config map[string]any, deviceID, subject, text string) error {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), deviceID) {
+		return nil
+	}
 	host := strings.TrimSpace(configString(config, "smtp_host"))
 	port := configInt(config, "smtp_port")
 	if port == 0 {

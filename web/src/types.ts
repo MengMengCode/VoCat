@@ -468,15 +468,19 @@ export interface EsimOverview {
   profiles: EsimEuiccProfiles[];
 }
 
+export type NotificationConfig<T = Record<string, unknown>> = T & {
+  deviceIds?: string[] | null; // Missing in older settings; null means all devices.
+};
+
 export interface NotificationSettings {
-  meow: { enabled: boolean; nickname: string; url: string; imgUrl: string };
-  telegram: Record<string, unknown>;
-  webhook: Record<string, unknown>;
-  bark: Record<string, unknown>;
-  email: Record<string, unknown>;
-  pushplus: Record<string, unknown>;
-  wecom: Record<string, unknown>;
-  lark: Record<string, unknown>;
+  meow: NotificationConfig<{ enabled: boolean; nickname: string; url: string; imgUrl: string }>;
+  telegram: NotificationConfig;
+  webhook: NotificationConfig;
+  bark: NotificationConfig;
+  email: NotificationConfig;
+  pushplus: NotificationConfig;
+  wecom: NotificationConfig;
+  lark: NotificationConfig;
 }
 
 // 网络访问控制策略：默认仅放行内网网段，可切换到对公网开放。
