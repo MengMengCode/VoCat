@@ -61,6 +61,7 @@ type Status struct {
 	LocationAccepted bool     `json:"location_accepted"`
 	TermsAccepted    bool     `json:"terms_accepted"`
 	Confirmed        bool     `json:"confirmed"`
+	Confirmation     string   `json:"confirmation,omitempty"`
 	ExpiresAt        string   `json:"expires_at,omitempty"`
 }
 

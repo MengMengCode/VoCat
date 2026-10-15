@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -26,7 +28,7 @@ type e911Session struct {
 	id, deviceID, iccid string
 	expiresAt           time.Time
 	carrier             e911.Carrier
-	client              *e911.ATTClient
+	client              e911.Client
 }
 
 type e911SessionManager struct {
@@ -99,6 +101,7 @@ func (s *Server) handleE911(w http.ResponseWriter, r *http.Request, config store
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 100*time.Second)
 	defer cancel()
+	w.Header().Set("Cache-Control", "no-store")
 	if len(tail) == 1 {
 		if !requireMethod(w, r, http.MethodDelete) {
 			return true
@@ -117,10 +120,10 @@ func (s *Server) handleE911(w http.ResponseWriter, r *http.Request, config store
 		err := controller.WithSIM(ctx, config.ID, func(identity vowifi.SIMIdentity, aka vowifi.AKAProvider) error {
 			readSIM = true
 			carrier = carrierForE911Identity(identity)
-			if carrier.Method != "att_nsds" {
+			if carrier.ID == "" {
 				return nil
 			}
-			client, err := e911.NewATTClient(identity, aka, nil)
+			client, err := e911.NewClient(identity, aka, carrier, nil)
 			if err != nil {
 				return err
 			}
@@ -133,6 +136,11 @@ func (s *Server) handleE911(w http.ResponseWriter, r *http.Request, config store
 		if err != nil {
 			if !readSIM {
 				err = errors.New("could not read the active SIM; check that the module is available")
+			} else if carrier.ID != "" {
+				// Keep the brand-specific account route usable when a carrier
+				// rejects the module, subscription or SIM entitlement protocol.
+				writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"carrier": carrier, "setup_error": safeE911Error(err)}})
+				return true
 			}
 			s.e911Error(w, err)
 			return true
@@ -152,11 +160,15 @@ func (s *Server) handleE911(w http.ResponseWriter, r *http.Request, config store
 		writeJSON(w, http.StatusOK, map[string]any{"data": session.view()})
 		return true
 	}
-	if len(tail) != 2 || (tail[1] != "verify" && tail[1] != "submit" && tail[1] != "refresh") {
+	if len(tail) != 2 || (tail[1] != "verify" && tail[1] != "submit" && tail[1] != "refresh" && tail[1] != "portal") {
 		writeError(w, http.StatusNotFound, "not_found", "E911 operation was not found")
 		return true
 	}
-	if !requireMethod(w, r, http.MethodPost) {
+	method := http.MethodPost
+	if tail[1] == "portal" {
+		method = http.MethodGet
+	}
+	if !requireMethod(w, r, method) {
 		return true
 	}
 	session := s.e911Sessions.get(tail[0], config.ID)
@@ -169,7 +181,7 @@ func (s *Server) handleE911(w http.ResponseWriter, r *http.Request, config store
 		CandidateIndex *int         `json:"candidate_index"`
 		TermsAccepted  bool         `json:"terms_accepted"`
 	}
-	if tail[1] != "refresh" {
+	if tail[1] != "refresh" && tail[1] != "portal" {
 		if err := s.decodeJSON(w, r, &request); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return true
@@ -182,11 +194,26 @@ func (s *Server) handleE911(w http.ResponseWriter, r *http.Request, config store
 		return true
 	}
 	var candidates []e911.Candidate
+	var portal *e911.Websheet
+	wasConfirmed := session.client != nil && session.client.Snapshot().Confirmed
 	readSIM := false
-	err := controller.WithSIM(ctx, config.ID, func(identity vowifi.SIMIdentity, _ vowifi.AKAProvider) error {
+	err := controller.WithSIM(ctx, config.ID, func(identity vowifi.SIMIdentity, aka vowifi.AKAProvider) error {
 		readSIM = true
 		if identity.ICCID != session.iccid {
 			return errors.New("SIM changed; reopen E911 setup for the active SIM")
+		}
+		if session.client == nil {
+			return errors.New("carrier session is not available; reopen E911 setup")
+		}
+		if tail[1] == "portal" {
+			portal = session.client.Websheet()
+			if portal == nil {
+				return errors.New("carrier did not provide an E911 registration page; refresh or use its account portal")
+			}
+			return nil
+		}
+		if err := session.client.BindAKA(aka); err != nil {
+			return err
 		}
 		var err error
 		switch tail[1] {
@@ -213,16 +240,21 @@ func (s *Server) handleE911(w http.ResponseWriter, r *http.Request, config store
 		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"candidates": candidates}})
 		return true
 	}
-	if session.client.Status.Confirmed {
+	if tail[1] == "portal" {
+		writeE911Portal(w, r, portal)
+		return true
+	}
+	status := session.client.Snapshot()
+	if status.Confirmed {
 		// Cache only carrier-confirmed metadata, scoped to the SIM rather than
 		// the modem. Opening the dialog always refreshes it from the carrier.
-		payload, _ := json.Marshal(session.client.Status)
+		payload, _ := json.Marshal(status)
 		if err := s.store.UpsertAppSetting(ctx, store.AppSetting{Key: "e911_confirmed:" + session.iccid, Value: payload}); err != nil {
 			s.logger.Warn("could not cache confirmed E911 status", "device_id", config.ID)
 		}
 	}
 	result := session.view()
-	if tail[1] == "submit" && session.client.Status.Confirmed && config.VoWiFiEnabled && s.vowifi != nil {
+	if status.Confirmed && (tail[1] == "submit" || !wasConfirmed) && config.VoWiFiEnabled && s.vowifi != nil {
 		_, reconnectErr := s.vowifi.RequestReconnect(config.ID)
 		result["reconnect_scheduled"] = reconnectErr == nil
 	}
@@ -231,15 +263,57 @@ func (s *Server) handleE911(w http.ResponseWriter, r *http.Request, config store
 }
 
 func (session *e911Session) view() map[string]any {
-	return map[string]any{"id": session.id, "carrier": session.carrier, "expires_at": session.expiresAt, "terms": session.client.Terms, "status": session.client.Status}
+	return map[string]any{"id": session.id, "carrier": session.carrier, "expires_at": session.expiresAt, "terms": session.client.TermsText(), "status": session.client.Snapshot(), "portal_available": session.client.Websheet() != nil}
 }
 
 func (s *Server) e911Error(w http.ResponseWriter, err error) {
 	// The HTTP client and AKA boundary return sanitized errors, never URLs
 	// containing tokens, raw carrier responses, APDUs or key material.
+	writeError(w, http.StatusBadGateway, "e911_carrier_error", safeE911Error(err))
+}
+
+func safeE911Error(err error) string {
 	message := strings.TrimSpace(err.Error())
 	if len(message) > 400 {
 		message = "carrier provisioning failed; retry E911 setup"
 	}
-	writeError(w, http.StatusBadGateway, "e911_carrier_error", message)
+	return message
+}
+
+var e911PortalTemplate = template.Must(template.New("e911-portal").Parse(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>Carrier E911 registration</title><body><p>Opening the carrier's E911 registration page. After saving your address, return to VoCat and refresh carrier status.</p><form id="carrier-form" method="{{.Method}}" action="{{.URL}}">{{range $key, $values := .Fields}}{{range $values}}<input type="hidden" name="{{$key}}" value="{{.}}">{{end}}{{end}}<button type="submit">Continue to carrier</button></form><script nonce="{{.Nonce}}">document.getElementById('carrier-form').submit();</script></body></html>`))
+
+func writeE911Portal(w http.ResponseWriter, r *http.Request, portal *e911.Websheet) {
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		writeError(w, http.StatusForbidden, "e911_portal_origin", "open the carrier page from E911 setup")
+		return
+	}
+	var random [24]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		writeError(w, http.StatusInternalServerError, "e911_portal_error", "could not open carrier registration")
+		return
+	}
+	nonce := hex.EncodeToString(random[:])
+	u, _ := url.Parse(portal.URL)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action "+u.Scheme+"://"+u.Host+"; script-src 'nonce-"+nonce+"'")
+	method := "post"
+	endpoint := portal.URL
+	fields := portal.Fields
+	if len(portal.Fields) == 0 {
+		method = "get"
+		// Browsers replace an action's query string for GET forms. Preserve
+		// query-only websheet credentials as hidden fields during handoff.
+		fields = u.Query()
+		u.RawQuery = ""
+		endpoint = u.String()
+	}
+	_ = e911PortalTemplate.Execute(w, struct {
+		URL    string
+		Method string
+		Fields url.Values
+		Nonce  string
+	}{endpoint, method, fields, nonce})
 }

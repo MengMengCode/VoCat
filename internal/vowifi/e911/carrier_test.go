@@ -8,15 +8,17 @@ import (
 func TestCarrierUsesHomeNetworkAndPrioritizesMVNO(t *testing.T) {
 	for _, tt := range []struct{ name, mcc, mnc, spn, want string }{
 		{"RedPocket GSMA", "310", "280", "Red Pocket", "att_nsds"},
-		{"RedPocket GSMT", "310", "260", "Red Pocket", "account"},
+		{"RedPocket GSMT", "310", "260", "Red Pocket", "msp_websheet"},
 		{"AT&T", "310", "410", "", "att_nsds"},
-		{"Tello", "310", "260", "", "account"},
-		{"Mint", "310", "240", "", "account"},
-		{"US Mobile", "310", "410", "", "account"},
-		{"Verizon", "311", "480", "", "phone"},
-		{"Visible", "311", "480", "", "phone"},
-		{"Google Fi", "310", "260", "", "account"},
-		{"unknown US", "313", "999", "", "unsupported"},
+		{"Tello", "310", "260", "", "msp_websheet"},
+		{"Mint", "310", "240", "", "msp_websheet"},
+		{"US Mobile", "310", "410", "", "att_nsds"},
+		{"US Mobile", "310", "260", "", "msp_websheet"},
+		{"US Mobile", "311", "480", "", "msp_websheet"},
+		{"Verizon", "311", "480", "", "msp_websheet"},
+		{"Visible", "311", "480", "", "msp_websheet"},
+		{"Google Fi", "310", "260", "", "msp_websheet"},
+		{"unknown US", "313", "999", "", "ts43_websheet"},
 		{"foreign SIM roaming in US", "234", "15", "", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -25,6 +27,15 @@ func TestCarrierUsesHomeNetworkAndPrioritizesMVNO(t *testing.T) {
 				t.Fatalf("Detect() = %#v, want method %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMVNOKeepsBrandAndValidationEvidence(t *testing.T) {
+	for _, network := range []struct{ mcc, mnc, want string }{{"310", "410", "att"}, {"310", "260", "tmobile"}, {"311", "480", "verizon"}} {
+		carrier := Detect(vowifi.SIMIdentity{HomeMCC: network.mcc, HomeMNC: network.mnc}, "US Mobile")
+		if carrier.ID != "usmobile" || carrier.Network != network.want || carrier.PortalURL != "https://app.usmobile.com/" || carrier.Verified {
+			t.Fatalf("incorrect multi-network brand routing/evidence: %#v", carrier)
+		}
 	}
 }
 

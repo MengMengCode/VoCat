@@ -1366,6 +1366,14 @@ export const EN_DICT: Record<string, string> = {
   "SIM 短信存储已满，新短信可能无法接收": "SIM SMS storage is full; new messages may not be received",
   "模组和 SIM 短信存储已满，新短信可能无法接收": "Modem and SIM SMS storage are full; new messages may not be received",
 
+  "使用当前SIM向运营商获取E911登记页面，填写地址后返回此处查询结果。": "Use the current SIM to obtain the carrier's E911 registration page, then return here to check the result.",
+  "此线路的自动登记已接入，尚未完成实卡验证。": "Automatic registration is implemented for this line but has not been verified with a real SIM.",
+  "在运营商页面填写真实地址并接受其条款。保存后返回此弹窗，点击刷新运营商状态。": "Enter your actual address and accept the terms on the carrier page. After saving, return here and refresh carrier status.",
+  "打开运营商E911登记页": "Open carrier E911 registration",
+  "运营商未返回可用的E911登记页面，可通过下方账户入口或官方说明完成设置。": "The carrier did not return a usable E911 page. Use its account portal or official instructions below.",
+  "运营商已确认E911登记状态，Wi-Fi Calling已开通。": "The carrier has confirmed E911 registration status and enabled Wi-Fi Calling.",
+  "运营商未要求地址登记，Wi-Fi Calling已开通。": "The carrier does not require address registration and has enabled Wi-Fi Calling.",
+
   // ---- Cell lock ----
   "小区锁定": "Cell lock",
   "硬件锁定配置": "Hardware lock configuration",
