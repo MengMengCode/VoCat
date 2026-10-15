@@ -88,6 +88,9 @@ func (transport *firstAuthCaptureTransport) Float(context.Context) error {
 
 func (transport *firstAuthCaptureTransport) RoundTrip(ctx context.Context, packet []byte) ([]byte, error) {
 	transport.calls++
+	if transport.cookieLoop {
+		return transport.answerIKECookie(packet)
+	}
 	if len(transport.cookieChallenge) > 0 {
 		switch transport.calls {
 		case 1:

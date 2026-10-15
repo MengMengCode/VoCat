@@ -75,6 +75,21 @@ func (orchestrator *Orchestrator) State() State {
 	return orchestrator.state.clone()
 }
 
+// WithSIM serializes carrier provisioning with lifecycle operations and uses
+// the existing AT/QMI/PCSC adapter, including its UICC locks and sensitive I/O.
+// It does not change RF mode or interrupt an established IMS session.
+func (orchestrator *Orchestrator) WithSIM(ctx context.Context, use func(SIMIdentity, AKAProvider) error) error {
+	if err := orchestrator.lockOperation(ctx); err != nil {
+		return err
+	}
+	defer orchestrator.unlockOperation()
+	identity, err := orchestrator.deps.SIM.ReadIdentity(ctx, orchestrator.options.DeviceID)
+	if err != nil {
+		return err
+	}
+	return use(identity, orchestrator.deps.AKA)
+}
+
 // Subscribe returns the current state immediately and then the newest state on
 // every mutation. Slow subscribers lose intermediate snapshots rather than
 // blocking the modem lifecycle.

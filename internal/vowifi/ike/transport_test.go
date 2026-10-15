@@ -145,18 +145,6 @@ func TestSOCKS5InitialExchangeFallsBackAcrossResolvedEPDGAddresses(t *testing.T)
 		Exchange:     exchangeIKEInit,
 		Flags:        flagResponse,
 	}.marshal([]byte("response"))
-	cookieFirst, cookieBody, err := marshalPayloadChain([]payload{
-		makeNotify(notifyCookie, []byte{0x10, 0x20, 0x30, 0x40}),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cookieResponse := ikeHeader{
-		InitiatorSPI: requestHeader.InitiatorSPI,
-		NextPayload:  cookieFirst,
-		Exchange:     exchangeIKEInit,
-		Flags:        flagResponse,
-	}.marshal(cookieBody)
 	serverDone := make(chan error, 1)
 	go func() {
 		buffer := make([]byte, 2048)
@@ -172,14 +160,6 @@ func TestSOCKS5InitialExchangeFallsBackAcrossResolvedEPDGAddresses(t *testing.T)
 				return
 			}
 			if !destination.IP.Equal(second.IP) {
-				cookieWire, marshalErr := marshalSOCKS5Datagram(first, cookieResponse)
-				if marshalErr == nil {
-					_, marshalErr = relay.WriteToUDP(cookieWire, peer)
-				}
-				if marshalErr != nil {
-					serverDone <- marshalErr
-					return
-				}
 				continue
 			}
 			wire, marshalErr := marshalSOCKS5Datagram(second, response)

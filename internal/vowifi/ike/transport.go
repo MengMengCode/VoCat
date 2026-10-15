@@ -1,6 +1,7 @@
 package ike
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -331,6 +332,9 @@ func (transport *directUDP) RoundTripExchange(ctx context.Context, packets [][]b
 			if !ikeResponseMatchesRequest(buffer[:n], requestHeader) {
 				continue
 			}
+			if repeatedCookieChallenge(packets[0], buffer[:n]) {
+				continue
+			}
 			return n, nil
 		}
 	}
@@ -446,6 +450,7 @@ type socks5UDP struct {
 	remote  *net.UDPAddr
 	remotes []*net.UDPAddr
 	floated bool
+	pinned  bool
 }
 
 func newSOCKS5UDP(
@@ -654,28 +659,19 @@ func (transport *socks5UDP) RoundTripExchange(ctx context.Context, packets [][]b
 	// egress can reach a different subset than the local host, so an initial
 	// timeout on one address must not make the entire hostname unavailable.
 	// Once a gateway answers, keep it pinned for the lifetime of the IKE SA.
-	if !transport.floated && requestHeader.Exchange == exchangeIKEInit && requestHeader.MessageID == 0 && len(transport.remotes) > 1 {
+	if !transport.pinned && !transport.floated && requestHeader.Exchange == exchangeIKEInit && requestHeader.MessageID == 0 && len(transport.remotes) > 1 {
 		var lastErr error
-		var cookieResponse [][]byte
 		for _, candidate := range transport.remotes {
 			transport.remote = cloneUDPAddr(candidate)
 			responses, attemptErr := transport.roundTripFragmentsLocked(ctx, packets, requestHeader)
 			if attemptErr == nil {
-				if len(responses) > 0 && ikeInitResponseHasCookie(responses[0]) {
-					if cookieResponse == nil {
-						cookieResponse = responses
-					}
-					continue
-				}
+				transport.pinned = true
 				return responses, nil
 			}
 			lastErr = attemptErr
 			if ctx.Err() != nil || !isNetworkTimeout(attemptErr) {
 				return nil, attemptErr
 			}
-		}
-		if cookieResponse != nil {
-			return cookieResponse, nil
 		}
 		return nil, fmt.Errorf("ike: all %d resolved ePDG addresses timed out: %w", len(transport.remotes), lastErr)
 	}
@@ -726,11 +722,38 @@ func (transport *socks5UDP) roundTripFragmentsLocked(ctx context.Context, packet
 			if !ikeResponseMatchesRequest(payload, requestHeader) {
 				continue
 			}
+			if repeatedCookieChallenge(packets[0], payload) {
+				continue
+			}
 			copy(buffer, payload)
 			return len(payload), nil
 		}
 	}
 	return roundTripFragments(ctx, transport.config.Timeout, writeAll, read, datagrams)
+}
+
+// Retransmitted IKE_SA_INIT requests can leave duplicate COOKIE replies queued
+// on the socket. Once we have echoed that cookie, wait for the gateway's real
+// response instead of counting a delayed copy as another challenge. A changed
+// cookie is still returned to the provider; the exchange deadline remains bounded.
+func repeatedCookieChallenge(request, response []byte) bool {
+	readCookie := func(packet []byte) []byte {
+		header, body, err := parseIKEPacket(packet)
+		if err != nil || header.Exchange != exchangeIKEInit || header.MessageID != 0 {
+			return nil
+		}
+		payloads, err := parsePayloadChain(header.NextPayload, body)
+		if err != nil {
+			return nil
+		}
+		cookie, found, err := ikeInitCookie(payloads)
+		if err != nil || !found {
+			return nil
+		}
+		return cookie
+	}
+	sent := readCookie(request)
+	return len(sent) > 0 && bytes.Equal(sent, readCookie(response))
 }
 
 func isNetworkTimeout(err error) bool {

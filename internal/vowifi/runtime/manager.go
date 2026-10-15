@@ -231,6 +231,19 @@ func (manager *Manager) State(deviceID string) (vowifi.State, error) {
 	return item.orchestrator.State(), nil
 }
 
+func (manager *Manager) WithSIM(ctx context.Context, deviceID string, use func(vowifi.SIMIdentity, vowifi.AKAProvider) error) error {
+	if err := manager.Ensure(ctx, deviceID); err != nil {
+		return err
+	}
+	manager.mu.Lock()
+	item, closed := manager.entries[deviceID], manager.closed
+	manager.mu.Unlock()
+	if closed || item == nil {
+		return ErrClosed
+	}
+	return item.orchestrator.WithSIM(ctx, use)
+}
+
 // ModemSMSSyncBlocked reports whether the desired VoWiFi lifecycle still owns
 // the modem command path. The HTTP layer consults this signal for PhaseFailed,
 // including the small handoff window before an automatic retry is scheduled.

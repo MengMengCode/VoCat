@@ -581,6 +581,9 @@ func (s *Server) handleDevicePath(
 	if len(tail) > 0 && tail[0] == "esim" {
 		return s.handleESIM(w, r, tail[1:], physicalID, physicalPresent, config.ID)
 	}
+	if len(tail) >= 2 && tail[0] == "vowifi" && tail[1] == "e911" {
+		return s.handleE911(w, r, config, tail[2:])
+	}
 	switch strings.Join(tail, "/") {
 	case "overview":
 		if !requireMethod(w, r, http.MethodGet) {
@@ -720,8 +723,6 @@ func (s *Server) handleDevicePath(
 		return s.handleVoWiFiEnabled(w, r, config, physicalPresent)
 	case "vowifi/actions/reconnect":
 		return s.handleVoWiFiReconnect(w, r, config, physicalPresent)
-	case "vowifi/e911/websheet":
-		return s.handleE911Websheet(w, r, config)
 	case "calls":
 		if !s.requirePhysicalDevice(w, physicalPresent) {
 			return true
@@ -2041,6 +2042,11 @@ func (s *Server) configuredDeviceSummary(
 		runtimeResponse = idleVoWiFiRuntime(config.ID, snapshotForEntry(entry))
 	}
 	result["vowifi_runtime"] = runtimeResponse
+	if entry != nil {
+		carrier := e911CarrierForSnapshot(entry.Snapshot)
+		result["e911_setup_available"] = carrier.ID != ""
+		result["e911_carrier"] = carrier
+	}
 	runtimeEnabled, _ := runtimeResponse["enabled"].(bool)
 	runtimeTunnelReady, _ := runtimeResponse["tunnel_ready"].(bool)
 	result["vowifi_active"] = config.VoWiFiEnabled && runtimeMatchesCard && runtimeEnabled && runtimeTunnelReady

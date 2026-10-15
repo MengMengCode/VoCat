@@ -7,6 +7,7 @@ export interface FieldRowProps {
   label: ReactNode;
   value?: unknown;
   prefix?: ReactNode;
+  action?: ReactNode;
   copyable?: boolean;
   monospace?: boolean;
   placeholder?: string;
@@ -15,7 +16,7 @@ export interface FieldRowProps {
 }
 
 // Label/value row used across the overview tab. Click to copy when copyable.
-export function FieldRow({ label, value, prefix, copyable, monospace, placeholder, sensitive, valueTitle }: FieldRowProps) {
+export function FieldRow({ label, value, prefix, action, copyable, monospace, placeholder, sensitive, valueTitle }: FieldRowProps) {
   const { t } = useI18n();
   const display = (value == null ? "" : String(value)).trim() || placeholder || "--";
   const canCopy = !!copyable && !!display && display !== "--" && display !== "---";
@@ -41,6 +42,7 @@ export function FieldRow({ label, value, prefix, copyable, monospace, placeholde
         {prefix}
         <span className="min-w-0 truncate">{display}</span>
       </span>
+      {action}
     </div>
   );
 }

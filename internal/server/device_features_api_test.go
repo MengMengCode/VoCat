@@ -966,67 +966,37 @@ func TestHandleUpdateApplyInstallsFromTrustedRepository(t *testing.T) {
 	}
 }
 
-func TestE911WebsheetFlow(t *testing.T) {
-	database, err := store.Open(context.Background(), ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	server := &Server{
-		store:               database,
-		logger:              regionTestLogger(),
-		websheets:           newWebsheetManager(),
-		maxRequestBodyBytes: 4096,
-	}
-
-	// 1. Create the websheet.
-	createRec := httptest.NewRecorder()
-	server.handleE911Websheet(createRec, httptest.NewRequest(http.MethodPost, "/e911", nil), store.Device{ID: "dev1"})
-	if createRec.Code != http.StatusOK {
-		t.Fatalf("create status = %d, body=%s", createRec.Code, createRec.Body.String())
-	}
-	createData := decodeData(t, createRec)
-	embedURL, _ := createData["embed_url"].(string)
-	if embedURL == "" || !strings.HasPrefix(embedURL, "/websheets/") {
-		t.Fatalf("embed_url = %v", createData["embed_url"])
-	}
-
-	// 2. The form is served for a valid token.
-	formRec := httptest.NewRecorder()
-	server.handleWebsheet(formRec, httptest.NewRequest(http.MethodGet, embedURL, nil))
-	if formRec.Code != http.StatusOK || !strings.Contains(formRec.Body.String(), "E911") {
-		t.Fatalf("form status = %d", formRec.Code)
-	}
-
-	// 3. The callback stores the address, and done completes the session.
-	callbackURL := strings.Replace(embedURL, "?", "/callback?", 1)
-	callbackReq := httptest.NewRequest(http.MethodPost, callbackURL, strings.NewReader(`{"street":"1 Main St","city":"Springfield","country":"US"}`))
-	callbackReq.Header.Set("Content-Type", "application/json")
-	callbackRec := httptest.NewRecorder()
-	server.handleWebsheet(callbackRec, callbackReq)
-	if callbackRec.Code != http.StatusOK {
-		t.Fatalf("callback status = %d, body=%s", callbackRec.Code, callbackRec.Body.String())
-	}
-	stored, err := database.AppSetting(context.Background(), "e911_address:dev1")
-	if err != nil || !strings.Contains(string(stored.Value), "Springfield") {
-		t.Fatalf("e911 address not persisted: %v %v", stored, err)
-	}
-
-	doneURL := strings.Replace(embedURL, "?", "/done?", 1)
-	doneRec := httptest.NewRecorder()
-	server.handleWebsheet(doneRec, httptest.NewRequest(http.MethodPost, doneURL, nil))
-	if doneRec.Code != http.StatusOK {
-		t.Fatalf("done status = %d", doneRec.Code)
+func TestE911RequiresCarrierAuthentication(t *testing.T) {
+	server := &Server{logger: regionTestLogger(), e911Sessions: newE911SessionManager()}
+	recorder := httptest.NewRecorder()
+	server.handleE911(recorder, httptest.NewRequest(http.MethodPost, "/e911", nil), store.Device{ID: "dev1"}, nil)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
-func TestE911WebsheetRejectsBadToken(t *testing.T) {
-	server := &Server{logger: regionTestLogger(), websheets: newWebsheetManager()}
-	session := server.websheets.create("dev1")
-	recorder := httptest.NewRecorder()
-	server.handleWebsheet(recorder, httptest.NewRequest(http.MethodGet, "/websheets/"+session.id+"?token=wrong", nil))
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("bad token status = %d, want 403", recorder.Code)
+func TestE911SessionsAreBoundToDeviceAndExpire(t *testing.T) {
+	manager := newE911SessionManager()
+	session := &e911Session{deviceID: "dev1", iccid: "test-card"}
+	if err := manager.add(session); err != nil {
+		t.Fatal(err)
+	}
+	if manager.get(session.id, "dev1") != session {
+		t.Fatal("session not found")
+	}
+	if manager.get(session.id, "dev2") != nil {
+		t.Fatal("session crossed device boundary")
+	}
+	session.expiresAt = time.Now().Add(-time.Minute)
+	if manager.get(session.id, "dev1") != nil {
+		t.Fatal("expired session was accepted")
+	}
+	replacement := &e911Session{deviceID: "dev1", iccid: "another-card"}
+	if err := manager.add(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.sessions) != 1 {
+		t.Fatal("expired session credentials were retained")
 	}
 }
 

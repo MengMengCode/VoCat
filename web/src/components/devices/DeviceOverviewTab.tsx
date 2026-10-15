@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { CellLockButton } from "./CellLockButton";
 import { CellLockDialog } from "./CellLockDialog";
 import { useDeviceCellLock } from "./useDeviceCellLock";
 import { OverviewNetworkCard } from "./OverviewNetworkCard";
@@ -40,10 +39,7 @@ export function DeviceOverviewTab(props: DeviceOverviewTabProps) {
         <div className="ui-panel-muted p-4">
           <div className="mb-3 text-xs font-bold uppercase tracking-wider text-gray-500">{t("运行状态")}</div>
 		  {isVoWiFiInUse(device) && !(device.modem?.imei && device.modem?.simInserted === false) ? (
-            <>
-              <OverviewVowifiCard device={device} />
-              {supportsCellLock ? <CellLockButton onClick={cellLock.openDialog} locked={cellLocked} /> : null}
-            </>
+            <OverviewVowifiCard device={device} />
           ) : (
             <OverviewNetworkCard device={device} onOpenOperatorSelection={() => setOperatorOpen(true)}
               onOpenCellLock={supportsCellLock ? cellLock.openDialog : undefined} cellLocked={cellLocked} />

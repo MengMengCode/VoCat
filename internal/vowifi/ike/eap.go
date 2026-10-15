@@ -297,6 +297,25 @@ type akaClient struct {
 	protectedSuccess  bool
 }
 
+// EAPAKAClient reuses the tunnel's authenticated EAP-AKA implementation for
+// carrier HTTP entitlement. It never exports SIM key material to its caller.
+type EAPAKAClient struct{ client *akaClient }
+
+func NewEAPAKAClient(identity vowifi.SIMIdentity, provider vowifi.AKAProvider) (*EAPAKAClient, error) {
+	client, err := newAKAClient(identity, provider)
+	if err != nil {
+		return nil, err
+	}
+	return &EAPAKAClient{client: client}, nil
+}
+
+func (client *EAPAKAClient) Identity() string { return string(client.client.identity) }
+
+func (client *EAPAKAClient) Respond(ctx context.Context, packet []byte) ([]byte, error) {
+	action, err := client.client.handle(ctx, packet)
+	return action.Response, err
+}
+
 func newAKAClient(identity vowifi.SIMIdentity, provider vowifi.AKAProvider) (*akaClient, error) {
 	if provider == nil {
 		return nil, errors.New("ike: AKA provider is required")

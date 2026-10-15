@@ -139,7 +139,7 @@ func (config parsedAccessConfig) clientIP(r *http.Request) netip.Addr {
 }
 
 // accessControl rejects requests whose source IP is outside the configured
-// access policy. It wraps the whole mux so every route (API, SPA, websheets) is
+// access policy. It wraps the whole mux so every route (API, SPA, plugins) is
 // protected uniformly.
 func (s *Server) accessControl(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

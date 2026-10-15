@@ -55,18 +55,15 @@ export function OverviewSimPanel({ device, simOperatorDisplay, customPhoneNumber
         <FieldRow label="ICCID" value={modem?.iccid} sensitive={sensitive} monospace copyable />
         <FieldRow label="IMSI" value={modem?.imsi} sensitive={sensitive} monospace copyable />
         <FieldRow label={t("本机号码")} value={displayedPhoneNumber} sensitive={sensitive} monospace copyable />
-        {device?.e911SetupAvailable ? (
-          <div className="flex justify-between gap-3">
-            <span className="text-gray-500">{t("E911地址")}</span>
-            <Button variant="primary" size="small" plain loading={e911Starting} className="!border-0" onClick={onSetupE911}>
-              {t("设置")}
-            </Button>
-          </div>
-        ) : null}
         {activeEsim ? <FieldRow label={t("当前eSIM")} value={activeEsim} monospace copyable /> : null}
         <FieldRow
           label={t("原运营商")}
           value={simOperatorDisplay}
+          action={device.e911SetupAvailable || carrierCountryCode.toLowerCase() === "us" ? (
+            <Button variant="primary" size="small" plain loading={e911Starting} className="!border-0 shrink-0" onClick={onSetupE911}>
+              {t("E911地址")}
+            </Button>
+          ) : null}
           prefix={simOperatorDisplay !== "--" ? <CountryFlag countryCode={carrierCountryCode} /> : null}
           copyable
         />
