@@ -10,10 +10,12 @@ import (
 	"vocat/internal/device"
 )
 
-// ussdSessionStore is the HTTP-layer counterpart of device.Manager's USSD
-// session map. A USSI awaiting-input reply opens a token here so the existing
-// continue/cancel endpoints keep working; the token only records which device
-// the dialog belongs to — the IMS session owns the actual network dialog.
+const ussiSessionPrefix = "ussi-"
+
+// ussdSessionStore is the server-layer counterpart of device.Manager's USSD
+// session map. Each USSI token binds a configured device ID to the exact SIP
+// dialog ID; the IMS session owns the network dialog itself. The prefix keeps
+// expired USSI tokens from ever being interpreted as cellular session tokens.
 type ussdSessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]ussdServerSession
@@ -29,14 +31,10 @@ func newUSSDSessionStore() ussdSessionStore {
 	return ussdSessionStore{sessions: make(map[string]ussdServerSession)}
 }
 
-func (store *ussdSessionStore) open(deviceID string) string {
-	return store.openWithNetwork(deviceID, "")
-}
-
 func (store *ussdSessionStore) openWithNetwork(deviceID, networkSessionID string) string {
 	var token [8]byte
 	_, _ = rand.Read(token[:])
-	id := hex.EncodeToString(token[:])
+	id := ussiSessionPrefix + hex.EncodeToString(token[:])
 	store.mu.Lock()
 	if store.sessions == nil {
 		store.sessions = make(map[string]ussdServerSession)

@@ -1245,14 +1245,6 @@ type imsUSSICanceler interface {
 	CancelUSSI(context.Context, string, string) error
 }
 
-// openUSSDSession mirrors device.Manager.openUSSDSession but lives on the HTTP
-// server so a USSI awaiting-input reply can hand back a token the existing
-// continue/cancel endpoints understand. The token is only a device handle;
-// the IMS session owns the actual dialog.
-func (s *Server) openUSSDSession(deviceID string) string {
-	return s.ussdSessions.open(deviceID)
-}
-
 func (s *Server) openUSSDSessionWithNetwork(deviceID, networkSessionID string) string {
 	return s.ussdSessions.openWithNetwork(deviceID, networkSessionID)
 }
@@ -1261,7 +1253,7 @@ func (s *Server) ussdNetworkSession(sessionID string) string {
 	return s.ussdSessions.networkSession(sessionID)
 }
 
-// ussdSessionDevice resolves a USSD session token created by openUSSDSession
+// ussdSessionDevice resolves a USSD session token created by openUSSDSessionWithNetwork
 // back to its device id, matching device.ErrUSSDSessionNotFound semantics.
 func (s *Server) ussdSessionDevice(sessionID string) (string, error) {
 	return s.ussdSessions.device(sessionID)
@@ -1287,58 +1279,7 @@ func (s *Server) handleUSSD(w http.ResponseWriter, r *http.Request, config store
 	ctx, cancel := actionRequestContext(r.Context(), request.TimeoutMs)
 	defer cancel()
 
-	cmd := strings.TrimSpace(request.Command)
-	if cmd == "*#06#" || cmd == "*#06" {
-		imei := config.ModemIMEI
-		if imei == "" {
-			if runtime, runtimeErr := s.store.DeviceRuntime(ctx, id); runtimeErr == nil {
-				imei = runtime.IMEI
-			}
-		}
-		if imei != "" {
-			writeUSSDResult(w, device.USSDResult{
-				Text:   fmt.Sprintf("IMEI: %s", imei),
-				Status: "final",
-			})
-			return true
-		}
-	}
-	if cmd == "*#0000#" || cmd == "*#0000" {
-		firmware := ""
-		if runtime, runtimeErr := s.store.DeviceRuntime(ctx, id); runtimeErr == nil {
-			firmware = runtime.Firmware
-		}
-		if firmware != "" {
-			writeUSSDResult(w, device.USSDResult{
-				Text:   fmt.Sprintf("Software Version: %s", firmware),
-				Status: "final",
-			})
-			return true
-		}
-	}
-
-	// VoWiFi-first: when VoWiFi owns the radio the cellular CUSD path has no
-	// network to talk to (CFUN=4 returns +CME ERROR: 30). Route over IMS/USSI
-	// when the IMS session is registered, and fall back to cellular CUSD only
-	// when USSI is not ready or the runtime is unavailable.
-	if config.VoWiFiEnabled && s.vowifi != nil {
-		sender, canSendIMS := s.vowifi.(imsUSSIController)
-		if canSendIMS {
-			if state, stateErr := s.vowifi.State(id); stateErr == nil && state.IMSReady {
-				result, sendErr := sender.SendUSSI(ctx, id, vowifi.USSISubmitRequest{Code: request.Command})
-				if sendErr == nil {
-					writeUSSDResult(w, ussdResultFromUSSI(result, id, s))
-					return true
-				}
-				if !errors.Is(sendErr, vowifi.ErrUSSINotReady) {
-					s.writeDeviceError(w, sendErr)
-					return true
-				}
-				// ErrUSSINotReady: fall through to cellular CUSD.
-			}
-		}
-	}
-	result, err := s.devices.USSD(ctx, id, request.Command)
+	result, err := s.startUSSD(ctx, config, id, request.Command)
 	if err != nil {
 		s.writeDeviceError(w, err)
 		return true
@@ -1347,12 +1288,8 @@ func (s *Server) handleUSSD(w http.ResponseWriter, r *http.Request, config store
 	return true
 }
 
-// ussdResultFromUSSI maps a USSI result onto the device.USSDResult shape that
-// writeUSSDResult expects. A USSI awaiting-input reply opens a server-side
-// session token via the device manager so the existing continue/cancel
-// endpoints keep working; the token maps back to the device and the continue
-// handler re-enters the USSI path through the same imsUSSIController.
-func ussdResultFromUSSI(result vowifi.USSISubmitResult, deviceID string, server *Server) device.USSDResult {
+// ussdResultFromUSSI normalizes the result without changing its dialog binding.
+func ussdResultFromUSSI(result vowifi.USSISubmitResult) device.USSDResult {
 	mapped := device.USSDResult{
 		Text:         result.Text,
 		Raw:          result.Raw,
@@ -1360,10 +1297,11 @@ func ussdResultFromUSSI(result vowifi.USSISubmitResult, deviceID string, server 
 		Status:       result.Status,
 		Continueable: result.Continueable,
 	}
-	if result.Status == "awaiting_input" || (result.Continueable && result.Status != "failed" && result.Status != "terminated") {
+	if result.Status == "final" || result.Status == "failed" || result.Status == "terminated" {
+		mapped.Continueable = false
+	} else if result.Status == "awaiting_input" || result.Continueable {
 		mapped.Status = "awaiting_input"
 		mapped.Continueable = true
-		mapped.SessionID = server.openUSSDSessionWithNetwork(deviceID, result.SessionID)
 	}
 	return mapped
 }
@@ -1839,6 +1777,12 @@ func (s *Server) writeDeviceError(w http.ResponseWriter, err error) {
 		"raw_error", device.HardwareErrorDetail(err),
 	)
 	switch {
+	case errors.Is(err, errInvalidUSSDRequest):
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+	case errors.Is(err, vowifi.ErrUSSINotReady):
+		writeError(w, http.StatusServiceUnavailable, "ussi_not_ready", err.Error())
+	case errors.Is(err, device.ErrUSSDSessionNotFound), errors.Is(err, vowifi.ErrUSSISessionNotFound):
+		writeError(w, http.StatusNotFound, "ussd_session_not_found", "USSD session was not found or is already closed")
 	case errors.Is(err, device.ErrNotFound):
 		writeError(w, http.StatusNotFound, "device_not_found", "device was not found or is no longer present")
 	case errors.Is(err, device.ErrNotStarted):

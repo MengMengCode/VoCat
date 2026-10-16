@@ -31,7 +31,7 @@ func (manager *Manager) USSD(
 	code string,
 ) (USSDResult, error) {
 	code = strings.TrimSpace(code)
-	if !validServiceCode(code) {
+	if !ValidUSSDCode(code) {
 		return USSDResult{}, errors.New("invalid USSD service code")
 	}
 	result, err := manager.runUSSD(ctx, id, fmt.Sprintf(`AT+CUSD=1,"%s",15`, code))
@@ -82,7 +82,6 @@ func (manager *Manager) CancelUSSD(ctx context.Context, sessionID string) error 
 	if err != nil {
 		return err
 	}
-	defer manager.dropUSSDSession(sessionID)
 	state, err := manager.lookup(deviceID)
 	if err != nil {
 		return err
@@ -101,6 +100,9 @@ func (manager *Manager) CancelUSSD(ctx context.Context, sessionID string) error 
 	_, err = client.Execute(commandCtx, "AT+CUSD=2")
 	cancel()
 	manager.setResult(deviceID, state, nil, err)
+	if err == nil {
+		manager.dropUSSDSession(sessionID)
+	}
 	return err
 }
 
@@ -246,7 +248,8 @@ func decodeUCS2(value string) string {
 	return string(utf16.Decode(units))
 }
 
-func validServiceCode(value string) bool {
+// ValidUSSDCode validates the dial string before either AT or IMS submission.
+func ValidUSSDCode(value string) bool {
 	if value == "" || len(value) > 40 {
 		return false
 	}

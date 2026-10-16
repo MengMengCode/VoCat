@@ -129,6 +129,27 @@ func testOrchestrator(t *testing.T, id string) *vowifi.Orchestrator {
 	return orchestrator
 }
 
+func TestManagerCancelUSSIUnavailableNeverReportsSuccess(t *testing.T) {
+	manager := New(Options{})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.CancelUSSI(context.Background(), "missing", "dialog-1"); !errors.Is(err, vowifi.ErrUSSINotReady) {
+		t.Fatalf("unregistered cancel = %v", err)
+	}
+	orchestrator := testOrchestrator(t, "saved")
+	if err := manager.Register(orchestrator); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CancelUSSI(context.Background(), "saved", "dialog-1"); !errors.Is(err, vowifi.ErrUSSINotReady) {
+		t.Fatalf("idle cancel = %v", err)
+	}
+	if _, err := orchestrator.Enable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CancelUSSI(context.Background(), "saved", "dialog-1"); !errors.Is(err, vowifi.ErrUSSINotReady) {
+		t.Fatalf("unsupported cancel = %v", err)
+	}
+}
+
 func testOrchestratorWithTunnel(
 	t *testing.T,
 	id string,

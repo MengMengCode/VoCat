@@ -438,18 +438,41 @@ func TestHandleUSSDContinueRequiresSession(t *testing.T) {
 // without a real runtime manager.
 type fakeUSSIController struct {
 	fakeVoWiFiController
-	sendErr    error
-	sendResult vowifi.USSISubmitResult
-	sendCalled int
-	lastInput  string
+	sendErr          error
+	sendResult       vowifi.USSISubmitResult
+	sendCalled       int
+	lastInput        string
+	lastDeviceID     string
+	lastRequest      vowifi.USSISubmitRequest
+	stateDeviceID    string
+	expectedDeviceID string
+	cancelErr        error
+	cancelCalled     int
+	cancelDeviceID   string
+	cancelSessionID  string
+}
+
+func (controller *fakeUSSIController) State(id string) (vowifi.State, error) {
+	controller.stateDeviceID = id
+	if controller.expectedDeviceID != "" && id != controller.expectedDeviceID {
+		return vowifi.State{}, errors.New("unknown configured device ID")
+	}
+	return controller.fakeVoWiFiController.State(id)
+}
+
+func (controller *fakeUSSIController) CancelUSSI(_ context.Context, deviceID, sessionID string) error {
+	controller.cancelCalled++
+	controller.cancelDeviceID, controller.cancelSessionID = deviceID, sessionID
+	return controller.cancelErr
 }
 
 func (controller *fakeUSSIController) SendUSSI(
 	_ context.Context,
-	_ string,
+	deviceID string,
 	request vowifi.USSISubmitRequest,
 ) (vowifi.USSISubmitResult, error) {
 	controller.sendCalled++
+	controller.lastDeviceID, controller.lastRequest = deviceID, request
 	controller.lastInput = request.Input
 	if request.Code != "" {
 		controller.lastInput = request.Code
@@ -486,7 +509,7 @@ func TestHandleUSSDRoutesOverIMSWhenReady(t *testing.T) {
 	}
 }
 
-func TestHandleUSSDFallsBackToCellularWhenIMSNotReady(t *testing.T) {
+func TestHandleUSSDRejectsUnreadyIMSWithoutCellularFallback(t *testing.T) {
 	controller := &fakeUSSIController{
 		fakeVoWiFiController: fakeVoWiFiController{state: vowifi.State{}},
 	}
@@ -501,13 +524,11 @@ func TestHandleUSSDFallsBackToCellularWhenIMSNotReady(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	server.handleUSSD(recorder, request, store.Device{ID: "dev1", VoWiFiEnabled: true}, "dev1")
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
-	data := decodeData(t, recorder)
-	result, _ := data["result"].(map[string]any)
-	if result["text"] != "cellular" {
-		t.Fatalf("result = %v, want cellular fallback", result)
+	if !strings.Contains(recorder.Body.String(), "ussi_not_ready") {
+		t.Fatalf("missing IMS readiness error: %s", recorder.Body.String())
 	}
 	if controller.sendCalled != 0 {
 		t.Fatalf("SendUSSI called %d times, want 0", controller.sendCalled)
@@ -533,7 +554,7 @@ func TestHandleUSSDContinueUsesIMSForUSSIPersistedSession(t *testing.T) {
 		store:               database,
 		vowifi:              controller,
 	}
-	sessionID := server.openUSSDSession("dev1")
+	sessionID := server.openUSSDSessionWithNetwork("dev1", "dialog-1")
 	request := httptest.NewRequest(http.MethodPost, "/actions/ussd/continue", strings.NewReader(`{"session_id":"`+sessionID+`","input":"1"}`))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
@@ -557,7 +578,7 @@ func TestHandleUSSDCancelDropsUSSIPersistedSession(t *testing.T) {
 		maxRequestBodyBytes: 4096,
 		vowifi:              &fakeUSSIController{},
 	}
-	sessionID := server.openUSSDSession("dev1")
+	sessionID := server.openUSSDSessionWithNetwork("dev1", "dialog-1")
 	request := httptest.NewRequest(http.MethodPost, "/actions/ussd/cancel", strings.NewReader(`{"session_id":"`+sessionID+`"}`))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()

@@ -123,17 +123,18 @@ type ussiTurnEvent struct {
 }
 
 type ussiDialog struct {
-	callID       string
-	target       string // in-dialog Contact URI
-	inviteTarget string
-	from         string
-	to           string
-	branch       string
-	cseq         uint32
-	routes       []string
-	remoteTag    string
-	state        string // "active", "awaiting_input", "ended", "failed"
-	turns        chan ussiTurnEvent
+	callID        string
+	target        string // in-dialog Contact URI
+	inviteTarget  string
+	from          string
+	to            string
+	branch        string
+	cseq          uint32
+	routes        []string
+	remoteTag     string
+	state         string // "active", "awaiting_input", "ended", "failed"
+	cancelPending bool   // guarded by ussiMu; retain failed BYE state for cancellation retry
+	turns         chan ussiTurnEvent
 }
 
 func encodeDialStringForURI(dial string) string {
@@ -343,18 +344,22 @@ func (session *Session) sendUSSISessionContinue(ctx context.Context, request vow
 	if request.SessionID != "" {
 		dialog = session.ussiDialogs[request.SessionID]
 	}
-	if dialog == nil && len(session.ussiDialogs) == 1 {
+	if request.SessionID == "" && len(session.ussiDialogs) == 1 {
 		for _, d := range session.ussiDialogs {
 			dialog = d
 			break
 		}
 	}
+	cancelPending := dialog != nil && dialog.cancelPending
 	session.ussiMu.Unlock()
 
 	if dialog == nil {
-		return vowifi.USSISubmitResult{}, errors.New("ims: USSI session not found or already closed")
+		return vowifi.USSISubmitResult{}, vowifi.ErrUSSISessionNotFound
 	}
 
+	if cancelPending {
+		return vowifi.USSISubmitResult{}, errors.New("ims: USSI cancellation pending; retry cancellation instead of sending input")
+	}
 	if err := session.sendUSSIInfo(ctx, dialog, input); err != nil {
 		return vowifi.USSISubmitResult{
 			SessionID:        dialog.callID,
@@ -717,7 +722,9 @@ func (session *Session) sendUSSIBye(ctx context.Context, dialog *ussiDialog) err
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	// 481 confirms that the remote dialog is already gone, including when a
+	// previous BYE succeeded but its response was lost (RFC 3261, 15.1.1).
+	if (resp.StatusCode < 200 || resp.StatusCode >= 300) && resp.StatusCode != 481 {
 		return fmt.Errorf("ims: USSI BYE rejected with SIP %d", resp.StatusCode)
 	}
 	return nil
@@ -725,26 +732,38 @@ func (session *Session) sendUSSIBye(ctx context.Context, dialog *ussiDialog) err
 
 // CancelUSSI aborts an active USSI dialog by sending BYE.
 func (session *Session) CancelUSSI(ctx context.Context, sessionID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	session.ussiMu.Lock()
 	var dialog *ussiDialog
 	if sessionID != "" {
 		dialog = session.ussiDialogs[sessionID]
-	}
-	if dialog == nil && len(session.ussiDialogs) == 1 {
+	} else if len(session.ussiDialogs) == 1 {
 		for _, d := range session.ussiDialogs {
 			dialog = d
-			break
 		}
 	}
 	if dialog != nil {
-		delete(session.ussiDialogs, dialog.callID)
+		dialog.cancelPending = true
 	}
 	session.ussiMu.Unlock()
-
 	if dialog == nil {
-		return nil
+		return vowifi.ErrUSSISessionNotFound
 	}
-	return session.sendUSSIBye(ctx, dialog)
+	// RFC 3261 section 15.1.1: once BYE is submitted, do not resume the
+	// application session. Retain its cancellation record on failure so the
+	// caller sees the error and can retry cancelling this exact dialog.
+	if err := session.sendUSSIBye(ctx, dialog); err != nil {
+		return err
+	}
+	session.ussiMu.Lock()
+	delete(session.ussiDialogs, dialog.callID)
+	session.ussiMu.Unlock()
+	return nil
 }
 
 // handleUSSIRequest processes incoming SIP INFO, BYE, and CANCEL requests for USSI.

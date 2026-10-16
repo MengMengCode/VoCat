@@ -260,9 +260,16 @@ When Telegram notifications are enabled and both Chat ID and Admin ID are config
 /switch <device> <iccid>
 /wfc <device> <status|on|off|reconnect>
 /sms <device> <number> <message>
+/ussd <device> <code>
+/ussd_reply <session> <input>
+/ussd_cancel <session>
 ```
 
 Profile switching and SMS submission use one-time confirmation buttons. The bot does not expose eSIM download, delete, or rename commands.
+
+The web terminal and Telegram share USSD routing. With WiFi Calling enabled, requests use IMS/USSI and return a readiness error until IMS registers, without falling back to cellular AT+CUSD. With WiFi Calling disabled, requests use cellular USSD. Menu replies and cancellation stay bound to the original device and dialog. Cancellation errors are reported and retain the session for retry; an uncertain submission is never automatically resubmitted over another channel.
+
+USSI dialog handling follows [3GPP TS 24.390](https://www.etsi.org/deliver/etsi_ts/124300_124399/124390/18.00.00_60/ts_124390v180000p.pdf). A failed BYE retains a cancellation record, but further menu input is blocked once cancellation has started ([RFC 3261, section 15.1.1](https://www.rfc-editor.org/rfc/rfc3261.html#section-15.1.1)).
 
 ## Updating
 

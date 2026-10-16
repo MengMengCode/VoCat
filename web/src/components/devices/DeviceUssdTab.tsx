@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { CallRegular } from "@fluentui/react-icons";
-import { api } from "../../api";
+import { api, ApiError } from "../../api";
 import { Button, Input } from "../ui";
 import { UssdLogEntry, type UssdLogItem } from "./UssdLogEntry";
 import { AtTypingBubble } from "./AtLogEntry";
@@ -37,21 +37,21 @@ export function DeviceUssdTab({ deviceId }: { deviceId: string }) {
       ? { sessionId, input: command, timeoutMs: timeoutMs || 45000 }
       : { command, timeoutMs: timeoutMs || 45000 };
     const path = inSession ? `/devices/${deviceId}/actions/ussd/continue` : `/devices/${deviceId}/actions/ussd`;
-    const res = await api<{ result?: Record<string, unknown>; channel?: string }>(path, { method: "POST", body });
+    const res = await api<{ result?: Record<string, unknown>; sessionId?: string; channel?: string }>(path, { method: "POST", body });
     const r = (res?.result || {}) as Record<string, unknown>;
     return {
       status: r.status as string | undefined,
       text: (r.text as string) || "",
-      rawText: ((r.rawText as string) || (r.rawXml as string) || "") as string,
+      rawText: ((r.raw as string) || (r.rawText as string) || (r.rawXml as string) || "") as string,
       dcs: r.dcs as number | undefined,
-      sessionId: (r.sessionId as string) || "",
+      sessionId: res?.sessionId || (r.sessionId as string) || "",
       channel: res?.channel || "",
     };
   }
 
   async function send() {
     const command = String(input || "").trim();
-    if (!command) return;
+    if (!command || loading) return;
     setLog((prev) => [...prev, { ts: Date.now(), type: "req", content: command }]);
     setLoading(true);
     setInput("");
@@ -72,21 +72,27 @@ export function DeviceUssdTab({ deviceId }: { deviceId: string }) {
       }
     } catch (e) {
       setLog((prev) => [...prev, { ts: Date.now(), type: "err", content: e instanceof Error ? e.message : t("请求异常") }]);
-      clearSession();
+      // A failed turn may already have reached the network. Keep its binding
+      // so the user can cancel it instead of accidentally starting a new query.
+      if (e instanceof ApiError && e.code === "ussd_session_not_found") clearSession();
     } finally {
       setLoading(false);
     }
   }
 
   async function cancelSession() {
-    if (!sessionId) return;
+    if (!sessionId || loading) return;
+    setLoading(true);
     try {
       await api(`/devices/${deviceId}/actions/ussd/cancel`, { method: "POST", body: { sessionId } });
       setLog((prev) => [...prev, { ts: Date.now(), type: "sys", content: t("会话已手动取消") }]);
-    } catch {
-      /* ignore */
+      clearSession();
+    } catch (e) {
+      setLog((prev) => [...prev, { ts: Date.now(), type: "err", content: e instanceof Error ? e.message : t("请求异常") }]);
+      if (e instanceof ApiError && e.code === "ussd_session_not_found") clearSession();
+    } finally {
+      setLoading(false);
     }
-    clearSession();
   }
 
   return (
@@ -147,6 +153,7 @@ export function DeviceUssdTab({ deviceId }: { deviceId: string }) {
           <div className="select-none text-[11px] font-bold uppercase tracking-wider opacity-0">{t("操作")}</div>
           <div className="flex items-center justify-end gap-2">
             <Button
+              disabled={loading}
               onClick={() => {
                 setLog([]);
                 clearSession();

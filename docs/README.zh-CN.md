@@ -222,9 +222,16 @@ Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件，再应用 `VOCAT
 /switch <device> <iccid>
 /wfc <device> <status|on|off|reconnect>
 /sms <device> <number> <message>
+/ussd <device> <code>
+/ussd_reply <session> <input>
+/ussd_cancel <session>
 ```
 
 配置文件切换与短信提交使用一次性确认按钮。机器人不暴露 eSIM 下载、删除或重命名命令。
+
+网页终端与 Telegram 共用 USSD 路由。启用 WiFi Calling 时，请求使用 IMS/USSI；IMS 未就绪时会明确报错并提示等待注册，不会回退到蜂窝 AT+CUSD。关闭 WiFi Calling 时使用蜂窝 USSD。菜单回复与取消始终绑定原设备和会话。取消失败会返回错误并保留会话供重试；发送结果不确定时不会自动换通道重新提交。
+
+USSI 会话处理遵循 [3GPP TS 24.390](https://www.etsi.org/deliver/etsi_ts/124300_124399/124390/18.00.00_60/ts_124390v180000p.pdf)。BYE 失败时保留取消记录，但开始取消后禁止继续提交菜单输入（[RFC 3261 第 15.1.1 节](https://www.rfc-editor.org/rfc/rfc3261.html#section-15.1.1)）。
 
 ## 更新
 

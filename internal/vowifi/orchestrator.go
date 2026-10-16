@@ -621,11 +621,11 @@ func (orchestrator *Orchestrator) CancelUSSI(
 	ready := orchestrator.state.IMSReady
 	orchestrator.mu.Unlock()
 	if resources == nil || resources.ims == nil || !ready {
-		return nil
+		return ErrUSSINotReady
 	}
 	canceler, ok := resources.ims.(USSICanceler)
 	if !ok {
-		return nil
+		return ErrUSSINotReady
 	}
 	return canceler.CancelUSSI(ctx, sessionID)
 }

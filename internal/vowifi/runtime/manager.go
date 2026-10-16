@@ -375,7 +375,7 @@ func (manager *Manager) CancelUSSI(
 	item := manager.entries[deviceID]
 	manager.mu.Unlock()
 	if item == nil {
-		return nil
+		return vowifi.ErrUSSINotReady
 	}
 	return item.orchestrator.CancelUSSI(ctx, sessionID)
 }

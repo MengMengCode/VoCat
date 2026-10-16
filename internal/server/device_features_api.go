@@ -193,40 +193,13 @@ func (s *Server) handleUSSDContinue(w http.ResponseWriter, r *http.Request) bool
 	input := firstNonEmpty(request.Input, request.Command)
 	ctx, cancel := actionRequestContext(r.Context(), request.TimeoutMs)
 	defer cancel()
-	// A session opened by the USSI path maps back to a device id that may still
-	// be VoWiFi-active. Prefer USSI continue when IMS is ready; otherwise report
-	// the session as unavailable rather than falling through to the cellular
-	// CUSD path, because the IMS session owns the actual dialog.
-	if deviceID, sessionErr := s.ussdSessionDevice(sessionID); sessionErr == nil {
-		if s.store != nil && s.vowifi != nil {
-			if config, configErr := s.store.Device(r.Context(), deviceID); configErr == nil &&
-				config.VoWiFiEnabled {
-				if sender, ok := s.vowifi.(imsUSSIController); ok {
-					if state, stateErr := s.vowifi.State(deviceID); stateErr == nil && state.IMSReady {
-						networkSessionID := s.ussdNetworkSession(sessionID)
-						result, sendErr := sender.SendUSSI(ctx, deviceID, vowifi.USSISubmitRequest{
-							SessionID: networkSessionID,
-							Input:     input,
-						})
-						if sendErr == nil {
-							writeUSSDResult(w, ussdResultFromUSSI(result, deviceID, s))
-							return true
-						}
-						if !errors.Is(sendErr, vowifi.ErrUSSINotReady) {
-							s.writeDeviceError(w, sendErr)
-							return true
-						}
-					}
-				}
-			}
-		}
-		writeError(w, http.StatusServiceUnavailable, "ussi_session_unavailable",
-			"USSI session is no longer available because the IMS registration has dropped")
-		return true
-	}
-	result, err := s.devices.ContinueUSSD(ctx, sessionID, input)
+	result, err := s.continueUSSD(ctx, sessionID, input)
 	if err != nil {
-		s.writeDeviceError(w, err)
+		if errors.Is(err, vowifi.ErrUSSINotReady) {
+			writeError(w, http.StatusServiceUnavailable, "ussi_session_unavailable", err.Error())
+		} else {
+			s.writeDeviceError(w, err)
+		}
 		return true
 	}
 	writeUSSDResult(w, result)
@@ -251,25 +224,9 @@ func (s *Server) handleUSSDCancel(w http.ResponseWriter, r *http.Request) bool {
 		writeError(w, http.StatusBadRequest, "invalid_request", "session_id is required")
 		return true
 	}
-	// Release a USSI-originated session by signalling network cancellation (BYE)
-	// when supported, and dropping the local token.
-	if deviceID, sessionErr := s.ussdSessionDevice(sessionID); sessionErr == nil {
-		networkSessionID := s.ussdNetworkSession(sessionID)
-		s.dropUSSDSession(sessionID)
-		if s.store != nil && s.vowifi != nil {
-			if config, configErr := s.store.Device(r.Context(), deviceID); configErr == nil &&
-				config.VoWiFiEnabled {
-				if canceler, ok := s.vowifi.(imsUSSICanceler); ok {
-					_ = canceler.CancelUSSI(r.Context(), deviceID, networkSessionID)
-				}
-			}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"data": map[string]any{"cancelled": true, "session_id": sessionID},
-		})
-		return true
-	}
-	if err := s.devices.CancelUSSD(r.Context(), sessionID); err != nil {
+	ctx, cancel := actionRequestContext(r.Context(), 0)
+	defer cancel()
+	if err := s.cancelUSSD(ctx, sessionID); err != nil {
 		s.writeDeviceError(w, err)
 		return true
 	}

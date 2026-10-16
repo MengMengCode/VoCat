@@ -107,3 +107,29 @@ func TestUSSDFinalAnswerNeedsNoSession(t *testing.T) {
 	}
 	client.assertDone(t)
 }
+
+func TestUSSDCancelFailureRetainsSessionForRetry(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: `AT+CUSD=1,"*100#",15`, response: okResponse()},
+		{command: "AT+CUSD=2", err: errors.New("injected cancellation failure")},
+		{command: "AT+CUSD=2", response: okResponse()},
+	}, urcs: []string{`+CUSD: 1,"Main menu",15`}}
+	manager, id := newStartedTestManager(t, client)
+	start, err := manager.USSD(context.Background(), id, "*100#")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CancelUSSD(context.Background(), start.SessionID); err == nil {
+		t.Fatal("expected cancellation failure")
+	}
+	if got, err := manager.ussdSessionDevice(start.SessionID); err != nil || got != id {
+		t.Fatalf("lost session after failure: %q %v", got, err)
+	}
+	if err := manager.CancelUSSD(context.Background(), start.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ussdSessionDevice(start.SessionID); !errors.Is(err, ErrUSSDSessionNotFound) {
+		t.Fatalf("session remains after success: %v", err)
+	}
+	client.assertDone(t)
+}

@@ -448,7 +448,9 @@ func (bot *telegramBot) handleCallback(ctx context.Context, config telegramRunti
 		return
 	}
 	if prefix, token, operation, ok := parseTelegramMenuCallback(data); ok {
-		consume := prefix == "es" || prefix == "dur" || prefix == "uc"
+		// USSD cancellation remains retryable when the network rejects or times
+		// out the BYE. Its session token is invalidated only after success.
+		consume := prefix == "es" || prefix == "dur"
 		var action telegramPendingAction
 		var found bool
 		if consume {
@@ -501,7 +503,6 @@ func (bot *telegramBot) handleCallback(ctx context.Context, config telegramRunti
 				bot.sendExpiredMenu(ctx, config, chatID)
 				return
 			}
-			bot.clearInput(chatID, adminID)
 			bot.handleUSSDCancel(ctx, config, chatID, adminID, action.Argument)
 		}
 		return
@@ -1317,7 +1318,6 @@ func (bot *telegramBot) handleInputMessage(ctx context.Context, config telegramR
 		bot.clearInput(message.Chat.ID, message.From.ID)
 		bot.handleUSSDCommand(ctx, config, message.Chat.ID, message.From.ID, state.DeviceID, value)
 	case "ussd_reply":
-		bot.clearInput(message.Chat.ID, message.From.ID)
 		bot.handleUSSDReply(ctx, config, message.Chat.ID, message.From.ID, state.Argument, value)
 	default:
 		bot.clearInput(message.Chat.ID, message.From.ID)
@@ -2047,41 +2047,58 @@ func (bot *telegramBot) handleUSSDCommand(ctx context.Context, config telegramRu
 }
 
 func (bot *telegramBot) executeUSSDCommand(ctx context.Context, deviceID, code string) (device.USSDResult, error) {
-	_, _, physicalID, err := bot.device(deviceID)
+	stored, _, physicalID, err := bot.device(deviceID)
 	if err != nil {
 		return device.USSDResult{}, err
 	}
 	operationContext, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	return bot.server.devices.USSD(operationContext, physicalID, strings.TrimSpace(code))
+	return bot.server.startUSSD(operationContext, stored, physicalID, code)
 }
 
 func (bot *telegramBot) handleUSSDReply(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, sessionID, input string) {
+	deviceID, _ := bot.server.ussdSessionDevice(sessionID)
+	if state, ok := bot.input(chatID, adminID); ok && state.Argument == strings.TrimSpace(sessionID) && deviceID == "" {
+		deviceID = state.DeviceID
+	}
 	operationContext, cancel := context.WithTimeout(ctx, 90*time.Second)
-	result, err := bot.server.devices.ContinueUSSD(operationContext, strings.TrimSpace(sessionID), strings.TrimSpace(input))
+	result, err := bot.server.continueUSSD(operationContext, strings.TrimSpace(sessionID), strings.TrimSpace(input))
 	cancel()
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
+		if errors.Is(err, device.ErrUSSDSessionNotFound) || errors.Is(err, vowifi.ErrUSSISessionNotFound) {
+			bot.clearUSSDInput(chatID, adminID, sessionID)
+		}
 		bot.sendText(ctx, config, chatID, "USSD 回复失败："+err.Error(), bot.homeKeyboard())
 	} else {
-		bot.sendUSSDResult(ctx, config, chatID, adminID, "", result)
+		bot.sendUSSDResult(ctx, config, chatID, adminID, deviceID, result)
 	}
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", adminID), "telegram.ussd.reply", "ussd_session", "interactive", outcome, "telegram")
 }
 
 func (bot *telegramBot) handleUSSDCancel(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, sessionID string) {
 	operationContext, cancel := context.WithTimeout(ctx, 30*time.Second)
-	err := bot.server.devices.CancelUSSD(operationContext, strings.TrimSpace(sessionID))
+	err := bot.server.cancelUSSD(operationContext, strings.TrimSpace(sessionID))
 	cancel()
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
+		if errors.Is(err, device.ErrUSSDSessionNotFound) || errors.Is(err, vowifi.ErrUSSISessionNotFound) {
+			bot.clearUSSDInput(chatID, adminID, sessionID)
+		}
 		bot.sendText(ctx, config, chatID, "取消 USSD 会话失败："+err.Error(), bot.homeKeyboard())
 	} else {
+		bot.clearUSSDInput(chatID, adminID, sessionID)
 		bot.sendText(ctx, config, chatID, "USSD 会话已取消。", bot.homeKeyboard())
 	}
 	bot.server.recordAudit(ctx, fmt.Sprintf("telegram:%d", adminID), "telegram.ussd.cancel", "ussd_session", "interactive", outcome, "telegram")
+}
+
+func (bot *telegramBot) clearUSSDInput(chatID, adminID int64, sessionID string) {
+	if state, ok := bot.input(chatID, adminID); ok && state.Kind == "ussd_reply" && state.Argument == strings.TrimSpace(sessionID) {
+		bot.clearInput(chatID, adminID)
+	}
 }
 
 func (bot *telegramBot) sendUSSDResult(

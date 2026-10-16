@@ -54,6 +54,7 @@ var (
 	ErrIMSNotRegistered          = errors.New("vowifi: IMS is not registered")
 	ErrSMSNotReady               = errors.New("vowifi: SMS over IMS is not ready")
 	ErrUSSINotReady              = errors.New("vowifi: USSI over IMS is not ready")
+	ErrUSSISessionNotFound       = errors.New("vowifi: USSI session not found or already closed")
 	ErrEAPAuthenticationRejected = errors.New("vowifi: EAP-AKA authentication rejected")
 	ErrResponderAUTHRequired     = errors.New("vowifi: verified IKE responder AUTH is required")
 	// ErrCleanupIncomplete marks a teardown that released its local IMS, tunnel,
