@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -68,6 +69,26 @@ func TestTelegramPollingAcceptsFakeIPWithoutWebAccessAllowlist(t *testing.T) {
 	if _, err := validateTelegramAPIURL(ctx, "https://169.254.169.254", "123456:test-token", "getUpdates"); err == nil {
 		t.Fatal("metadata address became reachable through Telegram allowlist")
 	}
+}
+
+func TestTelegramPollSkipsGetUpdatesWithoutAdminID(t *testing.T) {
+	server := newSettingsTestServer(t)
+	config, _ := json.Marshal(map[string]any{"bot_token": "123456:AAAAAAAAAAAAAAAAAAAA", "chat_id": "1000"})
+	if err := server.store.UpsertNotificationSetting(context.Background(),
+		store.NotificationSetting{Channel: "telegram", Enabled: true, Config: config}); err != nil {
+		t.Fatal(err)
+	}
+	bot := &telegramBot{server: server, client: &http.Client{Transport: pollingTransport{t}}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	bot.poll(ctx)
+}
+
+type pollingTransport struct{ t *testing.T }
+
+func (transport pollingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	transport.t.Fatal("Telegram request issued without an admin id")
+	return nil, errors.New("unexpected request")
 }
 
 func TestTelegramHTTPClientReusesKeepAliveTransportUntilProxyChanges(t *testing.T) {
