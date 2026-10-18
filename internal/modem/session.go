@@ -24,6 +24,9 @@ type SessionOptions struct {
 	ReadTimeout    time.Duration
 	CommandTimeout time.Duration
 	MaxURCs        int
+	// OnURC is called for each URC as it is parsed, including while idle. It
+	// runs with the session lock held: it must not block or issue commands.
+	OnURC func(string)
 }
 
 func (options SessionOptions) withDefaults() SessionOptions {
@@ -58,6 +61,7 @@ type Session struct {
 	lifetime  context.Context
 	cancel    context.CancelFunc
 	received  chan atRead
+	readWake  chan struct{}
 	readDone  chan struct{}
 	ioDone    chan error
 	closeOnce sync.Once
@@ -95,9 +99,10 @@ func NewSession(transport Transport, options SessionOptions) (*Session, error) {
 	session := &Session{
 		transport: transport, options: options,
 		gate: make(chan struct{}, 1), lifetime: lifetime, cancel: cancel,
-		received: make(chan atRead, 8), readDone: make(chan struct{}),
+		received: make(chan atRead, 8), readWake: make(chan struct{}, 1), readDone: make(chan struct{}),
 	}
 	go session.readLoop()
+	go session.idleLoop()
 	return session, nil
 }
 
@@ -271,9 +276,36 @@ func (session *Session) readLoop() {
 		case <-session.lifetime.Done():
 			return
 		}
+		select {
+		case session.readWake <- struct{}{}:
+		default:
+		}
 		if err != nil {
 			return
 		}
+	}
+}
+
+// idleLoop parses input that arrives while no command owns the port, so URCs
+// such as +CMTI reach OnURC immediately. A transaction abandoned by a timed-out
+// caller, or its unfinished write, is left to the next command to recover.
+func (session *Session) idleLoop() {
+	for {
+		select {
+		case <-session.readWake:
+		case <-session.lifetime.Done():
+			return
+		}
+		if err := session.lock(session.lifetime); err != nil {
+			return
+		}
+		if !session.Poisoned() && session.pending == nil && session.ioDone == nil {
+			session.receivePendingLocked()
+			for line, ok := popLine(&session.readBuf); ok; line, ok = popLine(&session.readBuf) {
+				session.consumeLineLocked(line, nil)
+			}
+		}
+		session.unlock()
 	}
 }
 
@@ -491,6 +523,9 @@ func (session *Session) WaitURC(ctx context.Context, predicate func(string) bool
 }
 
 func (session *Session) enqueueURCLocked(line string) {
+	if session.options.OnURC != nil {
+		session.options.OnURC(line)
+	}
 	if len(session.urcs) >= session.options.MaxURCs {
 		copy(session.urcs, session.urcs[1:])
 		session.urcs[len(session.urcs)-1] = line

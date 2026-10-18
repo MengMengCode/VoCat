@@ -24,6 +24,10 @@ type Store struct {
 	logMu        sync.Mutex
 	logClearedAt time.Time
 	logMinLevel  string
+
+	startupSMSID  int64 // see StartupSMSMessageID
+	smsInsertedMu sync.Mutex
+	smsInserted   chan struct{} // see SMSInserted
 }
 
 type Admin struct {
@@ -81,7 +85,12 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return closeOnError(fmt.Errorf("secure sqlite file: %w", err))
 		}
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	// Captured before this process can save an SMS; see StartupSMSMessageID.
+	if s.startupSMSID, err = s.LatestSMSMessageID(ctx); err != nil {
+		return closeOnError(err)
+	}
+	return s, nil
 }
 
 func prepareDatabasePath(path string) error {
