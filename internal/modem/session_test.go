@@ -337,6 +337,32 @@ func TestSessionIdleInputStaysUnsolicited(t *testing.T) {
 	})
 }
 
+func TestSessionReportsIdleURCWithoutCommand(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		transport := &transcriptTransport{}
+		var mu sync.Mutex
+		var seen []string
+		session := newTestSessionWithOptions(t, transport, SessionOptions{OnURC: func(line string) {
+			mu.Lock()
+			defer mu.Unlock()
+			seen = append(seen, line)
+		}})
+		transport.enqueue("\r\n+CMTI: \"SM\",3\r\n", "+CMTI: \"ME\"")
+		synctest.Wait()
+		mu.Lock()
+		got := append([]string(nil), seen...)
+		mu.Unlock()
+		if len(got) != 1 || got[0] != `+CMTI: "SM",3` {
+			t.Fatalf("idle URCs = %q, want only the complete +CMTI line", got)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if line, err := session.WaitURC(ctx, func(line string) bool { return strings.HasPrefix(line, "+CMTI:") }); err != nil || line != `+CMTI: "SM",3` {
+			t.Fatalf("idle URC was not queued: %q, %v", line, err)
+		}
+	})
+}
+
 func TestSessionCancelsAndClosesBlockedWrite(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started, release := make(chan struct{}), make(chan struct{})
@@ -682,7 +708,13 @@ func TestSessionKeepsFinalBeforeEOF(t *testing.T) {
 
 func newTestSession(t *testing.T, transport *transcriptTransport) *Session {
 	t.Helper()
-	session, err := NewSession(transport, SessionOptions{ReadTimeout: time.Millisecond, CommandTimeout: time.Second})
+	return newTestSessionWithOptions(t, transport, SessionOptions{})
+}
+
+func newTestSessionWithOptions(t *testing.T, transport *transcriptTransport, options SessionOptions) *Session {
+	t.Helper()
+	options.ReadTimeout, options.CommandTimeout = time.Millisecond, time.Second
+	session, err := NewSession(transport, options)
 	if err != nil {
 		t.Fatal(err)
 	}

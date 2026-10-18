@@ -2288,20 +2288,10 @@ func (bot *telegramBot) sendSMSNotification(ctx context.Context, config telegram
 }
 
 func (bot *telegramBot) notifyInboundSMS(ctx context.Context) {
-	cursorInitialized := false
-	var cursor int64
+	// Reading MAX(id) on the first tick would skip an SMS stored since Open.
+	cursor := bot.server.store.StartupSMSMessageID()
 	for ctx.Err() == nil {
-		if !cursorInitialized {
-			latest, err := bot.server.store.LatestSMSMessageID(ctx)
-			if err != nil {
-				bot.warn("initialize Telegram SMS cursor", err)
-				if !waitTelegram(ctx, telegramNotificationPeriod) {
-					return
-				}
-				continue
-			}
-			cursor, cursorInitialized = latest, true
-		}
+		inserted := bot.server.store.SMSInserted() // before the pass, so none is missed
 		config, enabled, err := bot.loadConfig(ctx)
 		if err != nil {
 			bot.warn("load Telegram SMS notification configuration", err)
@@ -2326,11 +2316,15 @@ func (bot *telegramBot) notifyInboundSMS(ctx context.Context) {
 						bot.warn("send Telegram SMS notification", sendErr)
 						break
 					}
+					if bot.server.logger != nil {
+						bot.server.logger.Debug("SMS notification sent",
+							"category", "sms", "channel", "telegram", "sms_id", message.ID)
+					}
 					cursor = message.ID
 				}
 			}
 		}
-		if !waitTelegram(ctx, telegramNotificationPeriod) {
+		if !waitSMSInserted(ctx, telegramNotificationPeriod, inserted) {
 			return
 		}
 	}
@@ -2633,13 +2627,21 @@ func tailDigits(value string, count int) string {
 	return value[len(value)-count:]
 }
 
-func waitTelegram(ctx context.Context, duration time.Duration) bool {
+// waitSMSInserted waits for duration, returning early when inserted is closed
+// (a nil channel waits the full duration). It reports false if ctx ends first.
+func waitSMSInserted(ctx context.Context, duration time.Duration, inserted <-chan struct{}) bool {
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return false
+	case <-inserted:
+		return true
 	case <-timer.C:
 		return true
 	}
+}
+
+func waitTelegram(ctx context.Context, duration time.Duration) bool {
+	return waitSMSInserted(ctx, duration, nil)
 }
