@@ -195,7 +195,14 @@ export function ThreadPanel(props: ThreadPanelProps) {
       : "border-gray-100 bg-white/90 text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-200",
   )}
 >
-  {messageBody(m)}
+  {m.decodeError ? (
+    <div className="mb-1 text-xs text-amber-700 dark:text-amber-400" role="status">
+      {t("短信解析失败")}：{m.decodeError}
+    </div>
+  ) : null}
+  {messageBody(m) || (
+    <span className="text-gray-400">{t("短信正文为空")}</span>
+  )}
 </div>
 </div>
         </div>

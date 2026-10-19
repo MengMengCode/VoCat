@@ -285,6 +285,19 @@ func (manager *Manager) DeleteSMSFromStorage(
 	storage string,
 	index int,
 ) error {
+	return manager.deleteSMSFromStorage(ctx, id, storage, index, "")
+}
+
+// DeleteSMSFromStorageIfMatches checks the physical record and deletes it under
+// the same device lock, so a reused slot cannot delete a different SMS.
+func (manager *Manager) DeleteSMSFromStorageIfMatches(ctx context.Context, id, storage string, index int, rawPDU string) error {
+	if strings.TrimSpace(rawPDU) == "" {
+		return errors.New("cannot clear SMS without an archived PDU")
+	}
+	return manager.deleteSMSFromStorage(ctx, id, storage, index, strings.TrimSpace(rawPDU))
+}
+
+func (manager *Manager) deleteSMSFromStorage(ctx context.Context, id, storage string, index int, expectedPDU string) error {
 	if index < 0 {
 		return ErrSMSInvalidMessageIndex
 	}
@@ -310,6 +323,22 @@ func (manager *Manager) DeleteSMSFromStorage(
 		if _, err := manager.command(ctx, client, fmt.Sprintf("AT+CPMS=%q", storage)); err != nil {
 			manager.setResult(id, state, nil, err)
 			return err
+		}
+	}
+	if expectedPDU != "" {
+		if _, err := manager.command(ctx, client, "AT+CMGF=0"); err != nil {
+			return err
+		}
+		response, err := manager.command(ctx, client, fmt.Sprintf("AT+CMGR=%d", index))
+		if err != nil {
+			return err
+		}
+		message, err := parseCMGR(index, response)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(strings.TrimSpace(message.RawPDU), expectedPDU) {
+			return errors.New("modem SMS slot changed before deletion")
 		}
 	}
 	_, err = manager.command(ctx, client, fmt.Sprintf("AT+CMGD=%d", index))

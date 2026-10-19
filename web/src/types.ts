@@ -360,6 +360,8 @@ export interface SMSMessage {
   peer: string;
   direction: "inbound" | "outbound" | "received" | "sent";
   body?: string;
+  decodeStatus?: "decoded" | "empty" | "failed";
+  decodeError?: string;
   content?: string;
   sender?: string;
   recipient?: string;

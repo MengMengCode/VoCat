@@ -348,6 +348,58 @@ func TestManagerDeleteSMSFromStorageSelectsStorageAtomically(t *testing.T) {
 	client.assertDone(t)
 }
 
+func TestManagerAutoClearChecksSlotPDU(t *testing.T) {
+	const pdu = "00040DD0C2B43BEC1E971B00006201917123130013D9775D0E1ABFC965507A0E8AC966B49A0D"
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("slotChanged=%t", changed), func(t *testing.T) {
+			steps := []clientStep{
+				{command: `AT+CPMS="ME"`, response: okResponse()},
+				{command: "AT+CMGF=0", response: okResponse()},
+				{command: "AT+CMGR=7", response: okResponse("+CMGR: 0,,35", pdu)},
+			}
+			if !changed {
+				steps = append(steps, clientStep{command: "AT+CMGD=7", response: okResponse()})
+			}
+			client := &transcriptClient{steps: steps}
+			manager, id := newStartedTestManager(t, client)
+			expected := pdu
+			if changed {
+				expected = "00"
+			}
+			err := manager.DeleteSMSFromStorageIfMatches(context.Background(), id, "ME", 7, expected)
+			if (err != nil) != changed {
+				t.Fatalf("slot changed=%t, err=%v", changed, err)
+			}
+			client.assertDone(t)
+		})
+	}
+}
+
+func TestManagerAutoClearPropagatesReadAndDeleteFailures(t *testing.T) {
+	for _, readFailure := range []bool{true, false} {
+		t.Run(fmt.Sprintf("readFailure=%t", readFailure), func(t *testing.T) {
+			failure := errors.New("modem failed")
+			read := clientStep{command: "AT+CMGR=7", response: okResponse("+CMGR: 0,,2", "0000")}
+			if readFailure {
+				read.err = failure
+			}
+			steps := []clientStep{
+				{command: `AT+CPMS="SM"`, response: okResponse()},
+				{command: "AT+CMGF=0", response: okResponse()}, read,
+			}
+			if !readFailure {
+				steps = append(steps, clientStep{command: "AT+CMGD=7", err: failure})
+			}
+			client := &transcriptClient{steps: steps}
+			manager, id := newStartedTestManager(t, client)
+			if err := manager.DeleteSMSFromStorageIfMatches(context.Background(), id, "SM", 7, "0000"); !errors.Is(err, failure) {
+				t.Fatalf("lost modem error: %v", err)
+			}
+			client.assertDone(t)
+		})
+	}
+}
+
 func TestManagerSendSMSRequiresMessageReference(t *testing.T) {
 	client := &transcriptClient{
 		steps: []clientStep{

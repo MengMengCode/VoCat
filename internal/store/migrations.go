@@ -504,6 +504,30 @@ func migrationStatements(version int) []string {
 				ADD COLUMN revert_profile INTEGER NOT NULL DEFAULT 1
 				CHECK (revert_profile IN (0, 1))`,
 		}
+	case 27:
+		return []string{
+			// Physical records are independent of decoded messages: even an
+			// unreadable sender or a failed multipart merge must remain recoverable.
+			`CREATE TABLE IF NOT EXISTS sms_raw_records (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				hardware_key TEXT NOT NULL,
+				device_id TEXT NOT NULL,
+				modem_imei TEXT NOT NULL DEFAULT '',
+				iccid TEXT NOT NULL DEFAULT '',
+				imsi TEXT NOT NULL DEFAULT '',
+				storage TEXT NOT NULL,
+				slot INTEGER NOT NULL,
+				pdu_hash TEXT NOT NULL,
+				raw_pdu TEXT NOT NULL,
+				raw_user_data TEXT NOT NULL DEFAULT '',
+				encoding TEXT NOT NULL DEFAULT '',
+				decode_error TEXT NOT NULL DEFAULT '',
+				first_seen INTEGER NOT NULL,
+				last_seen INTEGER NOT NULL,
+				UNIQUE(hardware_key, storage, slot, pdu_hash)
+			)`,
+			`CREATE INDEX IF NOT EXISTS sms_raw_records_device_idx ON sms_raw_records(device_id, id DESC)`,
+		}
 	default:
 		return nil
 	}

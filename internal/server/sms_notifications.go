@@ -235,6 +235,7 @@ func notificationMatchesDevice(deviceIDs []string, deviceID string) bool {
 
 func smsMessageReadyToNotify(message store.SMSMessage) bool {
 	return strings.TrimSpace(message.Body) != "" &&
+		store.SMSDecodeError(message.Extra) == "" &&
 		store.ConcatSMSReadyToNotify(message.MessageID, message.Extra)
 }
 

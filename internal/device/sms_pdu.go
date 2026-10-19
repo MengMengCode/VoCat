@@ -799,15 +799,8 @@ func readTPAddress(cursor *pduCursor) (string, error) {
 		// garbage instead of the message body.
 		byteCount = (int(length) + 1) / 2
 		septetCount = int(length) * 4 / 7
-
-		// A few legacy/non-standard sources do put the character count in this
-		// field. Retain compatibility only when the standard-sized value cannot
-		// be a valid zero-padded GSM-7 address; do not guess based on its length.
-		if byteCount == 0 || cursor.index+byteCount > len(cursor.data) ||
-			!hasZeroGSM7Padding(cursor.data[cursor.index:cursor.index+byteCount], septetCount) {
-			byteCount = (int(length)*7 + 7) / 8
-			septetCount = int(length)
-		}
+		// Padding is not part of the address. Non-zero fill bits must never
+		// change its boundary and consume PID, DCS, or timestamp bytes.
 	} else {
 		byteCount = (int(length) + 1) / 2
 	}
@@ -823,18 +816,6 @@ func readTPAddress(cursor *pduCursor) (string, error) {
 		return decodeGSM7(septets)
 	}
 	return decodeNumericAddress(value, int(length), toa), nil
-}
-
-func hasZeroGSM7Padding(data []byte, septetCount int) bool {
-	if septetCount <= 0 || septetCount*7 > len(data)*8 {
-		return false
-	}
-	for bit := septetCount * 7; bit < len(data)*8; bit++ {
-		if data[bit/8]&(byte(1)<<uint(bit%8)) != 0 {
-			return false
-		}
-	}
-	return true
 }
 
 func decodeNumericAddress(value []byte, digits int, toa byte) string {
@@ -864,6 +845,8 @@ func decodeUserData(
 	udl int,
 	message *SMSMessage,
 ) error {
+	// Retain the available bytes even if UDL or UDH is corrupt/truncated.
+	message.RawUserData = strings.ToUpper(hex.EncodeToString(data))
 	alphabet := decodeSMSAlphabet(dcs)
 	expectedBytes := udl
 	if alphabet == smsAlphabetGSM7 {
@@ -873,7 +856,6 @@ func decodeUserData(
 		return errors.New("SMS user data is truncated")
 	}
 	data = data[:expectedBytes]
-	message.RawUserData = strings.ToUpper(hex.EncodeToString(data))
 
 	headerBytes := 0
 	if firstOctet&0x40 != 0 {

@@ -94,8 +94,8 @@ func SetSMSHourlyLimit(ctx context.Context, database *store.Store, limit int) er
 	return database.UpsertAppSetting(ctx, store.AppSetting{Key: SMSHourlyLimitKey, Value: value})
 }
 
-// AutoClearModemStorage reports whether a successful SMS ingest should delete
-// the modem SM/ME copy. A missing setting is treated as enabled so existing
+// AutoClearModemStorage reports whether safely archived and decoded SMS may
+// have their modem SM/ME copies deleted. A missing setting is enabled so existing
 // deployments start reclaiming the small ME mailbox after upgrade.
 func AutoClearModemStorage(ctx context.Context, database *store.Store) bool {
 	if database == nil {

@@ -5,6 +5,8 @@
  * 富文本片段（嵌套链接/代码块的说明框）不走字典，在组件里按语言分支渲染。
  */
 export const EN_DICT: Record<string, string> = {
+  "短信解析失败": "SMS decoding failed",
+  "短信正文为空": "SMS body is empty",
   "E911地址设置": "Set E911 address",
   "正在识别运营商并读取E911状态...": "Identifying carrier and reading E911 status...",
   "美国运营商": "US carrier",
@@ -1354,8 +1356,8 @@ export const EN_DICT: Record<string, string> = {
   "VoLTE 未就绪": "VoLTE not ready",
   "设备离线，无法读取或修改模组 IMS 配置。": "The device is offline; its modem IMS configuration cannot be read or changed.",
   "自动清理模组短信存储": "Auto-clear modem SMS storage",
-  "入库成功后删除模组 SM/ME 副本，网页记录保留":
-    "Delete the modem SM/ME copy after VoCat saves the message; the web inbox is kept",
+  "成功解码并归档后清理模组副本，异常短信保留":
+    "Clear modem copies after decoding and archiving; keep messages with decoding issues",
   "模组 ME 存储通常只有二十多格。关闭后 VoCat 仍会同步到数据库，但不再删除模组原件，存满后可能收不到新短信。":
     "Modem ME storage is often only about twenty slots. Turning this off still syncs into the database but leaves the modem copies, so a full mailbox can block new SMS.",
   "短信存储设置加载失败": "Failed to load SMS storage settings",

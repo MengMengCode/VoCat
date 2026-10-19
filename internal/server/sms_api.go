@@ -58,6 +58,8 @@ func (s *Server) handleSMSSettings(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routeSMSAPI(w http.ResponseWriter, r *http.Request, cleanPath string) bool {
 	switch cleanPath {
+	case "sms/diagnostics":
+		s.handleSMSDiagnostics(w, r)
 	case "sms/export":
 		s.handleSMSExport(w, r)
 	case "sms/contacts":
@@ -728,7 +730,23 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 		concatSlots := make(map[string][]modemSMSSlot)
 		concatComplete := make(map[string]bool)
 		concatFirstSeen := make(map[string]time.Time)
+		concatSafeToClear := make(map[string]bool)
 		for _, message := range messages {
+			if message.Direction != device.SMSDirectionStatusReport && firstNonEmpty(message.From, message.To) == "" {
+				message.DecodeError = firstNonEmpty(message.DecodeError, "SMS sender address is empty")
+			}
+			// Archive before sender parsing, delivery-report matching, or inbox
+			// persistence. None of those operations may discard the only PDU.
+			archiveErr := s.store.SaveSMSRawRecord(ctx, store.SMSRawRecord{
+				DeviceID: config.ID, ModemIMEI: modemIMEI, ICCID: identityAfter.ICCID,
+				IMSI: identityAfter.IMSI, Storage: message.Storage, Slot: message.Index,
+				RawPDU: message.RawPDU, RawUserData: message.RawUserData,
+				Encoding: string(message.Encoding), DecodeError: message.DecodeError,
+			})
+			if archiveErr != nil {
+				s.logger.Warn("archive modem SMS failed; keeping modem copy", "category", "sms",
+					"device_id", config.ID, "storage", message.Storage, "index", message.Index, "error", archiveErr)
+			}
 			if message.Direction == device.SMSDirectionStatusReport &&
 				message.MessageReference != nil && message.StatusCode != nil {
 				_, applyErr := s.store.ApplySMSDeliveryReport(ctx, store.SMSDeliveryReport{
@@ -750,15 +768,12 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 					}
 					continue
 				}
-				if autoClear {
+				if autoClear && archiveErr == nil && message.DecodeError == "" {
 					clearSlots = appendModemSMSSlot(clearSlots, message)
 				}
 				continue
 			}
-			peer := firstNonEmpty(message.From, message.To)
-			if peer == "" {
-				continue
-			}
+			peer := firstNonEmpty(message.From, message.To, "未知发送方")
 			timestamp := time.Now().UTC()
 			if message.ServiceCenterTimestamp != nil {
 				timestamp = message.ServiceCenterTimestamp.UTC()
@@ -806,21 +821,28 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 				Extra:         extra,
 			})
 			if saveErr != nil {
+				if message.Concat != nil && message.Concat.Total > 1 {
+					concatSafeToClear[messageID] = false
+				}
 				s.logger.Warn("persist modem SMS failed", "category", "sms", "device_id", config.ID, "raw_error", saveErr)
 				continue
 			}
 			if autoClear {
+				safeToClear := archiveErr == nil && message.DecodeError == "" && strings.TrimSpace(message.Text) != ""
 				if message.Concat != nil && message.Concat.Total > 1 {
+					if _, seen := concatSafeToClear[messageID]; !seen {
+						concatSafeToClear[messageID] = true
+					}
+					concatSafeToClear[messageID] = concatSafeToClear[messageID] && safeToClear && store.SMSDecodeError(saveResult.Message.Extra) == ""
 					concatSlots[messageID] = appendModemSMSSlot(concatSlots[messageID], message)
 					concatComplete[messageID] = store.ConcatSMSReadyToNotify(saveResult.Message.MessageID, saveResult.Message.Extra)
 					// Kept across merges and rescans; unlike SCTS never missing or skewed.
 					concatFirstSeen[messageID] = saveResult.Message.CreatedAt
-				} else {
+				} else if safeToClear {
 					clearSlots = appendModemSMSSlot(clearSlots, message)
 				}
 			}
-			if saved := saveResult.Message; saveResult.Inserted && saved.Direction == "inbound" &&
-				store.ConcatSMSReadyToNotify(saved.MessageID, saved.Extra) {
+			if saved := saveResult.Message; saveResult.Inserted && saved.Direction == "inbound" && smsMessageReadyToNotify(saved) {
 				s.logger.Info("cellular SMS received",
 					"category", "sms", "event", "sms.received", "sms_id", saved.ID,
 					"device_id", config.ID, "peer", saved.Peer,
@@ -831,6 +853,9 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 		}
 		if autoClear {
 			for messageID, slots := range concatSlots {
+				if !concatSafeToClear[messageID] {
+					continue
+				}
 				if concatComplete[messageID] {
 					clearSlots = append(clearSlots, slots...)
 				} else if time.Since(concatFirstSeen[messageID]) > modemSMSIncompleteHoldLimit {
@@ -848,6 +873,7 @@ func (s *Server) syncModemSMS(ctx context.Context, onlyDevice string) {
 type modemSMSSlot struct {
 	storage string
 	index   int
+	rawPDU  string
 }
 
 func appendModemSMSSlot(slots []modemSMSSlot, message device.SMSMessage) []modemSMSSlot {
@@ -860,7 +886,7 @@ func appendModemSMSSlot(slots []modemSMSSlot, message device.SMSMessage) []modem
 			return slots
 		}
 	}
-	return append(slots, modemSMSSlot{storage: storage, index: message.Index})
+	return append(slots, modemSMSSlot{storage: storage, index: message.Index, rawPDU: message.RawPDU})
 }
 
 func sortModemSMSSlotsDescending(slots []modemSMSSlot) {
@@ -879,7 +905,7 @@ func (s *Server) clearPersistedModemSMS(ctx context.Context, physicalID, configI
 	sortModemSMSSlotsDescending(slots)
 	for _, slot := range slots {
 		deleteContext, cancelDelete := context.WithTimeout(ctx, 10*time.Second)
-		err := s.devices.DeleteSMSFromStorage(deleteContext, physicalID, slot.storage, slot.index)
+		err := s.devices.DeleteSMSFromStorageIfMatches(deleteContext, physicalID, slot.storage, slot.index, slot.rawPDU)
 		cancelDelete()
 		if err != nil {
 			if s.logger != nil {
@@ -1162,6 +1188,13 @@ func (s *Server) StartSMSSyncLoop(ctx context.Context, interval time.Duration) {
 
 func storedSMSResponse(message store.SMSMessage) map[string]any {
 	body := smsdecode.Preview(message.Body)
+	decodeError := store.SMSDecodeError(message.Extra)
+	decodeStatus := "decoded"
+	if decodeError != "" {
+		decodeStatus = "failed"
+	} else if strings.TrimSpace(body) == "" {
+		decodeStatus = "empty"
+	}
 	return map[string]any{
 		"id":             message.ID,
 		"message_id":     message.MessageID,
@@ -1174,6 +1207,8 @@ func storedSMSResponse(message store.SMSMessage) map[string]any {
 		"direction":      message.Direction,
 		"body":           body,
 		"content":        body,
+		"decode_status":  decodeStatus,
+		"decode_error":   decodeError,
 		"sender":         ternaryString(message.Direction == "outbound", "", message.Peer),
 		"recipient":      ternaryString(message.Direction == "outbound", message.Peer, ""),
 		"type":           "sms",

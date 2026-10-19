@@ -25,7 +25,7 @@ export function SMSAutoClearCard({
           </CardIcon>
           <CardTitle
             title={t("自动清理模组短信存储")}
-            subtitle={t("入库成功后删除模组 SM/ME 副本，网页记录保留")}
+            subtitle={t("成功解码并归档后清理模组副本，异常短信保留")}
           />
         </div>
         <Switch checked={enabled} disabled={loading || saving} loading={saving} onChange={onToggle} />

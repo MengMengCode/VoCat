@@ -266,8 +266,8 @@ func TestParseCMGLPreservesUndecodableRecord(t *testing.T) {
 }
 
 func TestDecodeAlphanumericTPAddress(t *testing.T) {
-	// "TEST" encoded as 4 GSM-7 septets packed into 4 bytes (non-standard septet count format: length=4).
-	cursor := &pduCursor{data: []byte{0x04, 0xd0, 0xd4, 0xe2, 0x94, 0x0a}}
+	// "TEST": four GSM-7 septets occupy eight useful semi-octets.
+	cursor := &pduCursor{data: []byte{0x08, 0xd0, 0xd4, 0xe2, 0x94, 0x0a}}
 	address, err := readTPAddress(cursor)
 	if err != nil {
 		t.Fatalf("readTPAddress error = %v", err)
@@ -309,10 +309,10 @@ func TestDecodeAlphanumericTPAddressStandard3GPP(t *testing.T) {
 
 func TestDecodeDeliverPDUWithAlphanumericSender(t *testing.T) {
 	// SMS-DELIVER with alphanumeric originator "VoCat" and empty user data.
-	// SMSC length=0, first octet=0x04, OA length=0x05, OA TON=0xD0,
+	// SMSC length=0, first octet=0x04, OA length=0x09, OA TON=0xD0,
 	// OA bytes pack "VoCat" (5 septets -> 5 bytes), PID=0x00, DCS=0x00,
 	// SCTS=7 bytes, UDL=0x00.
-	message, err := decodeSMSPDU("000405D0D6F7304C0700004210203040500000")
+	message, err := decodeSMSPDU("000409D0D6F7304C0700004210203040500000")
 	if err != nil {
 		t.Fatalf("decodeSMSPDU error = %v", err)
 	}
@@ -368,6 +368,13 @@ func TestDecode8BitPDUShowsHexPayload(t *testing.T) {
 		message.Text != "AABBCC" ||
 		message.RawUserData != "AABBCC" {
 		t.Fatalf("8-bit message = %#v", message)
+	}
+}
+
+func TestDecodeUserDataRetainsTruncatedBytes(t *testing.T) {
+	var message SMSMessage
+	if err := decodeUserData([]byte{0xaa, 0xbb}, 0, 0, 10, &message); err == nil || message.RawUserData != "AABB" {
+		t.Fatalf("truncated user data lost: %#v, err=%v", message, err)
 	}
 }
 

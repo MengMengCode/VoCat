@@ -28,6 +28,21 @@ type smsDeletionController struct {
 	deleted        []string
 }
 
+func (controller *smsDeletionController) DeleteSMSFromStorageIfMatches(ctx context.Context, id, storage string, index int, rawPDU string) error {
+	controller.mu.Lock()
+	matched := false
+	for _, message := range controller.storedMessages {
+		if message.Storage == storage && message.Index == index && message.RawPDU == rawPDU {
+			matched = true
+		}
+	}
+	controller.mu.Unlock()
+	if !matched {
+		return errors.New("modem SMS slot changed before deletion")
+	}
+	return controller.DeleteSMSFromStorage(ctx, id, storage, index)
+}
+
 func (controller *smsDeletionController) ListSMS(context.Context, string) (device.SMSListing, error) {
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
@@ -545,7 +560,7 @@ func TestSyncModemSMSKeepsModemSlotsWhenAutoClearDisabled(t *testing.T) {
 	}
 }
 
-func TestSyncModemSMSDoesNotClearUnpersistedMessages(t *testing.T) {
+func TestSyncModemSMSPreservesUnknownSenderAndModemCopy(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, ":memory:")
 	if err != nil {
@@ -579,7 +594,7 @@ func TestSyncModemSMSDoesNotClearUnpersistedMessages(t *testing.T) {
 		t.Fatalf("remaining = %d, deleted = %d", remaining, deleted)
 	}
 	stored, err := database.ListSMSMessages(ctx, store.SMSFilter{DeviceID: deviceID})
-	if err != nil || len(stored) != 0 {
+	if err != nil || len(stored) != 1 || stored[0].Peer != "未知发送方" || store.SMSDecodeError(stored[0].Extra) == "" {
 		t.Fatalf("stored = %#v, %v", stored, err)
 	}
 }

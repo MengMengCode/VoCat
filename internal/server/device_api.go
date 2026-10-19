@@ -48,6 +48,7 @@ type DeviceController interface {
 	ReadSMS(context.Context, string, int) (device.SMSMessage, error)
 	DeleteSMS(context.Context, string, int) error
 	DeleteSMSFromStorage(context.Context, string, string, int) error
+	DeleteSMSFromStorageIfMatches(context.Context, string, string, int, string) error
 	ESIMInventory(context.Context, string) ([]device.EsimInventoryEntry, error)
 	ESIMListProfiles(context.Context, string) (device.EsimInfo, error)
 	ESIMSwitchProfile(context.Context, string, string, string) error

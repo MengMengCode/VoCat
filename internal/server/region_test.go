@@ -103,6 +103,9 @@ func (f fakeDeviceController) DeleteSMS(context.Context, string, int) error { re
 func (f fakeDeviceController) DeleteSMSFromStorage(context.Context, string, string, int) error {
 	return nil
 }
+func (f fakeDeviceController) DeleteSMSFromStorageIfMatches(context.Context, string, string, int, string) error {
+	return nil
+}
 func (f fakeDeviceController) ESIMListProfiles(context.Context, string) (device.EsimInfo, error) {
 	return device.EsimInfo{}, nil
 }
