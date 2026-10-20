@@ -310,15 +310,7 @@ func (channel *euiccChannel) recoverCATBusy(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	if err := power.PowerOffSIM(ctx, channel.qmiSlot); err != nil {
-		return err
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(time.Second):
-	}
-	if err := power.PowerOnSIM(ctx, channel.qmiSlot); err != nil {
+	if err := cycleNativeQMISIMPower(ctx, power, channel.qmiSlot, time.Second); err != nil {
 		return err
 	}
 	return channel.completeProfileRefresh(ctx)

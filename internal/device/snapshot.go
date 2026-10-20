@@ -74,7 +74,31 @@ func (manager *Manager) readSnapshot(
 		snapshot.SIMStatus, snapshot.SIMReady = parseCPIN(response)
 	}
 	previousICCID = strings.TrimSpace(previousICCID)
-	if !snapshot.SIMReady && previousICCID != "" {
+	if !snapshot.SIMReady && isNativeQMICandidate(candidate) {
+		prepared, prepareErr := manager.prepareNativeQMISIMInterface(ctx, client)
+		if prepareErr != nil {
+			snapshot.Warnings = append(snapshot.Warnings, "prepare native SIM interface: "+prepareErr.Error())
+		}
+		if prepared {
+			if response, ok := optional("AT+CPIN?"); ok {
+				snapshot.SIMStatus, snapshot.SIMReady = parseCPIN(response)
+			}
+		}
+	}
+	if !snapshot.SIMReady && isNativeQMICandidate(candidate) {
+		recoveryContext, cancelRecovery := context.WithTimeout(ctx, 12*time.Second)
+		recovered, recoveryErr := manager.recoverNativeQMIHotSwap(recoveryContext, candidate)
+		cancelRecovery()
+		if recoveryErr != nil {
+			snapshot.Warnings = append(snapshot.Warnings, "recover QMI SIM: "+recoveryErr.Error())
+		}
+		if recovered {
+			if response, ok := optional("AT+CPIN?"); ok {
+				snapshot.SIMStatus, snapshot.SIMReady = parseCPIN(response)
+			}
+		}
+	}
+	if !snapshot.SIMReady && previousICCID != "" && !isNativeQMICandidate(candidate) {
 		// On Quectel EC20 and similar modems without physical SIMDET GPIO interrupts,
 		// hot-swapping a SIM cuts card power and leaves the UIM interface de-powered.
 		// A fast soft cycle (AT+CFUN=0 -> AT+CFUN=4) re-powers the SIM interface,

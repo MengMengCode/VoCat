@@ -79,7 +79,7 @@ func TestSnapshotSkipsCGSNOnlyForNativeQMI(t *testing.T) {
 			qmiCalls := 0
 			manager := &Manager{commandTimeout: commandTimeout, qmiRadioOpener: func(ctx context.Context, _ string) (qmiRadioSession, error) {
 				qmiCalls++
-				if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > commandTimeout {
+				if deadline, ok := ctx.Deadline(); qmiCalls == 1 && (!ok || time.Until(deadline) > commandTimeout) {
 					t.Fatal("DMS probe deadline exceeds CommandTimeout")
 				}
 				if test.qmiErr == context.DeadlineExceeded {
@@ -105,7 +105,7 @@ func TestSnapshotSkipsCGSNOnlyForNativeQMI(t *testing.T) {
 			}
 			wantCalls, wantIMEI := 0, previous.IMEI
 			if !wantCGSN {
-				wantCalls = 1
+				wantCalls = 2 // DMS identity and cheap UIM hot-swap status probe
 				if test.qmiErr == nil {
 					wantIMEI = "866241014372802"
 				}
@@ -170,7 +170,7 @@ func TestManagerRefreshSkipsQMIICCIDWithoutReadySIM(t *testing.T) {
 	qmiCalls := 0
 	manager.qmiRadioOpener = func(context.Context, string) (qmiRadioSession, error) {
 		qmiCalls++
-		return nil, errors.New("QMI should not be opened without a SIM")
+		return nil, errors.New("synthetic QMI unavailable")
 	}
 	if err := manager.SetBackend("mhi-wwan0", "qmi"); err != nil {
 		t.Fatal(err)
@@ -180,10 +180,10 @@ func TestManagerRefreshSkipsQMIICCIDWithoutReadySIM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	// Only the SIM-independent DMS read is attempted; the UIM ICCID fallback
-	// must still be skipped without a READY SIM.
-	if qmiCalls != 1 {
-		t.Fatalf("qmiRadioOpener called %d times, want 1 DMS attempt and no UIM ICCID read", qmiCalls)
+	// DMS identity and cheap card-status recovery are attempted; the long UIM
+	// ICCID fallback must still be skipped without a READY SIM.
+	if qmiCalls != 2 {
+		t.Fatalf("qmiRadioOpener called %d times, want DMS and card-status attempts without UIM ICCID read", qmiCalls)
 	}
 	if client.saw("AT+CGSN") || client.saw("AT+CGSN=1") || snapshot.IMEI != "" {
 		t.Fatalf("native IMEI fell back to AT: %q, commands = %v", snapshot.IMEI, client.commands)

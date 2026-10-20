@@ -210,6 +210,14 @@ func (session *productionQMIRadioSession) GetICCID(ctx context.Context) (string,
 	return uim.GetICCID(ctx)
 }
 
+func (session *productionQMIRadioSession) GetCardStatusDetails(ctx context.Context) (*qmi.CardStatusDetails, qmi.SIMStatus, error) {
+	uim, err := session.uimService(ctx)
+	if err != nil {
+		return nil, qmi.SIMNotReady, err
+	}
+	return uim.GetCardStatusDetails(ctx)
+}
+
 func (session *productionQMIRadioSession) GetIMSI(ctx context.Context) (string, error) {
 	uim, err := session.uimService(ctx)
 	if err != nil {

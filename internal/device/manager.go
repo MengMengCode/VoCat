@@ -56,6 +56,8 @@ type Manager struct {
 	qmiDataOpener                 qmiDataSessionOpener
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
+	nativeQMISIMRecoveryMu        sync.Mutex
+	nativeQMISIMRecoveries        map[string]time.Time
 
 	started      bool
 	devices      map[string]*managedDevice
