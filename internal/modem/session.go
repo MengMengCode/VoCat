@@ -66,6 +66,7 @@ type Session struct {
 	ioDone    chan error
 	closeOnce sync.Once
 	closeErr  error
+	closeHook func()
 }
 
 type atRead struct {
@@ -685,6 +686,9 @@ func (session *Session) Close() error {
 	session.closeOnce.Do(func() {
 		session.cancel()
 		session.closeErr = session.transport.Close()
+		if session.closeHook != nil {
+			session.closeHook()
+		}
 	})
 	<-session.readDone
 	session.gate <- struct{}{}
@@ -694,4 +698,8 @@ func (session *Session) Close() error {
 		session.ioDone = nil
 	}
 	return session.closeErr
+}
+
+func (session *Session) setCloseHook(hook func()) {
+	session.closeHook = hook
 }
