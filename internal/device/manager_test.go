@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,6 +147,122 @@ func TestManagerDiscoverCancellationDoesNotMarkDevicesOffline(t *testing.T) {
 		items[0].Candidate.USBGeneration != initial.USBGeneration ||
 		items[0].Candidate.ATPort.OpenPath() != initial.ATPort.OpenPath() {
 		t.Fatalf("device changed after canceled partial discovery: %#v", items)
+	}
+}
+
+func TestManagerExecuteAPDUSanitizesCommandAndResponse(t *testing.T) {
+	const apduHex = "00A40400"
+	const quotedCommand = `AT+CSIM=8,"` + apduHex + `"`
+	const unquotedCommand = `AT+CSIM=8,` + apduHex
+	client := &transcriptClient{steps: []clientStep{
+		{
+			command:  quotedCommand,
+			response: modem.Response{Final: "+CME ERROR: 13", Lines: []string{`+CSIM: 8,"response-` + apduHex + `"`}},
+			err:      &modem.CommandError{Command: quotedCommand, Final: "+CME ERROR: 13", Lines: []string{`+CSIM: request-` + apduHex}},
+		},
+		{
+			command:  unquotedCommand,
+			response: modem.Response{Final: "ERROR", Lines: []string{`+CSIM: response-` + apduHex}},
+			err:      &modem.CommandError{Command: unquotedCommand, Final: "ERROR", Lines: []string{`+CSIM: response-` + apduHex}},
+		},
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	_, err := manager.ExecuteAPDU(context.Background(), id, modem.APDUCSIM, 0, []byte{0x00, 0xA4, 0x04, 0x00})
+	var rejected *modem.APDUCommandRejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("ExecuteAPDU error = %v, want APDUCommandRejectedError; transcript=%v steps remaining=%d", err, client.unexpected, len(client.steps))
+	}
+	for _, secret := range []string{apduHex, quotedCommand, unquotedCommand, "request-", "response-"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("ExecuteAPDU error leaked %q: %v", secret, err)
+		}
+	}
+	entry, err := manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{apduHex, quotedCommand, unquotedCommand, "request-", "response-"} {
+		if strings.Contains(entry.LastError, secret) {
+			t.Fatalf("device LastError leaked %q: %q", secret, entry.LastError)
+		}
+	}
+	client.assertDone(t)
+}
+
+func TestManagerExecuteAPDUSanitizesMalformedResponse(t *testing.T) {
+	const secretResponse = "DEADBEEFCAFEBABE"
+	client := &transcriptClient{steps: []clientStep{{
+		command: `AT+CSIM=2,"00"`,
+		response: modem.Response{
+			Final: "OK", Lines: []string{`+CSIM: 4,"` + secretResponse + `ZZ9000"`},
+		},
+	}}}
+	manager, id := newStartedTestManager(t, client)
+
+	_, err := manager.ExecuteAPDU(context.Background(), id, modem.APDUCSIM, 0, []byte{0x00})
+	if !errors.Is(err, modem.ErrAPDUResponseInvalid) {
+		t.Fatalf("ExecuteAPDU error = %v, want safe APDU parse sentinel", err)
+	}
+	if strings.Contains(err.Error(), secretResponse) {
+		t.Fatalf("ExecuteAPDU error leaked response payload: %v", err)
+	}
+	entry, err := manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(entry.LastError, secretResponse) {
+		t.Fatalf("device LastError leaked response payload: %q", entry.LastError)
+	}
+	client.assertDone(t)
+}
+
+func TestManagedDeviceProfileResetsOnUSBIdentityChange(t *testing.T) {
+	manager, id := newStartedTestManager(t, nil)
+	state, err := manager.lookup(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialDialect := state.apduDialect
+	if initialDialect == nil || state.atProfile.APDU == nil || state.atProfile.Operator == nil || state.atProfile.PDP == nil {
+		t.Fatalf("initial profile/dialect not initialized: profile=%#v dialect=%p", state.atProfile, initialDialect)
+	}
+
+	unchanged := state.candidate
+	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{unchanged}}
+	if _, err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover unchanged identity: %v", err)
+	}
+	if state.apduDialect != initialDialect {
+		t.Fatal("unchanged USB identity unexpectedly reset the APDU dialect")
+	}
+
+	state.atProfile = modem.ATProfile{}
+	changed := unchanged
+	changed.VendorID, changed.ProductID = "19d2", "0536"
+	changed.Manufacturer, changed.Product = "ZXIC", "UZ901"
+	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{changed}}
+	if _, err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover changed identity: %v", err)
+	}
+	if state.apduDialect == nil || state.apduDialect == initialDialect {
+		t.Fatal("USB identity change did not replace the APDU dialect")
+	}
+	if state.atProfile.APDU == nil || state.atProfile.Operator == nil || state.atProfile.PDP == nil {
+		t.Fatalf("USB identity change did not resolve a complete profile: %#v", state.atProfile)
+	}
+
+	identityChangedDialect := state.apduDialect
+	manager.discoverer = staticDiscoverer{}
+	if _, err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover removed modem: %v", err)
+	}
+	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{changed}}
+	if _, err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover reconnected modem: %v", err)
+	}
+	if state.apduDialect == identityChangedDialect {
+		t.Fatal("reconnected hardware reused the prior APDU dialect")
 	}
 }
 

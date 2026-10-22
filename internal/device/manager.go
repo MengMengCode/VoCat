@@ -137,6 +137,10 @@ type managedDevice struct {
 	dataSessionControl   string
 	dataEventCancel      context.CancelFunc
 	candidate            modem.Candidate
+	atProfile            modem.ATProfile
+	apduDialect          *modem.ATAPDUDialect
+	profileVendorID      string
+	profileProductID     string
 	backend              string
 	esimTransport        string
 	lastICCID            string
@@ -149,6 +153,7 @@ type managedDevice struct {
 	resetClientOnLock    bool
 	remoteprocOwner      string
 	remoteprocGeneration uint64
+	resetATProfileOnLock bool
 	simPIN               string
 }
 
@@ -307,14 +312,19 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		seen[candidate.ID] = struct{}{}
 		if state == nil {
 			manager.devices[candidate.ID] = &managedDevice{
-				candidate:  candidate,
-				discovered: true,
+				candidate:        candidate,
+				atProfile:        modem.ResolveATProfile(candidate),
+				apduDialect:      &modem.ATAPDUDialect{},
+				profileVendorID:  strings.ToLower(strings.TrimSpace(candidate.VendorID)),
+				profileProductID: strings.ToLower(strings.TrimSpace(candidate.ProductID)),
+				discovered:       true,
 			}
 			events = append(events, discoveryEvent{connected: true, candidate: candidate})
 			continue
 		}
 		reconnected := !state.discovered
-		endpointChanged := state.candidate.USBGeneration != candidate.USBGeneration ||
+		usbIdentityChanged := !sameUSBIdentity(state.candidate, candidate)
+		endpointChanged := usbIdentityChanged || state.candidate.USBGeneration != candidate.USBGeneration ||
 			state.candidate.ATPort.OpenPath() != candidate.ATPort.OpenPath() ||
 			state.candidate.QMIControl != candidate.QMIControl
 		if reconnected {
@@ -330,6 +340,9 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		}
 		if reconnected || endpointChanged {
 			state.resetClientOnLock = true
+		}
+		if reconnected || usbIdentityChanged {
+			state.resetATProfileOnLock = true
 		}
 		state.candidate = candidate
 		state.discovered = true
@@ -481,26 +494,50 @@ func stableModemSignature(devices []Device) string {
 }
 
 func (manager *Manager) resetChangedClients() {
+	type pendingReset struct {
+		state        *managedDevice
+		resetProfile bool
+	}
 	manager.mu.Lock()
-	states := make([]*managedDevice, 0, len(manager.devices))
+	states := make([]pendingReset, 0, len(manager.devices))
 	for _, state := range manager.devices {
 		if state.resetClientOnLock {
-			states = append(states, state)
+			states = append(states, pendingReset{state: state, resetProfile: state.resetATProfileOnLock})
 			state.resetClientOnLock = false
+			state.resetATProfileOnLock = false
 		}
 	}
 	manager.mu.Unlock()
-	for _, state := range states {
+	for _, pending := range states {
+		state := pending.state
 		state.opMu.Lock()
 		if state.client != nil {
 			_ = state.client.Close()
 			state.client = nil
+		}
+		candidate := manager.candidateFor(state)
+		if pending.resetProfile || state.apduDialect == nil || state.atProfile.APDU == nil ||
+			state.profileVendorID != strings.ToLower(strings.TrimSpace(candidate.VendorID)) ||
+			state.profileProductID != strings.ToLower(strings.TrimSpace(candidate.ProductID)) {
+			setATProfileLocked(state, candidate)
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
 		invalidateQMINetworkSession(state, manager.candidateFor(state))
 		state.dataMu.Unlock()
 	}
+}
+
+func sameUSBIdentity(left, right modem.Candidate) bool {
+	return strings.EqualFold(strings.TrimSpace(left.VendorID), strings.TrimSpace(right.VendorID)) &&
+		strings.EqualFold(strings.TrimSpace(left.ProductID), strings.TrimSpace(right.ProductID))
+}
+
+func setATProfileLocked(state *managedDevice, candidate modem.Candidate) {
+	state.atProfile = modem.ResolveATProfile(candidate)
+	state.apduDialect = &modem.ATAPDUDialect{}
+	state.profileVendorID = strings.ToLower(strings.TrimSpace(candidate.VendorID))
+	state.profileProductID = strings.ToLower(strings.TrimSpace(candidate.ProductID))
 }
 
 func (manager *Manager) List() []Device {
@@ -925,6 +962,128 @@ func (manager *Manager) ExecuteSensitiveAT(
 	}
 	manager.setResult(id, state, nil, recordedErr)
 	return response, err
+}
+
+// ExecuteAPDU sends one APDU through the device-owned profile and learned
+// command dialect. The payload always stays inside the sensitive AT boundary.
+func (manager *Manager) ExecuteAPDU(
+	ctx context.Context,
+	id string,
+	command modem.APDUCommand,
+	channel int,
+	apdu []byte,
+) ([]byte, error) {
+	state, err := manager.lookup(id)
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return nil, err
+	}
+	defer state.opMu.Unlock()
+	if err := manager.validateActive(id, state); err != nil {
+		return nil, err
+	}
+	candidate := manager.candidateFor(state)
+	if state.apduDialect == nil || state.atProfile.APDU == nil ||
+		state.profileVendorID != strings.ToLower(strings.TrimSpace(candidate.VendorID)) ||
+		state.profileProductID != strings.ToLower(strings.TrimSpace(candidate.ProductID)) {
+		setATProfileLocked(state, candidate)
+	}
+	client, err := manager.clientLocked(ctx, state, candidate)
+	if err != nil {
+		err = sanitizeManagerAPDUError(err)
+		manager.setResult(id, state, nil, err)
+		return nil, err
+	}
+	return manager.executeAPDULocked(ctx, id, state, client, command, channel, apdu)
+}
+
+// executeAPDULocked requires state.opMu and reuses the Manager's single
+// per-device profile and dialect for eSIM and VoWiFi callers.
+func (manager *Manager) executeAPDULocked(
+	ctx context.Context,
+	id string,
+	state *managedDevice,
+	client modem.Client,
+	command modem.APDUCommand,
+	channel int,
+	apdu []byte,
+) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	candidate := manager.candidateFor(state)
+	if state.apduDialect == nil || state.atProfile.APDU == nil ||
+		state.profileVendorID != strings.ToLower(strings.TrimSpace(candidate.VendorID)) ||
+		state.profileProductID != strings.ToLower(strings.TrimSpace(candidate.ProductID)) {
+		setATProfileLocked(state, candidate)
+	}
+	apduCtx, cancel := manager.withTimeout(ctx, csimAPDUTimeout)
+	defer cancel()
+	result, err := state.apduDialect.Execute(
+		apduCtx,
+		state.atProfile.APDU,
+		command,
+		channel,
+		apdu,
+		func(commandCtx context.Context, commandText string) (modem.Response, error) {
+			return manager.sensitiveAPDUCommand(commandCtx, client, commandText)
+		},
+	)
+	if err != nil {
+		err = sanitizeManagerAPDUError(err)
+	}
+	manager.setResult(id, state, nil, err)
+	return result, err
+}
+
+// sensitiveAPDUCommand is the sensitive boundary for APDUs. Unlike the
+// generic helper it lets the dialect inspect a definite modem rejection; the
+// dialect sanitizes every result before it can reach callers or device state.
+func (manager *Manager) sensitiveAPDUCommand(
+	ctx context.Context,
+	client modem.Client,
+	command string,
+) (modem.Response, error) {
+	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
+	defer cancel()
+	return client.Execute(commandCtx, command)
+}
+
+func sanitizeManagerAPDUError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var rejected *modem.APDUCommandRejectedError
+	if errors.As(err, &rejected) {
+		return rejected
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	case errors.Is(err, modem.ErrCommandTimeout):
+		return modem.ErrCommandTimeout
+	case errors.Is(err, modem.ErrSessionClosed):
+		return modem.ErrSessionClosed
+	case errors.Is(err, modem.ErrATPortBusy):
+		return modem.ErrATPortBusy
+	case errors.Is(err, ErrNoATPort):
+		return ErrNoATPort
+	case errors.Is(err, modem.ErrAPDUCommandRejected):
+		return modem.ErrAPDUCommandRejected
+	case errors.Is(err, modem.ErrAPDUResponseInvalid):
+		return modem.ErrAPDUResponseInvalid
+	case errors.Is(err, modem.ErrAPDUExecutionFailed):
+		return modem.ErrAPDUExecutionFailed
+	default:
+		return modem.ErrAPDUExecutionFailed
+	}
 }
 
 func (manager *Manager) Reboot(ctx context.Context, id string) error {
