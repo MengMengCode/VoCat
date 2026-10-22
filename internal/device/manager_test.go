@@ -69,6 +69,86 @@ func TestManagerDiscoverReturnsOnlyCurrentlyPresentDevices(t *testing.T) {
 	}
 }
 
+func TestManagerDiscoverRetainsActiveCandidateWhenATProbeBusy(t *testing.T) {
+	manager, id := newStartedTestManager(t, nil)
+	before, err := manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	busyCandidate := before.Candidate
+	busyCandidate.VendorID = "ffff"
+	busyCandidate.ProductID = "0001"
+	busyCandidate.USBGeneration = "replacement-generation"
+	busyCandidate.ATPort = modem.Port{Path: "/dev/ttyUSB9", Name: "ttyUSB9", Role: modem.PortRoleAT}
+	busyCandidate.ATProbeBusy = true
+	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{busyCandidate}}
+
+	present, err := manager.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover while prior AT session owns the port: %v", err)
+	}
+	if len(present) != 1 {
+		t.Fatalf("present devices = %#v, want prior active candidate retained", present)
+	}
+	after := present[0].Candidate
+	if after.VendorID != before.Candidate.VendorID ||
+		after.ProductID != before.Candidate.ProductID ||
+		after.USBGeneration != before.Candidate.USBGeneration ||
+		after.ATPort.OpenPath() != before.Candidate.ATPort.OpenPath() {
+		t.Fatalf("candidate changed while AT probe was busy: before=%#v after=%#v", before.Candidate, after)
+	}
+}
+
+type cancelingPartialDiscoverer struct {
+	cancel    context.CancelFunc
+	candidate modem.Candidate
+}
+
+func (discoverer cancelingPartialDiscoverer) Discover(context.Context) ([]modem.Candidate, error) {
+	discoverer.cancel()
+	return []modem.Candidate{discoverer.candidate}, context.Canceled
+}
+
+func TestManagerDiscoverCancellationDoesNotMarkDevicesOffline(t *testing.T) {
+	initial := modem.Candidate{
+		ID: "initial", VendorID: "2c7c", ProductID: "0125", USBGeneration: "old",
+		ATPort: modem.Port{Path: "/dev/ttyUSB2", Name: "ttyUSB2", Role: modem.PortRoleAT},
+	}
+	manager, err := NewManager(Options{
+		Discoverer:  staticDiscoverer{candidates: []modem.Candidate{initial}},
+		Opener:      &staticOpener{},
+		CardReaders: pcsc.NewWithBackend(testPCSCBackend{}),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
+
+	replacement := initial
+	replacement.VendorID = "ffff"
+	replacement.ProductID = "0001"
+	replacement.USBGeneration = "new"
+	replacement.ATPort = modem.Port{Path: "/dev/ttyUSB9", Name: "ttyUSB9"}
+	ctx, cancel := context.WithCancel(context.Background())
+	manager.discoverer = cancelingPartialDiscoverer{cancel: cancel, candidate: replacement}
+	if _, err := manager.Discover(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Discover error = %v, want context.Canceled", err)
+	}
+
+	items := manager.List()
+	if len(items) != 1 || !items[0].Discovered ||
+		items[0].Candidate.VendorID != initial.VendorID ||
+		items[0].Candidate.ProductID != initial.ProductID ||
+		items[0].Candidate.USBGeneration != initial.USBGeneration ||
+		items[0].Candidate.ATPort.OpenPath() != initial.ATPort.OpenPath() {
+		t.Fatalf("device changed after canceled partial discovery: %#v", items)
+	}
+}
+
 func TestManagerPublishesDeviceLifecycleEvents(t *testing.T) {
 	manager, id := newStartedTestManager(t, nil)
 	t.Cleanup(func() { _ = manager.Stop(context.Background()) })

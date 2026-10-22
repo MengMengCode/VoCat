@@ -59,6 +59,8 @@ type Candidate struct {
 	USBGeneration    string `json:"-"`
 	ATPort           Port   `json:"atPort"`
 	Ports            []Port `json:"ports"`
+	ATProbeRequired  bool   `json:"-"`
+	ATProbeBusy      bool   `json:"-"`
 	QMIControl       string `json:"qmiControl,omitempty"`
 	NetworkInterface string `json:"networkInterface,omitempty"`
 	DiscoveryIssue   string `json:"discoveryIssue,omitempty"`

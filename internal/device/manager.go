@@ -257,7 +257,16 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	candidates, modemErr := manager.discoverer.Discover(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if errors.Is(modemErr, context.Canceled) || errors.Is(modemErr, context.DeadlineExceeded) {
+		return nil, modemErr
+	}
 	readers, readerErr := manager.cardReaders.Readers(ctx)
 	if readerErr == nil {
 		for _, reader := range readers {
@@ -276,6 +285,9 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 	if modemErr != nil && len(candidates) == 0 {
 		return nil, modemErr
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]struct{}, len(candidates))
 
 	type discoveryEvent struct {
@@ -288,8 +300,11 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		if strings.TrimSpace(candidate.ID) == "" {
 			continue
 		}
-		seen[candidate.ID] = struct{}{}
 		state := manager.devices[candidate.ID]
+		if candidate.ATProbeBusy && state != nil && state.discovered {
+			candidate = state.candidate
+		}
+		seen[candidate.ID] = struct{}{}
 		if state == nil {
 			manager.devices[candidate.ID] = &managedDevice{
 				candidate:  candidate,

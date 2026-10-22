@@ -43,8 +43,10 @@ func NewSysFSDiscoverer(sysRoot, devRoot string) *SysFSDiscoverer {
 }
 
 type discoveredUSBDevice struct {
-	candidate Candidate
-	ports     map[string]Port
+	candidate      Candidate
+	ports          map[string]Port
+	retainNoATPort bool
+	probeAT        bool
 }
 
 func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
@@ -97,20 +99,14 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 		}
 		vendorID := strings.ToLower(readTrimmed(filepath.Join(resolvedDevice, "idVendor")))
 		productID := strings.ToLower(readTrimmed(filepath.Join(resolvedDevice, "idProduct")))
-		if _, bound := qmiBound[deviceName]; !bound && !IsDJI4GUSB(vendorID, productID) {
-			// A bound qmi_wwan interface is the strongest vendor-neutral "this is
-			// a live QMI modem" signal, but it excludes Quectel modules running
-			// in a serial or RNDIS/ECM USB composition (no qmi_wwan binding).
-			// Re-admit them by vendor so their AT serial ports stay discoverable;
-			// the candidate is only kept if a ttyUSB/ttyACM node is actually
-			// found below, which is exactly the AT-bearing composition we want.
-			if !IsQuectelUSBModem(vendorID) && !IsML307(Candidate{
-				VendorID: vendorID, ProductID: productID,
-				Product: readTrimmed(filepath.Join(resolvedDevice, "product")),
-			}) {
-				continue
-			}
-		}
+		_, qmiBoundDevice := qmiBound[deviceName]
+		manufacturer := readTrimmed(filepath.Join(resolvedDevice, "manufacturer"))
+		product := readTrimmed(filepath.Join(resolvedDevice, "product"))
+		zxicModem := ChipsetForUSB(vendorID, productID) == ChipsetZXIC
+		knownWithoutQMI := IsDJI4GUSB(vendorID, productID) ||
+			IsQuectelUSBModem(vendorID) || IsML307(Candidate{
+			VendorID: vendorID, ProductID: productID, Product: product,
+		})
 
 		state := devices[deviceName]
 		if state == nil {
@@ -118,8 +114,8 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			manufacturer, product := normalizeUSBIdentity(
 				vendorID,
 				productID,
-				readTrimmed(filepath.Join(resolvedDevice, "manufacturer")),
-				readTrimmed(filepath.Join(resolvedDevice, "product")),
+				manufacturer,
+				product,
 			)
 			state = &discoveredUSBDevice{
 				candidate: Candidate{
@@ -135,7 +131,9 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 							readTrimmed(filepath.Join(resolvedDevice, "devnum")),
 					),
 				},
-				ports: make(map[string]Port),
+				ports:          make(map[string]Port),
+				retainNoATPort: qmiBoundDevice || knownWithoutQMI || zxicModem,
+				probeAT:        !qmiBoundDevice && !knownWithoutQMI,
 			}
 			devices[deviceName] = state
 		}
@@ -204,6 +202,10 @@ func (d *SysFSDiscoverer) Discover(ctx context.Context) ([]Candidate, error) {
 			// driver or switch the module to a QMI+AT composition.
 			state.candidate.DiscoveryIssue = "at_port_missing"
 		}
+		if !state.retainNoATPort && len(state.ports) == 0 {
+			continue
+		}
+		state.candidate.ATProbeRequired = state.probeAT && len(state.ports) > 0
 		result = append(result, state.candidate)
 	}
 	wwanCandidates, err := d.discoverWWAN(ctx)
@@ -257,6 +259,16 @@ func IsQuectelUSBModem(vendorID string) bool {
 // "Linux / Linux", but those texts are firmware placeholders, not the modem
 // model or manufacturer.
 func normalizeUSBIdentity(vendorID, productID, manufacturer, product string) (string, string) {
+	if IsZXICFamily(vendorID, productID) {
+		// ZXIC firmware ships placeholder USB strings; the chipset family is
+		// the only stable identity. The retail model comes from the
+		// platform's +CGMM identity query instead.
+		product = strings.TrimSpace(product)
+		if isUSBIdentityPlaceholder(product) {
+			product = "ZXIC"
+		}
+		return "ZXIC", product
+	}
 	if !IsQuectelUSBModem(vendorID) ||
 		!strings.EqualFold(strings.TrimSpace(productID), "0125") {
 		return manufacturer, product
@@ -268,6 +280,13 @@ func normalizeUSBIdentity(vendorID, productID, manufacturer, product string) (st
 		product = "Quectel EC20 / EC25"
 	}
 	return manufacturer, product
+}
+
+// isUSBIdentityPlaceholder reports whether a firmware-reported USB string is
+// a placeholder rather than a real identity.
+func isUSBIdentityPlaceholder(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "" || strings.EqualFold(value, "Android") || strings.EqualFold(value, "Linux")
 }
 
 // reliableSerialAlias rejects the generic serial number used by older
