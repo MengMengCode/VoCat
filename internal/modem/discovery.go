@@ -381,6 +381,9 @@ func (d *SysFSDiscoverer) discoverWWAN(ctx context.Context) ([]Candidate, error)
 		if len(group.qmiNames) > 0 {
 			candidate.QMIControl = filepath.Join(d.DevRoot, group.qmiNames[0])
 		}
+		if !candidate.HasATPort() {
+			candidate.DiscoveryIssue = "at_port_missing"
+		}
 		result = append(result, candidate)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })

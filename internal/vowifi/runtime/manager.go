@@ -212,6 +212,42 @@ func (manager *Manager) Register(orchestrator *vowifi.Orchestrator) error {
 	return nil
 }
 
+// Unregister terminates the runtime and stops watching updates for deviceID.
+// This is called when a device is deleted so background retry loops and workers
+// terminate cleanly.
+func (manager *Manager) Unregister(ctx context.Context, deviceID string) error {
+	manager.mu.Lock()
+	if manager.closed {
+		manager.mu.Unlock()
+		return ErrClosed
+	}
+	item, exists := manager.entries[deviceID]
+	if !exists {
+		manager.mu.Unlock()
+		return nil
+	}
+	delete(manager.entries, deviceID)
+	item.desiredEnabled = false
+	item.autoRetryPending = false
+	if item.operationCancel != nil {
+		item.operationCancel()
+	}
+	orchestrator := item.orchestrator
+	stopWatch := item.stopWatch
+	manager.mu.Unlock()
+
+	if stopWatch != nil {
+		stopWatch()
+	}
+	if orchestrator != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		_ = orchestrator.Close(ctx)
+	}
+	return nil
+}
+
 func (manager *Manager) State(deviceID string) (vowifi.State, error) {
 	manager.mu.Lock()
 	item := manager.entries[deviceID]
@@ -518,7 +554,7 @@ func (manager *Manager) runOperations(
 		state := item.orchestrator.State()
 		manager.mu.Lock()
 		item.operationCancel = nil
-		if manager.closed {
+		if manager.closed || manager.entries[deviceID] != item {
 			item.busy = false
 			manager.mu.Unlock()
 			return

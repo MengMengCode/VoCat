@@ -245,7 +245,14 @@ func (projector StateProjector) Save(
 	if err != nil {
 		return err
 	}
-	return projector.Store.UpsertVoWiFiRuntime(ctx, runtime)
+	err = projector.Store.UpsertVoWiFiRuntime(ctx, runtime)
+	if err != nil {
+		if _, devErr := projector.Store.Device(ctx, state.DeviceID); errors.Is(devErr, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func dataplaneMode(state vowifi.State) string {

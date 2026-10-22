@@ -610,3 +610,59 @@ func mustBindQMIWWAN(t *testing.T, sysRoot, interfaceName string) {
 		t.Fatal(err)
 	}
 }
+
+func TestSysFSDiscoveryWWANWithoutATPortFlagsDiscoveryIssue(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	mustMkdir(t, filepath.Join(sysRoot, "class", "wwan", "wwan0qmi0"))
+	mustMkdir(t, devRoot)
+	mustWrite(t, filepath.Join(devRoot, "wwan0qmi0"), "")
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.ID != "mhi-wwan0" {
+		t.Fatalf("candidate ID = %q, want mhi-wwan0", candidate.ID)
+	}
+	if candidate.DiscoveryIssue != "at_port_missing" {
+		t.Fatalf("discovery issue = %q, want at_port_missing", candidate.DiscoveryIssue)
+	}
+	if candidate.HasATPort() {
+		t.Fatalf("candidate unexpectedly has an AT port: %#v", candidate.ATPort)
+	}
+}
+
+func TestSysFSDiscoveryWWANWithATPortHasNoDiscoveryIssue(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	mustMkdir(t, filepath.Join(sysRoot, "class", "wwan", "wwan0qmi0"))
+	mustMkdir(t, filepath.Join(sysRoot, "class", "wwan", "wwan0at0"))
+	mustMkdir(t, devRoot)
+	mustWrite(t, filepath.Join(devRoot, "wwan0qmi0"), "")
+	mustWrite(t, filepath.Join(devRoot, "wwan0at0"), "")
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.ID != "mhi-wwan0" {
+		t.Fatalf("candidate ID = %q, want mhi-wwan0", candidate.ID)
+	}
+	if candidate.DiscoveryIssue != "" {
+		t.Fatalf("discovery issue = %q, want empty", candidate.DiscoveryIssue)
+	}
+	if !candidate.HasATPort() {
+		t.Fatal("candidate must have an AT port")
+	}
+}

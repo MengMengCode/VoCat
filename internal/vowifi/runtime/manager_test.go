@@ -477,3 +477,23 @@ func TestManagerCoalescesReconnectWhileLifecycleOperationIsBusy(t *testing.T) {
 	}
 	t.Fatal("queued reconnect did not run after the active operation")
 }
+
+func TestManagerUnregisterStopsWorkerAndRemovesDevice(t *testing.T) {
+	manager := New(Options{OperationTimeout: time.Second})
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	if err := manager.Register(testOrchestrator(t, "ec20-to-delete")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.State("ec20-to-delete"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Unregister(context.Background(), "ec20-to-delete"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.State("ec20-to-delete"); !errors.Is(err, ErrNotRegistered) {
+		t.Fatalf("expected ErrNotRegistered, got %v", err)
+	}
+	if err := manager.Unregister(context.Background(), "ec20-to-delete"); err != nil {
+		t.Fatal(err)
+	}
+}

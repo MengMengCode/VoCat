@@ -491,6 +491,9 @@ func (s *Server) handleDevicePath(
 	if len(tail) == 0 {
 		switch r.Method {
 		case http.MethodDelete:
+			if unregister, ok := s.vowifi.(VoWiFiUnregisterController); ok {
+				_ = unregister.Unregister(r.Context(), id)
+			}
 			if err := s.store.DeleteDevice(r.Context(), id); err != nil {
 				s.writeStoreError(w, err)
 				return true

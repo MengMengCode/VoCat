@@ -1309,6 +1309,9 @@ func provisionDiscoveredDevices(
 	}
 	for _, discovered := range manager.List() {
 		candidate := discovered.Candidate
+		if candidate.DiscoveryIssue != "" || (!candidate.HasATPort() && candidate.HardwareKind != pcsc.HardwareKind) {
+			continue
+		}
 		deviceType := provisionedDeviceType(candidate)
 		backend := "at"
 		control := candidate.ATPort.OpenPath()
@@ -1460,7 +1463,7 @@ func pollDeviceSnapshots(
 		var refreshGroup sync.WaitGroup
 		refreshSlots := make(chan struct{}, 4)
 		for _, entry := range entries {
-			if !entry.Discovered || entry.Candidate.DiscoveryIssue != "" {
+			if !entry.Discovered || entry.Candidate.DiscoveryIssue != "" || (!entry.Candidate.HasATPort() && entry.Candidate.HardwareKind != pcsc.HardwareKind) {
 				continue
 			}
 			// Native 410 firmware can miss physical SIM insertion events. Probe it
