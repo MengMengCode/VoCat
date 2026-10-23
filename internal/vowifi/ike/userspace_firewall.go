@@ -9,6 +9,31 @@ import (
 
 const openWrtFirewallCommentPrefix = "vocat-ims-"
 
+// openWrtNFTCommandEnv names the nft executable used for the fw4 rules instead
+// of "nft" from PATH. A container image may carry an nft build that cannot read
+// the host's fw4 ruleset; pointing this at a wrapper for the host's own nft
+// keeps network-originated SIP reaching the TUN.
+const openWrtNFTCommandEnv = "VOCAT_NFT"
+
+func openWrtNFTCommand(getenv func(string) string) string {
+	if command := strings.TrimSpace(getenv(openWrtNFTCommandEnv)); command != "" {
+		return command
+	}
+	return "nft"
+}
+
+// fw4InputChainAbsent reports whether a failed `nft list chain inet fw4 input`
+// only means that the host does not use OpenWrt fw4. Any other failure, such as
+// an nft crash or an incompatible build, leaves an fw4 host rejecting every
+// network-originated SIP request and must not be silent.
+func fw4InputChainAbsent(exitCode int, output string) bool {
+	if exitCode != 1 {
+		return false
+	}
+	return strings.Contains(output, "No such file or directory") ||
+		strings.Contains(output, "Protocol not supported")
+}
+
 type openWrtFirewallRule struct {
 	comment   string
 	arguments []string
