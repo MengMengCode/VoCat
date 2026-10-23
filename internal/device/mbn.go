@@ -424,7 +424,7 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 	}
 
 	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
 	rebootContext, cancelReboot := context.WithTimeout(ctx, manager.longTimeout)
 	_, rebootErr := client.Execute(rebootContext, "AT+CFUN=1,1")

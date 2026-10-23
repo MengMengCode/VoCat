@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type recordedHostCommand struct {
@@ -236,5 +237,129 @@ func TestLinuxATHostDataLinkStartRejectsEmptyInterface(t *testing.T) {
 	_, err := link.Start(context.Background(), "  ")
 	if !errors.Is(err, ErrDataBackendUnavailable) {
 		t.Fatalf("Start error = %v, want ErrDataBackendUnavailable", err)
+	}
+}
+
+func TestNetworkStatusReportsATHostSession(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CGACT?", response: okResponse("+CGACT: 1,0")},
+		{command: `AT+CGDCONT=1,"IPV4V6","internet"`, response: okResponse()},
+		{command: "AT+CGATT=1", response: okResponse()},
+		{command: "AT+CGACT=1,1", response: okResponse()},
+	}}
+	link := &fakeATHostLink{}
+	manager, id := newStartedATDataTestManager(t, client, link)
+	if _, err := manager.SetNetwork(context.Background(), id, NetworkRequest{
+		Enabled: true, APN: "internet", IPVersion: "IPV4V6",
+	}); err != nil {
+		t.Fatalf("enable network: %v", err)
+	}
+
+	status, err := manager.NetworkStatus(context.Background(), id)
+	if err != nil {
+		t.Fatalf("NetworkStatus: %v", err)
+	}
+	if status.Backend != "at" || !status.Connected || status.Interface != "enx344b50000000" {
+		t.Fatalf("NetworkStatus = %#v, want connected AT session", status)
+	}
+
+	session := link.lastSession()
+	if session == nil {
+		t.Fatal("no host session recorded")
+	}
+	session.mu.Lock()
+	session.statusOK = false
+	session.statusDetail = "AT host data lease is not established"
+	session.mu.Unlock()
+
+	status, err = manager.NetworkStatus(context.Background(), id)
+	if err != nil {
+		t.Fatalf("NetworkStatus disconnected: %v", err)
+	}
+	if status.Connected {
+		t.Fatalf("NetworkStatus = %#v, want disconnected after lease loss", status)
+	}
+	if status.Backend != "at" {
+		t.Fatalf("NetworkStatus backend = %q, want at", status.Backend)
+	}
+}
+
+func TestATDataSessionClosesOnDeviceDisconnect(t *testing.T) {
+	discoverer := &mutableDiscoverer{}
+	discoverer.setCandidates(testATDataCandidate())
+	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CGACT?", response: okResponse("+CGACT: 1,0")},
+		{command: `AT+CGDCONT=1,"IPV4V6","internet"`, response: okResponse()},
+		{command: "AT+CGATT=1", response: okResponse()},
+		{command: "AT+CGACT=1,1", response: okResponse()},
+	}}
+	manager, err := NewManager(Options{
+		Discoverer:     discoverer,
+		Opener:         &staticOpener{client: client},
+		CommandTimeout: time.Second,
+		LongTimeout:    time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	link := &fakeATHostLink{}
+	manager.atHostDataLink = link
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
+
+	id := testATDataCandidate().ID
+	if _, err := manager.SetNetwork(context.Background(), id, NetworkRequest{
+		Enabled: true, APN: "internet", IPVersion: "IPV4V6",
+	}); err != nil {
+		t.Fatalf("enable network: %v", err)
+	}
+	session := link.lastSession()
+	if session == nil || session.isClosed() {
+		t.Fatal("no live host session after enable")
+	}
+
+	// The modem disappears: Discover now returns an empty device set, so the
+	// stale-device cleanup must tear the host session down too.
+	discoverer.setCandidates()
+	if _, err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover after unplug: %v", err)
+	}
+	if !session.isClosed() {
+		t.Fatal("device disconnect did not close the AT host session")
+	}
+	status, err := manager.NetworkStatus(context.Background(), id)
+	if err == nil && status.Connected {
+		t.Fatalf("NetworkStatus after disconnect = %#v, want no live session", status)
+	}
+}
+
+func TestNetworkStatusReturnsOperationInProgressDuringATTransition(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CGACT?", response: okResponse("+CGACT: 1,0")},
+		{command: `AT+CGDCONT=1,"IPV4V6","internet"`, response: okResponse()},
+		{command: "AT+CGATT=1", response: okResponse()},
+		{command: "AT+CGACT=1,1", response: okResponse()},
+	}}
+	link := &fakeATHostLink{}
+	manager, id := newStartedATDataTestManager(t, client, link)
+	if _, err := manager.SetNetwork(context.Background(), id, NetworkRequest{
+		Enabled: true, APN: "internet", IPVersion: "IPV4V6",
+	}); err != nil {
+		t.Fatalf("enable network: %v", err)
+	}
+
+	state, err := manager.lookup(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A live lease teardown holds dataMu; concurrent status probes must fail
+	// fast as in-progress instead of observing a half-cleared state.
+	state.dataMu.Lock()
+	_, statusErr := manager.NetworkStatus(context.Background(), id)
+	state.dataMu.Unlock()
+	if !errors.Is(statusErr, ErrDataOperationInProgress) {
+		t.Fatalf("NetworkStatus error = %v, want ErrDataOperationInProgress", statusErr)
 	}
 }

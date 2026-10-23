@@ -256,16 +256,8 @@ func (manager *Manager) Stop(ctx context.Context) error {
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateQMINetworkSession(state, manager.candidateFor(state))
-		atSession := state.atHostSession
-		state.atHostSession = nil
-		state.dataBackend = ""
+		invalidateNetworkSessions(state, manager.candidateFor(state))
 		state.dataMu.Unlock()
-		if atSession != nil {
-			if err := atSession.Close(ctx); err != nil {
-				closeErrors = append(closeErrors, err)
-			}
-		}
 	}
 	return errors.Join(closeErrors...)
 }
@@ -401,7 +393,7 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		invalidateNetworkSessions(state, manager.candidateFor(state))
 		state.dataMu.Unlock()
 	}
 	manager.resetChangedClients()
@@ -535,7 +527,7 @@ func (manager *Manager) resetChangedClients() {
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		invalidateNetworkSessions(state, manager.candidateFor(state))
 		state.dataMu.Unlock()
 	}
 }
@@ -1128,7 +1120,7 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 		return err
 	}
 	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
 	commandCtx, cancel := manager.withTimeout(ctx, manager.longTimeout)
 	defer cancel()
@@ -1178,7 +1170,7 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 // softResetSIMLocked 要求持有 opMu，使模式验证与 SIM 重置不能被其他模组操作插入。
 func (manager *Manager) softResetSIMLocked(ctx context.Context, id string, state *managedDevice, client modem.Client) error {
 	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
 	commandCtx, cancel := context.WithTimeout(ctx, manager.commandTimeout)
 	defer cancel()

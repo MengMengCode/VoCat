@@ -416,9 +416,9 @@ func (s *Server) monitorCellularData(ctx context.Context, physicalID string, imm
 			continue
 		}
 		backend := strings.ToLower(strings.TrimSpace(request.Backend))
-		if backend != "" && backend != "qmi" {
-			// NetworkStatus observes the process-owned QMI session. AT-backed
-			// sessions have no equivalent live observer yet.
+		if backend != "" && backend != "qmi" && backend != "at" {
+			// NetworkStatus observes the process-owned session for both QMI
+			// and AT backends; anything else has no live observer.
 			continue
 		}
 		releaseWatchdog, admitted := runtime.acquireWatchdog(config.ID, status.Revision)

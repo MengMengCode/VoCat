@@ -181,7 +181,7 @@ func (manager *Manager) SetCellularIMS(ctx context.Context, id string, mode Cell
 	// owned session before the reset so the restore path cannot use a handle
 	// from the previous baseband generation.
 	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
+	invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
 	rebootCtx, cancel := manager.withTimeout(ctx, manager.longTimeout)
 	_, err = client.Execute(rebootCtx, "AT+CFUN=1,1")

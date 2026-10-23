@@ -104,6 +104,44 @@ func (profile markerPDPProfile) ActivateCommand(cid int, enabled bool) string {
 	return fmt.Sprintf("AT+%s=ACT,%d,%d", profile.marker, cid, state)
 }
 
+// testATDataCandidate mirrors the hardware-gate UZ901 identity: AT-capable
+// modem with an ECM host network interface and no QMI control point.
+func testATDataCandidate() modem.Candidate {
+	return modem.Candidate{
+		ID:           "zxic-test-uz901",
+		VendorID:     "19d2",
+		ProductID:    "0536",
+		Manufacturer: "ALK,Incorporated",
+		Product:      "ALK Mobile Boardband",
+		NetworkInterface: "enx344b50000000",
+		ATPort: modem.Port{
+			Path:            "/dev/ttyUSB0",
+			Name:            "ttyUSB0",
+			InterfaceNumber: 0x02,
+			Role:            modem.PortRoleAT,
+		},
+	}
+}
+
+// mutableDiscoverer lets lifecycle tests change the discovered device set
+// between Discover calls (plug/unplug simulation).
+type mutableDiscoverer struct {
+	mu         sync.Mutex
+	candidates []modem.Candidate
+}
+
+func (discoverer *mutableDiscoverer) Discover(context.Context) ([]modem.Candidate, error) {
+	discoverer.mu.Lock()
+	defer discoverer.mu.Unlock()
+	return append([]modem.Candidate(nil), discoverer.candidates...), nil
+}
+
+func (discoverer *mutableDiscoverer) setCandidates(candidates ...modem.Candidate) {
+	discoverer.mu.Lock()
+	defer discoverer.mu.Unlock()
+	discoverer.candidates = append([]modem.Candidate(nil), candidates...)
+}
+
 // newStartedATDataTestManager starts a manager whose candidate carries a host
 // network interface (AT backend) and whose host data link is injected.
 func newStartedATDataTestManager(
@@ -112,23 +150,11 @@ func newStartedATDataTestManager(
 	link atHostDataLink,
 ) (*Manager, string) {
 	t.Helper()
-	const id = "zxic-test-uz901"
+	candidate := testATDataCandidate()
+	id := candidate.ID
 	opener := &staticOpener{client: client}
 	manager, err := NewManager(Options{
-		Discoverer: staticDiscoverer{candidates: []modem.Candidate{{
-			ID:           id,
-			VendorID:     "19d2",
-			ProductID:    "0536",
-			Manufacturer: "ALK,Incorporated",
-			Product:      "ALK Mobile Boardband",
-			NetworkInterface: "enx344b50000000",
-			ATPort: modem.Port{
-				Path:            "/dev/ttyUSB0",
-				Name:            "ttyUSB0",
-				InterfaceNumber: 0x02,
-				Role:            modem.PortRoleAT,
-			},
-		}}},
+		Discoverer: staticDiscoverer{candidates: []modem.Candidate{candidate}},
 		Opener:         opener,
 		CommandTimeout: time.Second,
 		LongTimeout:    time.Second,
