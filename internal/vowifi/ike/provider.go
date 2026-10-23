@@ -601,6 +601,7 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		UDPEncapsulation:   natDetected,
 		ProxyMode:          request.Proxy.Mode,
 		Relay:              relay,
+		Logger:             provider.config.Logger,
 	})
 	if err != nil {
 		_ = relay.CloseWithDelete(ctx)

@@ -195,6 +195,26 @@ modem layouts. Mapping only individual nodes with `--device`, such as
 `/dev/ttyUSB2`, `/dev/cdc-wdm0`, or `/dev/wwan0qmi0`, limits the container to
 those fixed nodes and does not provide complete multi-device or hot-plug discovery.
 
+On OpenWrt hosts, the fw4 input chain drops new connections from interfaces it
+does not manage, including Vocat's per-session VoWiFi TUN. Vocat therefore
+inserts narrow `vocat-ims-*` accept rules (P-CSCF to the negotiated inner
+address) with the `nft` bundled in the image. Without them IMS registration and
+outgoing SMS still work, but incoming SMS and calls are rejected. If the bundled
+`nft` cannot read the host ruleset, Vocat logs `nft could not inspect the
+OpenWrt fw4 input chain`; point `VOCAT_NFT` at the host's own nft instead:
+
+```bash
+cat > /opt/vocat-host-nft <<'EOF'
+#!/bin/sh
+exec /host/lib/ld-musl-$(uname -m).so.1 --library-path /host/usr/lib:/host/lib /host/usr/sbin/nft "$@"
+EOF
+chmod 755 /opt/vocat-host-nft
+# Add to the docker run command above:
+#   -v /usr:/host/usr:ro -v /lib:/host/lib:ro \
+#   -v /opt/vocat-host-nft:/usr/local/bin/host-nft:ro \
+#   -e VOCAT_NFT=/usr/local/bin/host-nft
+```
+
 The GHCR image is published for `linux/amd64` and `linux/arm64`.
 
 > [!TIP]

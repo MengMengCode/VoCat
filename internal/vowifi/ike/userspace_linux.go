@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -96,7 +97,7 @@ func (installer linuxUserspaceInstaller) Install(
 	runContext, cancel := context.WithCancel(context.Background())
 	handle := &linuxUserspaceHandle{
 		ipCommand:  command,
-		nftCommand: "nft",
+		nftCommand: openWrtNFTCommand(os.Getenv),
 		config:     cloneChildSAConfig(config),
 		tunnel:     tunnel,
 		tun:        tun,
@@ -278,12 +279,27 @@ func (handle *linuxUserspaceHandle) configureOpenWrtFirewall(ctx context.Context
 		command = "nft"
 	}
 	if _, err := exec.LookPath(command); err != nil {
+		if command != "nft" {
+			handle.logger().Warn("configured nft command is not executable; OpenWrt fw4 IMS input rules were not installed",
+				"command", command, "error", err)
+		}
 		return nil
 	}
 	probe := exec.CommandContext(ctx, command, "list", "chain", "inet", "fw4", "input")
-	if _, err := probe.CombinedOutput(); err != nil {
+	if output, err := probe.CombinedOutput(); err != nil {
 		// fw4 is OpenWrt-specific. Other Linux hosts retain their native input
 		// policy and do not need this compatibility rule.
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		if !fw4InputChainAbsent(exitCode, string(output)) {
+			handle.logger().Warn("nft could not inspect the OpenWrt fw4 input chain; network-originated SIP MESSAGE and calls may be rejected",
+				"command", command,
+				"error", commandErrorText(output, err),
+				"hint", "set "+openWrtNFTCommandEnv+" to an nft that can read the host ruleset")
+		}
 		return nil
 	}
 	handle.firewallRules = buildOpenWrtFirewallRules(handle.config)
@@ -294,7 +310,16 @@ func (handle *linuxUserspaceHandle) configureOpenWrtFirewall(ctx context.Context
 		_ = handle.cleanupOpenWrtFirewall(context.Background())
 		return fmt.Errorf("ike: permit IMS input on OpenWrt TUN: %w", err)
 	}
+	handle.logger().Debug("OpenWrt fw4 IMS input rules installed",
+		"interface", handle.config.Name, "rules", len(handle.firewallRules))
 	return nil
+}
+
+func (handle *linuxUserspaceHandle) logger() *slog.Logger {
+	if handle.config.Logger != nil {
+		return handle.config.Logger
+	}
+	return slog.Default()
 }
 
 // ensureOpenWrtFirewall installs any managed fw4 rules missing after a reload.
