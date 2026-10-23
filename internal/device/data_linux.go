@@ -719,6 +719,12 @@ func exportProxyRouteIdentity(networkInterface string) (mark uint32, table, prio
 	return
 }
 
+// hostCommandOutput runs host network commands. Tests replace it to record
+// the command stream without touching the real routing tables.
+var hostCommandOutput = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
 func configureExportProxyDHCP(ctx context.Context, busybox, ipCommand, networkInterface string) (string, error) {
 	lease, err := os.CreateTemp("", "vocat-dhcp-lease-*.env")
 	if err != nil {
@@ -803,13 +809,13 @@ func configureExportProxyIPv4(ctx context.Context, ipCommand, networkInterface, 
 	if gatewayText != "" && gateway == nil {
 		return "", errors.New("an invalid IPv4 gateway was provided")
 	}
-	if result, addrErr := exec.CommandContext(ctx, ipCommand, "-4", "addr", "replace", fmt.Sprintf("%s/%d", address.String(), prefix), "dev", networkInterface).CombinedOutput(); addrErr != nil {
+	if result, addrErr := hostCommandOutput(ctx, ipCommand, "-4", "addr", "replace", fmt.Sprintf("%s/%d", address.String(), prefix), "dev", networkInterface); addrErr != nil {
 		return "", fmt.Errorf("configure cellular address: %w: %s", addrErr, strings.TrimSpace(string(result)))
 	}
 	mark, table, priority := exportProxyRouteIdentity(networkInterface)
 	clearExportProxyRoute(ctx, networkInterface)
 	connectedCIDR := fmt.Sprintf("%s/%d", network.String(), prefix)
-	if result, routeErr := exec.CommandContext(ctx, ipCommand, "-4", "route", "replace", "table", strconv.Itoa(table), connectedCIDR, "dev", networkInterface, "scope", "link", "src", address.String()).CombinedOutput(); routeErr != nil {
+	if result, routeErr := hostCommandOutput(ctx, ipCommand, "-4", "route", "replace", "table", strconv.Itoa(table), connectedCIDR, "dev", networkInterface, "scope", "link", "src", address.String()); routeErr != nil {
 		clearExportProxyRoute(ctx, networkInterface)
 		return "", fmt.Errorf("install protected connected route: %w: %s", routeErr, strings.TrimSpace(string(result)))
 	}
@@ -818,12 +824,12 @@ func configureExportProxyIPv4(ctx context.Context, ipCommand, networkInterface, 
 		defaultArgs = append(defaultArgs, "via", gateway.String())
 	}
 	defaultArgs = append(defaultArgs, "dev", networkInterface, "onlink")
-	if result, routeErr := exec.CommandContext(ctx, ipCommand, defaultArgs...).CombinedOutput(); routeErr != nil {
+	if result, routeErr := hostCommandOutput(ctx, ipCommand, defaultArgs...); routeErr != nil {
 		clearExportProxyRoute(ctx, networkInterface)
 		return "", fmt.Errorf("install protected default route: %w: %s", routeErr, strings.TrimSpace(string(result)))
 	}
 	markText := fmt.Sprintf("0x%x", mark)
-	result, err := exec.CommandContext(ctx, ipCommand, "rule", "add", "priority", strconv.Itoa(priority), "fwmark", markText, "lookup", strconv.Itoa(table)).CombinedOutput()
+	result, err := hostCommandOutput(ctx, ipCommand, "rule", "add", "priority", strconv.Itoa(priority), "fwmark", markText, "lookup", strconv.Itoa(table))
 	if err != nil {
 		clearExportProxyRoute(ctx, networkInterface)
 		return "", fmt.Errorf("install protected routing rule: %w: %s", err, strings.TrimSpace(string(result)))
@@ -835,6 +841,10 @@ func configureExportProxyIPv4(ctx context.Context, ipCommand, networkInterface, 
 	return fmt.Sprintf("protected IPv4 configuration %s/%d", address.String(), prefix), nil
 }
 
+// exportProxyDNSDir is the directory holding per-interface protected DNS
+// files. Tests point it at a temporary directory.
+var exportProxyDNSDir = "/run/vocat"
+
 func exportProxyDNSPath(networkInterface string) string {
 	safeName := strings.Map(func(character rune) rune {
 		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
@@ -843,7 +853,7 @@ func exportProxyDNSPath(networkInterface string) string {
 		}
 		return '_'
 	}, networkInterface)
-	return "/run/vocat/cellular-" + safeName + ".dns"
+	return filepath.Join(exportProxyDNSDir, "cellular-"+safeName+".dns")
 }
 
 func writeExportProxyDNS(networkInterface string, servers []string) error {
@@ -858,10 +868,10 @@ func writeExportProxyDNS(networkInterface string, servers []string) error {
 		// host resolver and is merely a fallback for carriers omitting DHCP DNS.
 		valid = []string{"1.1.1.1", "8.8.8.8"}
 	}
-	if err := os.MkdirAll("/run/vocat", 0o755); err != nil {
+	if err := os.MkdirAll(exportProxyDNSDir, 0o755); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp("/run/vocat", ".cellular-dns-*")
+	temporary, err := os.CreateTemp(exportProxyDNSDir, ".cellular-dns-*")
 	if err != nil {
 		return err
 	}
@@ -888,8 +898,8 @@ func clearExportProxyRoute(ctx context.Context, networkInterface string) {
 		return
 	}
 	mark, table, priority := exportProxyRouteIdentity(networkInterface)
-	_, _ = exec.CommandContext(ctx, ipCommand, "rule", "del", "priority", strconv.Itoa(priority), "fwmark", fmt.Sprintf("0x%x", mark), "lookup", strconv.Itoa(table)).CombinedOutput()
-	_, _ = exec.CommandContext(ctx, ipCommand, "-4", "route", "flush", "table", strconv.Itoa(table)).CombinedOutput()
+	_, _ = hostCommandOutput(ctx, ipCommand, "rule", "del", "priority", strconv.Itoa(priority), "fwmark", fmt.Sprintf("0x%x", mark), "lookup", strconv.Itoa(table))
+	_, _ = hostCommandOutput(ctx, ipCommand, "-4", "route", "flush", "table", strconv.Itoa(table))
 }
 
 const managerCommandCleanupTimeout = 15 * time.Second

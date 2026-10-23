@@ -59,6 +59,7 @@ type Manager struct {
 	qmiRadioOpener                qmiRadioSessionOpener
 	remoteprocObserver            func(string) (remoteproc.Observation, error)
 	qmiDataOpener                 qmiDataSessionOpener
+	atHostDataLink                atHostDataLink
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
 	nativeQMISIMRecoveryMu        sync.Mutex
@@ -135,6 +136,8 @@ type managedDevice struct {
 	dataSession          qmiDataSession
 	dataSessionHandle    uint32
 	dataSessionControl   string
+	atHostSession        atHostDataSession
+	dataBackend          string
 	dataEventCancel      context.CancelFunc
 	candidate            modem.Candidate
 	atProfile            modem.ATProfile
@@ -197,6 +200,7 @@ func NewManager(options Options) (*Manager, error) {
 
 		qmiRadioOpener:                openQMIRadioSession,
 		qmiDataOpener:                 openQMIDataSession,
+		atHostDataLink:                newATHostDataLink(),
 		nativeQMIRegistrationInFlight: make(map[string]struct{}),
 		networkEventSubscribers:       make(map[chan string]struct{}),
 		deviceEventSubscribers:        make(map[chan DeviceLifecycleEvent]struct{}),
@@ -253,7 +257,15 @@ func (manager *Manager) Stop(ctx context.Context) error {
 		state.opMu.Unlock()
 		state.dataMu.Lock()
 		invalidateQMINetworkSession(state, manager.candidateFor(state))
+		atSession := state.atHostSession
+		state.atHostSession = nil
+		state.dataBackend = ""
 		state.dataMu.Unlock()
+		if atSession != nil {
+			if err := atSession.Close(ctx); err != nil {
+				closeErrors = append(closeErrors, err)
+			}
+		}
 	}
 	return errors.Join(closeErrors...)
 }
@@ -1256,6 +1268,24 @@ func (manager *Manager) sensitiveCommand(
 	response, err := client.Execute(commandCtx, command)
 	if err != nil {
 		return response, errors.New("sensitive modem command failed")
+	}
+	return response, nil
+}
+
+// timedCommand executes an AT command with an explicit timeout. The data
+// backend uses it for attach/activate, whose vendor retry budgets exceed the
+// generic long timeout.
+func (manager *Manager) timedCommand(
+	ctx context.Context,
+	client modem.Client,
+	command string,
+	timeout time.Duration,
+) (modem.Response, error) {
+	commandCtx, cancel := manager.withTimeout(ctx, timeout)
+	defer cancel()
+	response, err := client.Execute(commandCtx, command)
+	if err != nil {
+		return response, fmt.Errorf("%s: %w", command, err)
 	}
 	return response, nil
 }
