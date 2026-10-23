@@ -250,6 +250,26 @@ func (manager *Manager) NetworkStatus(ctx context.Context, id string) (NetworkSt
 		return NetworkStatus{}, err
 	}
 	candidate := manager.candidateFor(state)
+
+	// The AT backend reports the live host lease (DHCP process, address and
+	// protected routes are applied together by the session). Both the periodic
+	// monitor and the HTTP status API share this path.
+	if state.dataBackend == "at" || state.atHostSession != nil {
+		status := NetworkStatus{Backend: "at", Interface: candidate.NetworkInterface}
+		session := state.atHostSession
+		if session == nil {
+			status.Detail = "no process-owned AT host data session"
+			return status, nil
+		}
+		connected, detail, sessionErr := session.Status(ctx)
+		if sessionErr != nil {
+			return status, fmt.Errorf("query AT host data session: %w", sessionErr)
+		}
+		status.Connected = connected
+		status.Detail = detail
+		return status, nil
+	}
+
 	status := NetworkStatus{Backend: "qmi", Interface: candidate.NetworkInterface}
 	if candidate.QMIControl == "" || candidate.NetworkInterface == "" {
 		return status, ErrDataBackendUnavailable

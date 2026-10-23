@@ -475,6 +475,22 @@ func (manager *Manager) closeATHostSession(ctx context.Context, state *managedDe
 	}
 }
 
+// invalidateNetworkSessions drops both the QMI and the AT host data session
+// state on radio-reset, profile-switch and device-disconnect paths. Callers
+// hold state.dataMu; the AT session close runs under the same lock so a reset
+// cannot race a live lease teardown. Session.Close never takes dataMu, so
+// holding it here cannot deadlock (the process stop is bounded internally).
+func invalidateNetworkSessions(state *managedDevice, candidate modem.Candidate) {
+	invalidateQMINetworkSession(state, candidate)
+	if state.atHostSession != nil {
+		_ = state.atHostSession.Close(context.Background())
+		state.atHostSession = nil
+	}
+	if state.dataBackend == "at" {
+		state.dataBackend = ""
+	}
+}
+
 // parsePDPContextActive reports whether a +CGACT? response marks cid active.
 func parsePDPContextActive(response modem.Response, cid int) bool {
 	for _, line := range response.Lines {
