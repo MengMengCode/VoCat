@@ -379,12 +379,15 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.writeUIPreferences(w, r)
 		return
 	}
-	if !s.requireAuthenticated(w, r) {
+	if _, present := bearerToken(r); present {
+		authenticated, ok := s.requireBearer(w, r)
+		if !ok {
+			return
+		}
+		r = authenticated
+	} else if !s.requireAuthenticated(w, r) {
 		return
-	}
-	if r.Method != http.MethodGet &&
-		r.Method != http.MethodHead &&
-		r.Method != http.MethodOptions {
+	} else if mutatingMethod(r.Method) {
 		sessionToken, ok := s.sessionToken(w, r)
 		if !ok {
 			return
