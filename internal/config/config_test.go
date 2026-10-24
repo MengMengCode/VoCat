@@ -114,8 +114,15 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 }
 
 func TestMCPEnabledEnvironmentOverride(t *testing.T) {
-	t.Setenv("VOCAT_MCP_ENABLED", "true")
 	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MCPEnabled {
+		t.Fatal("MCP is not enabled by default")
+	}
+	t.Setenv("VOCAT_MCP_ENABLED", "true")
+	cfg, err = Load()
 	if err != nil {
 		t.Fatal(err)
 	}

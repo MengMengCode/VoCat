@@ -51,7 +51,9 @@ func Default() Config {
 		SecureCookies:       false,
 		ShutdownTimeout:     10 * time.Second,
 		MaxRequestBodyBytes: 1 << 20,
-		MCPEnabled:          false,
+		// The MCP endpoint is authenticated by a bearer token and mounted
+		// by default; operators who do not want it set VOCAT_MCP_ENABLED=false.
+		MCPEnabled: true,
 	}
 }
 

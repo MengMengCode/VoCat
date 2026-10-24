@@ -176,8 +176,8 @@ same serial ports, and MCP clients speak Streamable HTTP natively — the
 `/mcp` endpoint serves both local and remote agents without a second
 process. The subcommand is dropped; the endpoint is the delivery.
 
-- `/mcp` is mounted on the existing listener only when `VOCAT_MCP_ENABLED`
-  (or the `mcp_enabled` config key) is set, default off. It requires a
+- `/mcp` is mounted on the existing listener by default; `VOCAT_MCP_ENABLED=false`
+  (or `mcp_enabled: false` in the config file) removes it. It requires a
   valid bearer token; a read-only token receives a server variant whose
   tool list omits the write tools entirely. `cmd/vocat` constructs both
   variants and passes them to `server.Options`, so neither package imports

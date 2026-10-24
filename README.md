@@ -257,7 +257,7 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 | `VOCAT_SECURE_COOKIES` | `false` | Marks session cookies as secure when HTTPS is used. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown timeout. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum API request body size. |
-| `VOCAT_MCP_ENABLED` | `false` | Mount the MCP endpoint at `/mcp` for AI agents. |
+| `VOCAT_MCP_ENABLED` | `true` | Serve the MCP endpoint at `/mcp` for AI agents. Set `false` to disable it. |
 | `VOCAT_REPO` | `MengMengCode/VoCat` | Trusted GitHub repository used by the self-updater, in `owner/name` form. |
 | `GITHUB_TOKEN` | empty | Optional GitHub token for private repositories or higher API limits. |
 
@@ -290,8 +290,8 @@ first `bootstrap-admin`. Remote bearer clients also need a network access
 policy that admits their source address; the default `internal` mode only
 serves private networks.
 
-With `VOCAT_MCP_ENABLED=true`, the same service exposes an MCP (Model
-Context Protocol) endpoint for AI agents at `http://<host>:7575/mcp` using
+By default (`VOCAT_MCP_ENABLED=false` to disable), the same service
+exposes an MCP (Model Context Protocol) endpoint for AI agents at `http://<host>:7575/mcp` using
 the Streamable HTTP transport and bearer-token authentication. Tools cover
 device status, SMS threads and guarded sending, eSIM profile listing and
 switching, and WiFi Calling status/reconnect; sensitive operations (raw AT,
