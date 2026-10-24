@@ -308,6 +308,12 @@ func (s *Server) smsSend(ctx context.Context, _ *mcp.CallToolRequest, input smsS
 	if _, err := s.options.Store.Device(ctx, input.DeviceID); err != nil {
 		return nil, smsSendOutput{}, fmt.Errorf("unknown device %q", input.DeviceID)
 	}
+	// Resolve the physical modem before reserving a send slot, matching the
+	// HTTP path: an offline device must not burn quota.
+	physicalID, err := s.resolvePhysical(ctx, input.DeviceID)
+	if err != nil {
+		return nil, smsSendOutput{}, err
+	}
 	limit := developer.SMSHourlyLimit(ctx, s.options.Store)
 	reservation, err := s.options.Store.ReserveSMSSend(ctx, input.DeviceID, limit, time.Now().UTC())
 	if err != nil {
@@ -318,10 +324,6 @@ func (s *Server) smsSend(ctx context.Context, _ *mcp.CallToolRequest, input smsS
 			"global hourly SMS limit reached (%d used of %d); retry after %s",
 			reservation.Used, reservation.Limit, reservation.ResetAt.Format(time.RFC3339),
 		)
-	}
-	physicalID, err := s.resolvePhysical(ctx, input.DeviceID)
-	if err != nil {
-		return nil, smsSendOutput{}, err
 	}
 	result, sendErr := s.options.Devices.SendSMS(ctx, physicalID, input.Phone, input.Message)
 	if sendErr != nil && result.PartsAttempted == 0 {

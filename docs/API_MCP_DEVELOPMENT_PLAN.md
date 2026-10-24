@@ -163,23 +163,25 @@ eSIM download/delete/rename, SIM PIN, flight mode, operator selection, cell
 lock, system update, USSD dialogs (stateful; poor agent fit for v1).
 Tool output never includes IMSI, PIN, or eSIM activation codes.
 
-## Step E — `vocat mcp` subcommand and `/mcp` endpoint
+## Step E — `/mcp` endpoint and the stdio decision
 
-**Files:** `cmd/vocat/main.go`, new `cmd/vocat/mcp.go`, `internal/server/server.go`
-(one mount), `internal/config/config.go`, tests.
+**Files:** `cmd/vocat/main.go`, `internal/server/server.go` + new
+`internal/server/mcp_mount.go`, `internal/config/config.go`, tests.
 
-- `vocat mcp` runs the MCP server on stdio with the same in-process wiring as
-  `serve` (device manager + vowifi runtime + store). If full device-manager
-  construction outside `run()` proves disproportionate, the fallback is a
-  loopback HTTP client against a running local server — decided by evidence
-  in this step, not preference.
+The plan originally proposed a `vocat mcp` stdio subcommand with a loopback
+fallback "decided by evidence in this step". The evidence decided against
+stdio: device leases are process-local, so a second Vocat process speaking
+stdio MCP on the same host would contend with the running service for the
+same serial ports, and MCP clients speak Streamable HTTP natively — the
+`/mcp` endpoint serves both local and remote agents without a second
+process. The subcommand is dropped; the endpoint is the delivery.
+
 - `/mcp` is mounted on the existing listener only when `VOCAT_MCP_ENABLED`
-  is set (default off). It requires a valid bearer token (Step B rules:
-  non-`read_only` needed to invoke write tools). `cmd/vocat` constructs the
-  MCP server and passes its handler to `server.Options` so neither package
-  imports the other.
-- Config: one new env var `VOCAT_MCP_ENABLED` (`false` default), documented
-  in the README table.
+  (or the `mcp_enabled` config key) is set, default off. It requires a
+  valid bearer token; a read-only token receives a server variant whose
+  tool list omits the write tools entirely. `cmd/vocat` constructs both
+  variants and passes them to `server.Options`, so neither package imports
+  the other's implementation.
 
 ## Testing
 
