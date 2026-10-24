@@ -1,0 +1,27 @@
+name: web
+
+on:
+  pull_request:
+    paths: ["web/**", ".github/workflows/web.yml"]
+  push:
+    branches: [master]
+    paths: ["web/**", ".github/workflows/web.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run build
