@@ -24,6 +24,7 @@ var (
 	ErrEmptyPassword       = errors.New("password cannot be empty")
 	ErrInvalidTokenName    = errors.New("invalid api token name")
 	ErrDuplicateTokenName  = errors.New("api token name already exists")
+	ErrUnknownToken        = errors.New("unknown api token")
 )
 
 // APITokenPrefix marks bearer credentials so they are identifiable in logs
@@ -381,15 +382,15 @@ func (s *Service) ListAPITokens(ctx context.Context) ([]store.APIToken, error) {
 func (s *Service) RevokeAPIToken(ctx context.Context, name string) error {
 	if err := s.store.DeleteAPIToken(ctx, name); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("auth: unknown api token: %s", name)
+			return fmt.Errorf("%w: %s", ErrUnknownToken, name)
 		}
 		return fmt.Errorf("auth: revoke api token: %w", err)
 	}
 	return nil
 }
 
-// validTokenName mirrors the device-ID rules so names stay safe for logs,
-// CLI arguments, and audit records.
+// validTokenName applies the same character rules as device IDs; callers trim
+// surrounding whitespace before calling.
 func validTokenName(name string) bool {
 	if len(name) < 1 || len(name) > 64 {
 		return false

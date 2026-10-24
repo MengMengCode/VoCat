@@ -106,17 +106,28 @@ func TestAPITokenExpiry(t *testing.T) {
 	); err != nil {
 		t.Fatalf("CreateAPIToken() error = %v", err)
 	}
+	// A token with future expiry authenticates while fresh.
+	fresh, err := service.CreateAPIToken(ctx, "still-valid", false, time.Hour)
+	if err != nil {
+		t.Fatalf("CreateAPIToken(fresh) error = %v", err)
+	}
+	if _, err := service.AuthenticateAPIToken(ctx, fresh.Token); err != nil {
+		t.Fatalf("AuthenticateAPIToken(fresh) error = %v", err)
+	}
 	if _, err := service.AuthenticateAPIToken(ctx, credential); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("AuthenticateAPIToken(expired) error = %v, want ErrUnauthorized", err)
 	}
 
-	// The expired token must be pruned from the inventory.
+	// The expired token must be pruned; the fresh one kept.
 	tokens, err := service.ListAPITokens(ctx)
 	if err != nil {
 		t.Fatalf("ListAPITokens() error = %v", err)
 	}
-	if len(tokens) != 0 {
-		t.Fatalf("ListAPITokens() = %+v, want pruned", tokens)
+	if len(tokens) != 1 || tokens[0].Name != "still-valid" {
+		t.Fatalf("ListAPITokens() = %+v, want only still-valid", tokens)
+	}
+	if err := service.RevokeAPIToken(ctx, "missing"); !errors.Is(err, ErrUnknownToken) {
+		t.Fatalf("RevokeAPIToken(unknown) error = %v, want ErrUnknownToken", err)
 	}
 }
 

@@ -98,10 +98,10 @@ func TestDeleteAPITokenAndExpired(t *testing.T) {
 	}
 	tokens, err := database.APITokens(ctx)
 	if err != nil {
-		t.Fatalf("Apitokens() error = %v", err)
+		t.Fatalf("APITokens() error = %v", err)
 	}
 	if len(tokens) != 1 || tokens[0].Name != "keeper" {
-		t.Fatalf("Apitokens() = %+v, want only keeper", tokens)
+		t.Fatalf("APITokens() = %+v, want only keeper", tokens)
 	}
 	if err := database.DeleteAPIToken(ctx, "keeper"); err != nil {
 		t.Fatalf("DeleteAPIToken() error = %v", err)
