@@ -197,6 +197,20 @@ export function getApiTokens() {
   return api<{ tokens: ApiTokenListItem[] }>("/settings/tokens");
 }
 
+export function createApiToken(request: {
+  name: string;
+  readOnly: boolean;
+  ttlHours: number;
+}) {
+  return api<{ token: string; name: string; readOnly: boolean; expiresAt: string }>(
+    "/settings/tokens",
+    {
+      method: "POST",
+      body: { name: request.name, readOnly: request.readOnly, ttlHours: request.ttlHours },
+    },
+  );
+}
+
 export function revokeApiToken(name: string) {
   return api<{ revoked: boolean }>(`/settings/tokens/${encodeURIComponent(name)}`, { method: "DELETE" });
 }

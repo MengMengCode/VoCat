@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"vocat/internal/auth"
 	"vocat/internal/store"
 )
 
@@ -158,5 +159,151 @@ func TestAPITokenInventoryViaWebSession(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("session DELETE status = %d (%s)", response.StatusCode, apiErrorCode(t, response))
+	}
+}
+
+func TestAPITokenCreationFromWebSessionOnly(t *testing.T) {
+	app, authService, database := newBearerTestApplication(t)
+	write, err := authService.CreateAPIToken(context.Background(), "writer", false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := authService.CreateAPIToken(context.Background(), "reader", true, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A read-only bearer is stopped by the method gate first.
+	request, err := http.NewRequest(http.MethodPost, app.server.URL+"/api/settings/tokens",
+		bytes.NewBufferString(`{"name":"nope"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+readOnly.Token)
+	response, err := app.server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roCode := apiErrorCode(t, response)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || roCode != "token_read_only" {
+		t.Fatalf("POST with read-only bearer = %d (%s), want 403 token_read_only", response.StatusCode, roCode)
+	}
+
+	// A bearer credential — even a write one — must not mint tokens.
+	request, err = http.NewRequest(http.MethodPost, app.server.URL+"/api/settings/tokens",
+		bytes.NewBufferString(`{"name":"self-perpetuating"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+write.Token)
+	response, err = app.server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := apiErrorCode(t, response)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || code != "session_required" {
+		t.Fatalf("POST with bearer = %d (%s), want 403 session_required", response.StatusCode, code)
+	}
+
+	// The web session creates a token and sees the raw value exactly once.
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.client = &http.Client{Jar: jar}
+	loginBody := bytes.NewBufferString(`{"username":"admin","password":"correct-password"}`)
+	response, err = app.client.Post(app.server.URL+"/api/auth/login", "application/json", loginBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var login struct {
+		Data struct {
+			CSRFToken string `json:"csrf_token"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&login); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+
+	request, err = http.NewRequest(http.MethodPost, app.server.URL+"/api/settings/tokens",
+		bytes.NewBufferString(`{"name":"web-made","read_only":true,"ttl_hours":24}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", login.Data.CSRFToken)
+	response, err = app.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("POST status = %d (%s), want 201", response.StatusCode, apiErrorCode(t, response))
+	}
+	var created struct {
+		Data struct {
+			Token     string `json:"token"`
+			Name      string `json:"name"`
+			ReadOnly  bool   `json:"read_only"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(created.Data.Token, auth.APITokenPrefix) ||
+		created.Data.Name != "web-made" || !created.Data.ReadOnly || created.Data.ExpiresAt == "" {
+		t.Fatalf("created payload = %+v", created.Data)
+	}
+	if _, err := authService.AuthenticateAPIToken(context.Background(), created.Data.Token); err != nil {
+		t.Fatalf("web-created token does not authenticate: %v", err)
+	}
+
+	// Validation paths.
+	for _, test := range []struct {
+		body   string
+		status int
+		code   string
+	}{
+		{`{"name":"web-made"}`, http.StatusConflict, "duplicate_token_name"},
+		{`{"name":"bad name"}`, http.StatusBadRequest, "invalid_token_name"},
+		{`{"name":"negative","ttl_hours":-1}`, http.StatusBadRequest, "invalid_ttl"},
+	} {
+		request, err = http.NewRequest(http.MethodPost, app.server.URL+"/api/settings/tokens",
+			bytes.NewBufferString(test.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-CSRF-Token", login.Data.CSRFToken)
+		response, err = app.client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := apiErrorCode(t, response)
+		_ = response.Body.Close()
+		if response.StatusCode != test.status || code != test.code {
+			t.Fatalf("POST %s = %d (%s), want %d (%s)", test.body, response.StatusCode, code, test.status, test.code)
+		}
+	}
+
+	// The creation is audited as the administrator.
+	events, err := database.ListAuditEvents(context.Background(), store.AuditFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Action == "settings.tokens.create" && event.EntityID == "web-made" && event.Actor == "admin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("create audit row missing: %+v", events)
 	}
 }

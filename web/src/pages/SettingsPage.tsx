@@ -555,6 +555,7 @@ export default function SettingsPage() {
           loading={loadingTokens}
           revoking={revokingToken}
           onRevoke={(name) => void onRevokeApiToken(name)}
+          onRefresh={() => void fetchApiTokens()}
         />
         <VoWiFiMTUCard />
         <SMSAutoClearCard
