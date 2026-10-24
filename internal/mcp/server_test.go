@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"vocat/internal/device"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
@@ -401,5 +403,54 @@ func TestVowifiToolsRedactIMSIAndAudit(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no mcp.vowifi.reconnect audit event: %+v", events)
+	}
+}
+
+func TestReadOnlyServerOmitsWriteTools(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	readOnly, err := New(Options{
+		Store:    database,
+		Devices:  &fakeDevices{},
+		VoWiFi:   &fakeVoWiFi{},
+		ReadOnly: true,
+		Version:  "test",
+	})
+	if err != nil {
+		t.Fatalf("New(read-only) error = %v", err)
+	}
+
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	runContext, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	go func() { _ = readOnly.sdk.Run(runContext, serverTransport) }()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect error = %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	result, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	names := map[string]bool{}
+	for _, tool := range result.Tools {
+		names[tool.Name] = true
+	}
+	for _, writeTool := range []string{"sms_send", "esim_switch_profile", "vowifi_reconnect"} {
+		if names[writeTool] {
+			t.Fatalf("read-only server exposes write tool %s: %v", writeTool, names)
+		}
+	}
+	for _, readTool := range []string{"list_devices", "device_overview", "sms_list_threads", "sms_read_thread", "esim_list_profiles", "vowifi_status"} {
+		if !names[readTool] {
+			t.Fatalf("read-only server missing read tool %s: %v", readTool, names)
+		}
 	}
 }

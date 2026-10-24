@@ -1,0 +1,49 @@
+package server
+
+import (
+	"net/http"
+
+	"vocat/internal/auth"
+)
+
+// MCPHandlers carries the two MCP server variants mounted at /mcp. The
+// read-write server exposes every tool; the read-only server omits the
+// write tools entirely so a read-only agent cannot even list them.
+type MCPHandlers struct {
+	ReadWrite http.Handler
+	ReadOnly  http.Handler
+}
+
+// handleMCP serves the MCP Streamable HTTP endpoint. Bearer authentication
+// is required: the endpoint is mounted only when MCP is explicitly enabled,
+// and the token's read_only flag selects which tool surface the session
+// receives. The existing access-control middleware wraps this route like
+// every other, so remote clients still need an admitting mode.
+func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	if s.mcp == nil || s.mcp.ReadWrite == nil || s.mcp.ReadOnly == nil {
+		writeError(w, http.StatusNotFound, "not_found", "MCP is not enabled")
+		return
+	}
+	token, present := bearerToken(r)
+	if !present {
+		w.Header().Set("Cache-Control", "no-store")
+		writeError(w, http.StatusUnauthorized, "unauthorized", "MCP requires a bearer api token")
+		return
+	}
+	principal, err := s.auth.AuthenticateAPIToken(r.Context(), token)
+	if err != nil {
+		s.logger.Warn("mcp token rejected", "error", err)
+		if len(token) >= len(auth.APITokenPrefix) && token[:len(auth.APITokenPrefix)] == auth.APITokenPrefix {
+			s.recordAudit(r.Context(), "", "auth.token", "api_token", "", "failure", requestRemoteHost(r))
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writeError(w, http.StatusUnauthorized, "invalid_token", "invalid or expired api token")
+		return
+	}
+	handler := s.mcp.ReadWrite
+	if principal.ReadOnly {
+		handler = s.mcp.ReadOnly
+	}
+	handler.ServeHTTP(w, r)
+
+}

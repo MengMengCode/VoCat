@@ -44,6 +44,10 @@ type Options struct {
 	VoWiFi  VoWiFiController
 	Logger  *slog.Logger
 	Version string
+	// ReadOnly registers only the read tools. The HTTP mount builds one
+	// read-write and one read-only server and picks per bearer token, so a
+	// read-only agent never even sees the write tools in its tool list.
+	ReadOnly bool
 }
 
 // Server wraps an MCP SDK server bound to the Vocat service seams.

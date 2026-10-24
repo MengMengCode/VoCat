@@ -18,7 +18,8 @@ import (
 // registerTools exposes the tool surface. The set is deliberately
 // read-heavy: one write tool per domain, no raw AT, no eSIM download or
 // delete, no SIM PIN, no network selection — mirroring the Telegram bot's
-// boundary for automated consumers.
+// boundary for automated consumers. A ReadOnly server registers only the
+// read tools.
 func (s *Server) registerTools() {
 	mcp.AddTool(s.sdk, &mcp.Tool{
 		Name:        "list_devices",
@@ -37,21 +38,24 @@ func (s *Server) registerTools() {
 		Description: "Read the messages of one SMS conversation in chronological order.",
 	}, s.smsReadThread)
 	mcp.AddTool(s.sdk, &mcp.Tool{
-		Name:        "sms_send",
-		Description: "Send an SMS over the cellular AT path. Barred destinations are rejected and the global hourly send limit applies. Messages sent here are not yet written to the web conversation history.",
-	}, s.smsSend)
-	mcp.AddTool(s.sdk, &mcp.Tool{
 		Name:        "esim_list_profiles",
 		Description: "List the eSIM profiles installed on a device's eUICC with enable state.",
 	}, s.esimListProfiles)
 	mcp.AddTool(s.sdk, &mcp.Tool{
-		Name:        "esim_switch_profile",
-		Description: "Enable a different eSIM profile by ICCID, disabling the currently active one.",
-	}, s.esimSwitchProfile)
-	mcp.AddTool(s.sdk, &mcp.Tool{
 		Name:        "vowifi_status",
 		Description: "Read the WiFi Calling (IKEv2/ePDG/IMS) runtime state for a device.",
 	}, s.vowifiStatus)
+	if s.options.ReadOnly {
+		return
+	}
+	mcp.AddTool(s.sdk, &mcp.Tool{
+		Name:        "sms_send",
+		Description: "Send an SMS over the cellular AT path. Barred destinations are rejected and the global hourly send limit applies. Messages sent here are not yet written to the web conversation history.",
+	}, s.smsSend)
+	mcp.AddTool(s.sdk, &mcp.Tool{
+		Name:        "esim_switch_profile",
+		Description: "Enable a different eSIM profile by ICCID, disabling the currently active one.",
+	}, s.esimSwitchProfile)
 	mcp.AddTool(s.sdk, &mcp.Tool{
 		Name:        "vowifi_reconnect",
 		Description: "Request a WiFi Calling reconnect. The tunnel re-establishes asynchronously; poll vowifi_status for the result.",

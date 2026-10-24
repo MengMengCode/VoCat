@@ -22,6 +22,7 @@ import (
 	"golang.org/x/term"
 
 	"vocat/internal/auth"
+	"vocat/internal/buildinfo"
 	"vocat/internal/config"
 	"vocat/internal/developer"
 	"vocat/internal/device"
@@ -29,6 +30,7 @@ import (
 	"vocat/internal/extensions"
 	"vocat/internal/httpsmode"
 	"vocat/internal/loghub"
+	"vocat/internal/mcp"
 	"vocat/internal/modem"
 	"vocat/internal/pcsc"
 	"vocat/internal/server"
@@ -585,6 +587,39 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		}
 	}()
 
+	// MCP is opt-in: the endpoint stays unmounted unless VOCAT_MCP_ENABLED
+	// (or the config file) turns it on. Read-only tokens receive a server
+	// variant whose tool list omits the write tools entirely.
+	var mcpHandlers *server.MCPHandlers
+	if cfg.MCPEnabled {
+		readWrite, mcpErr := mcp.New(mcp.Options{
+			Store:   database,
+			Devices: deviceManager,
+			VoWiFi:  vowifiManager,
+			Logger:  logger,
+			Version: buildinfo.Version,
+		})
+		if mcpErr != nil {
+			return fmt.Errorf("create MCP server: %w", mcpErr)
+		}
+		readOnly, mcpErr := mcp.New(mcp.Options{
+			Store:    database,
+			Devices:  deviceManager,
+			VoWiFi:   vowifiManager,
+			Logger:   logger,
+			Version:  buildinfo.Version,
+			ReadOnly: true,
+		})
+		if mcpErr != nil {
+			return fmt.Errorf("create read-only MCP server: %w", mcpErr)
+		}
+		mcpHandlers = &server.MCPHandlers{
+			ReadWrite: readWrite.Handler(),
+			ReadOnly:  readOnly.Handler(),
+		}
+		logger.Info("MCP endpoint enabled at /mcp", "requires", "bearer api token")
+	}
+
 	handler, err := server.New(server.Options{
 		Store:               database,
 		Auth:                authService,
@@ -601,6 +636,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		UpdateRepository:    strings.TrimSpace(os.Getenv("VOCAT_REPO")),
 		UpdateToken:         strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
 		HTTPS:               httpsManager,
+		MCP:                 mcpHandlers,
 	})
 	if err != nil {
 		return err

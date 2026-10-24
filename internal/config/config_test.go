@@ -112,3 +112,26 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 		t.Fatal("Load() unexpectedly accepted invalid duration")
 	}
 }
+
+func TestMCPEnabledEnvironmentOverride(t *testing.T) {
+	t.Setenv("VOCAT_MCP_ENABLED", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MCPEnabled {
+		t.Fatal("VOCAT_MCP_ENABLED=true did not enable MCP")
+	}
+	t.Setenv("VOCAT_MCP_ENABLED", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPEnabled {
+		t.Fatal("VOCAT_MCP_ENABLED=false did not disable MCP")
+	}
+	t.Setenv("VOCAT_MCP_ENABLED", "maybe")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid VOCAT_MCP_ENABLED accepted")
+	}
+}
