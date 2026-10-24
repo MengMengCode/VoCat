@@ -223,26 +223,6 @@ func (s *Server) smsStoreFilter(ctx context.Context, deviceID, requestedIMEI str
 	return filter
 }
 
-// blockedSMSDestination reports whether the recipient is in a barred country.
-// Normalization mirrors the PDU/IMS paths so the block cannot be sidestepped by
-// dropping the leading "+" or using a 00 international prefix.
-func blockedSMSDestination(phone string) (bool, string) {
-	var digits strings.Builder
-	for _, c := range strings.TrimSpace(phone) {
-		if c >= '0' && c <= '9' {
-			digits.WriteRune(c)
-		}
-	}
-	d := digits.String()
-	if strings.HasPrefix(d, "00") {
-		d = d[2:]
-	}
-	if strings.HasPrefix(d, "86") {
-		return true, "SMS to +86 (China) destinations is not allowed"
-	}
-	return false, ""
-}
-
 func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -265,7 +245,7 @@ func (s *Server) handleSMSSend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "device_required", "a sending device is required")
 		return
 	}
-	if blocked, reason := blockedSMSDestination(request.Phone); blocked {
+	if blocked, reason := device.BlockedSMSDestination(request.Phone); blocked {
 		writeError(w, http.StatusBadRequest, "blocked_destination", reason)
 		return
 	}

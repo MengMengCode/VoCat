@@ -134,14 +134,25 @@ func (mapper ATMapper) ReadSIMMetadata(ctx context.Context, configuredID string)
 	}, nil
 }
 
-func (mapper ATMapper) resolve(
+// DeviceLister is the read side ResolvePhysicalID needs.
+type DeviceLister interface {
+	List() []device.Device
+}
+
+// ResolvePhysicalID maps a configured device ID to the live physical device
+// ID using the same scored matching as the AT paths. Transports beyond the
+// HTTP API (for example the MCP tool surface) resolve device addresses
+// through this so every consumer picks the same modem.
+func ResolvePhysicalID(
 	ctx context.Context,
+	database *store.Store,
+	devices DeviceLister,
 	configuredID string,
 ) (string, error) {
-	if mapper.Store == nil || mapper.Devices == nil {
-		return "", errors.New("vowifi AT mapper is not configured")
+	if database == nil || devices == nil {
+		return "", errors.New("physical device resolver is not configured")
 	}
-	config, err := mapper.Store.Device(ctx, configuredID)
+	config, err := database.Device(ctx, configuredID)
 	if err != nil {
 		return "", err
 	}
@@ -152,7 +163,7 @@ func (mapper ATMapper) resolve(
 	// two logical devices issuing APDUs to the same SIM.
 	bestID := ""
 	bestScore := 0
-	for _, entry := range mapper.Devices.List() {
+	for _, entry := range devices.List() {
 		if !entry.Discovered {
 			continue
 		}
@@ -166,6 +177,13 @@ func (mapper ATMapper) resolve(
 		return bestID, nil
 	}
 	return "", device.ErrNotFound
+}
+
+func (mapper ATMapper) resolve(
+	ctx context.Context,
+	configuredID string,
+) (string, error) {
+	return ResolvePhysicalID(ctx, mapper.Store, mapper.Devices, configuredID)
 }
 
 func physicalMatchScore(configuredID string, config store.Device, entry device.Device) int {
