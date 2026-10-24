@@ -98,6 +98,7 @@ export default function SettingsPage() {
   const [savingDeveloper, setSavingDeveloper] = useState(false);
   const [savingSMSLimit, setSavingSMSLimit] = useState(false);
   const [apiTokens, setApiTokens] = useState<ApiTokenListItem[]>([]);
+  const [tokensError, setTokensError] = useState(false);
   const [loadingTokens, setLoadingTokens] = useState(false);
   const [revokingToken, setRevokingToken] = useState<string | null>(null);
   const [smsAutoClear, setSMSAutoClear] = useState(true);
@@ -138,11 +139,14 @@ export default function SettingsPage() {
 
   const fetchApiTokens = useCallback(async () => {
     setLoadingTokens(true);
+    setTokensError(false);
     try {
       const data = await getApiTokens();
       setApiTokens(data.tokens ?? []);
     } catch {
-      message.error(t("API 令牌列表加载失败"));
+      // Distinguish "could not load" from "none exist"; the card renders
+      // an error box with a retry instead of the empty-list hint.
+      setTokensError(true);
     } finally {
       setLoadingTokens(false);
     }
@@ -553,6 +557,7 @@ export default function SettingsPage() {
         <ApiTokensCard
           tokens={apiTokens}
           loading={loadingTokens}
+          error={tokensError}
           revoking={revokingToken}
           onRevoke={(name) => void onRevokeApiToken(name)}
           onRefresh={() => void fetchApiTokens()}

@@ -42,6 +42,9 @@ func runTokenCreate(args []string, stdout io.Writer) error {
 		return errors.New("usage: vocat token create [--database path] [--read-only] [--ttl 720h] <name>")
 	}
 	name := strings.TrimSpace(flags.Arg(0))
+	if *ttl < 0 {
+		return errors.New("--ttl must be zero (never expires) or a positive duration")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	database, service, err := openTokenService(ctx, *databasePath)
@@ -54,6 +57,11 @@ func runTokenCreate(args []string, stdout io.Writer) error {
 		return err
 	}
 	if err := appendTokenAudit(ctx, database, "auth.token.create", credentials.Name); err != nil {
+		// The credential was never shown; without cleanup the name would be
+		// stuck behind a token nobody can use.
+		if revokeErr := service.RevokeAPIToken(ctx, credentials.Name); revokeErr != nil {
+			return fmt.Errorf("%w (also failed to roll back the stored token: %v)", err, revokeErr)
+		}
 		return err
 	}
 	expiry := "never"

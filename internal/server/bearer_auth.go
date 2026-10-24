@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -46,14 +47,22 @@ func (s *Server) requireBearer(w http.ResponseWriter, r *http.Request) (*http.Re
 	token, _ := bearerToken(r)
 	principal, err := s.auth.AuthenticateAPIToken(r.Context(), token)
 	if err != nil {
-		s.logger.Warn("api token rejected", "error", err)
-		// Junk probes stay in the log; only well-formed vcat_ tokens reach
-		// the audit trail.
-		if wellFormedTokenPrefix(token) {
-			s.recordAudit(r.Context(), "", "auth.token", "api_token", "", "failure", requestRemoteHost(r))
+		if errors.Is(err, auth.ErrUnauthorized) {
+			s.logger.Warn("api token rejected", "error", err)
+			// Junk probes stay in the log; only well-formed vcat_ tokens reach
+			// the audit trail.
+			if wellFormedTokenPrefix(token) {
+				s.recordAudit(r.Context(), "", "auth.token", "api_token", "", "failure", requestRemoteHost(r))
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeError(w, http.StatusUnauthorized, "invalid_token", "invalid or expired api token")
+			return r, false
 		}
+		// A store failure is not the client's fault: tell it the server
+		// failed instead of training it to discard a valid credential.
+		s.logger.Error("api token authentication failed", "error", err)
 		w.Header().Set("Cache-Control", "no-store")
-		writeError(w, http.StatusUnauthorized, "invalid_token", "invalid or expired api token")
+		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 		return r, false
 	}
 	if principal.ReadOnly && mutatingMethod(r.Method) {

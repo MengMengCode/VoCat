@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -18,13 +19,13 @@ import (
 )
 
 var (
-	ErrInvalidCredentials  = errors.New("invalid credentials")
-	ErrUnauthorized        = errors.New("unauthorized")
-	ErrInvalidCSRF         = errors.New("invalid csrf token")
-	ErrEmptyPassword       = errors.New("password cannot be empty")
-	ErrInvalidTokenName    = errors.New("invalid api token name")
-	ErrDuplicateTokenName  = errors.New("api token name already exists")
-	ErrUnknownToken        = errors.New("unknown api token")
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrUnauthorized       = errors.New("unauthorized")
+	ErrInvalidCSRF        = errors.New("invalid csrf token")
+	ErrEmptyPassword      = errors.New("password cannot be empty")
+	ErrInvalidTokenName   = errors.New("invalid api token name")
+	ErrDuplicateTokenName = errors.New("api token name already exists")
+	ErrUnknownToken       = errors.New("unknown api token")
 )
 
 // APITokenPrefix marks bearer credentials so they are identifiable in logs
@@ -344,16 +345,18 @@ func (s *Service) CreateAPIToken(
 	}, nil
 }
 
-// AuthenticateAPIToken validates a presented bearer credential, prunes
-// expired tokens, and records usage.
+// AuthenticateAPIToken validates a presented bearer credential. Opportunistic
+// cleanup and usage bookkeeping never reject an otherwise valid credential:
+// a transient store hiccup must not read as "invalid token" to the client.
 func (s *Service) AuthenticateAPIToken(ctx context.Context, token string) (APITokenPrincipal, error) {
 	if !strings.HasPrefix(token, APITokenPrefix) {
 		return APITokenPrincipal{}, ErrUnauthorized
 	}
+	digest := hashToken(token)
 	if err := s.store.DeleteExpiredAPITokens(ctx, time.Now()); err != nil {
-		return APITokenPrincipal{}, fmt.Errorf("auth: prune api tokens: %w", err)
+		slog.Warn("prune expired api tokens failed", "error", err)
 	}
-	stored, err := s.store.APITokenByHash(ctx, hashToken(token))
+	stored, err := s.store.APITokenByHash(ctx, digest)
 	if errors.Is(err, store.ErrNotFound) {
 		return APITokenPrincipal{}, ErrUnauthorized
 	}
@@ -363,8 +366,8 @@ func (s *Service) AuthenticateAPIToken(ctx context.Context, token string) (APITo
 	if !stored.ExpiresAt.IsZero() && !stored.ExpiresAt.After(time.Now().UTC()) {
 		return APITokenPrincipal{}, ErrUnauthorized
 	}
-	if err := s.store.TouchAPIToken(ctx, hashToken(token), apiTokenTouchInterval); err != nil {
-		return APITokenPrincipal{}, fmt.Errorf("auth: touch api token: %w", err)
+	if err := s.store.TouchAPIToken(ctx, digest, apiTokenTouchInterval); err != nil {
+		slog.Warn("touch api token failed", "error", err)
 	}
 	return APITokenPrincipal{Name: stored.Name, ReadOnly: stored.ReadOnly}, nil
 }

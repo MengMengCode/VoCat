@@ -37,6 +37,7 @@ type fakeDevices struct {
 	entries  []device.Device
 	esimInfo device.EsimInfo
 	switches []recordedSwitch
+	partial  bool
 }
 
 func (f *fakeDevices) List() []device.Device { return f.entries }
@@ -59,6 +60,20 @@ func (f *fakeDevices) Refresh(_ context.Context, id string) (device.Snapshot, er
 }
 
 func (f *fakeDevices) SendSMS(_ context.Context, physicalID, phone, message string) (device.SMSSendResult, error) {
+	if f.partial {
+		// Second part lost in flight: the submission half-landed and the
+		// modem reported an error afterwards.
+		return device.SMSSendResult{
+			To:               phone,
+			SubmissionStatus: "partial",
+			SubmittedAt:      time.Now().UTC(),
+			PartsTotal:       2,
+			PartsAttempted:   2,
+			PartsAccepted:    1,
+			AllPartsAccepted: false,
+			Encoding:         device.SMSEncoding("ucs2"),
+		}, errors.New("second part timed out")
+	}
 	return device.SMSSendResult{
 		To:               phone,
 		SubmissionStatus: "submitted",
@@ -491,5 +506,30 @@ func TestSMSSendOfflineDeviceDoesNotBurnQuota(t *testing.T) {
 		t.Fatalf("send after offline failure error = %v, want success", err)
 	} else if !output.AllPartsAccepted {
 		t.Fatalf("output = %+v", output)
+	}
+}
+
+func TestSMSSendReportsPartialSubmission(t *testing.T) {
+	ctx := context.Background()
+	server, database := newTestServer(t, &fakeDevices{entries: []device.Device{onlineEntry()}, partial: true}, nil)
+	if err := database.UpsertAppSetting(ctx, store.AppSetting{
+		Key:   "developer.sms_hourly_limit",
+		Value: json.RawMessage(`{"limit":5}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, output, err := server.smsSend(ctx, nil, smsSendInput{
+		DeviceID: configuredID,
+		Phone:    "+15557654321",
+		Message:  "long message that splits",
+	})
+	if err != nil {
+		t.Fatalf("partial send error = %v, want a result the agent can inspect", err)
+	}
+	if output.Status != "partial_or_unconfirmed" || output.Warning == "" {
+		t.Fatalf("output = %+v, want partial status with warning", output)
+	}
+	if output.PartsAttempted != 2 || output.PartsAccepted != 1 {
+		t.Fatalf("parts = %d/%d, want 1 of 2", output.PartsAccepted, output.PartsAttempted)
 	}
 }

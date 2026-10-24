@@ -18,6 +18,7 @@ var configEnvironment = []string{
 	"VOCAT_SECURE_COOKIES",
 	"VOCAT_SHUTDOWN_TIMEOUT",
 	"VOCAT_MAX_REQUEST_BODY_BYTES",
+	"VOCAT_MCP_ENABLED",
 }
 
 func clearConfigEnvironment(t *testing.T) {
@@ -114,6 +115,7 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 }
 
 func TestMCPEnabledEnvironmentOverride(t *testing.T) {
+	clearConfigEnvironment(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)

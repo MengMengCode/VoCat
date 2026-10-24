@@ -43,12 +43,14 @@ function formatTime(value: string, never: string): string {
 export function ApiTokensCard({
   tokens,
   loading,
+  error,
   revoking,
   onRevoke,
   onRefresh,
 }: {
   tokens: ApiTokenListItem[];
   loading: boolean;
+  error: boolean;
   revoking: string | null;
   onRevoke: (name: string) => void;
   onRefresh: () => void;
@@ -123,6 +125,13 @@ export function ApiTokensCard({
 
       {loading ? (
         <div className="text-sm text-gray-500">{t("加载中...")}</div>
+      ) : error ? (
+        <div className="flex items-center justify-between rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-300">
+          <span>{t("令牌列表加载失败")}</span>
+          <Button variant="default" onClick={onRefresh}>
+            {t("重试")}
+          </Button>
+        </div>
       ) : tokens.length === 0 ? (
         <div className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-700">
           {t("尚未创建任何 API 令牌。点击右上角「创建令牌」，或在设备上运行 vocat token create。")}
@@ -241,6 +250,7 @@ export function ApiTokensCard({
             </div>
             <Switch
               checked={form.readOnly}
+              ariaLabel={t("只读令牌")}
               onChange={(checked) => setForm((prev) => ({ ...prev, readOnly: checked }))}
             />
           </div>

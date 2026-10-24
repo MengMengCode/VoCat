@@ -37,6 +37,7 @@ export const EN_DICT: Record<string, string> = {
   "复制": "Copy",
   "名称：{name} · {scope} · {expires}": "Name: {name} · {scope} · {expires}",
   "API 令牌列表加载失败": "Failed to load the API token list",
+  "令牌列表加载失败": "Failed to load the token list",
   "确定吊销令牌「{name}」？使用它的脚本与 MCP 客户端将立即失去访问权限。": "Revoke token \"{name}\"? Scripts and MCP clients using it lose access immediately.",
   "令牌 {name} 已吊销": "Token {name} revoked",
   "短信解析失败": "SMS decoding failed",

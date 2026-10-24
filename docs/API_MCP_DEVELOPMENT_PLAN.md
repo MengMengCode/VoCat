@@ -19,11 +19,15 @@ tokens, and an MCP (Model Context Protocol) server for AI agents.
   the existing, already-consistent `/api/...` surface. Versioning is worth it
   only when a second consumer demands stability guarantees.
 - No per-token scopes beyond a single `read_only` flag, no per-token rate
-  limits, no token management UI. All can be added later without schema
-  changes that matter.
+  limits. Both can be added later without schema changes that matter.
 - No multi-user accounts. Vocat has one administrator; tokens act with
   administrator privileges, constrained only by `read_only`.
-- No new web UI. Tokens are created and revoked from the CLI.
+- (Superseded during development) The plan originally kept token management
+  CLI-only with no web UI. A settings-page card — list, create with a
+  one-time reveal, revoke — landed later because day-to-day operation from
+  the browser is what the deployment actually needed; the CLI remains the
+  automation path and the only way a bearer credential itself can never mint
+  another credential.
 
 ## Design principles
 
@@ -51,8 +55,8 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     token_hash BLOB NOT NULL UNIQUE,
-    read_only INTEGER NOT NULL DEFAULT 0,
-    expires_at INTEGER NOT NULL,          -- unix seconds; 0 = never
+    read_only INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),
+    expires_at INTEGER NOT NULL DEFAULT 0, -- unix seconds; 0 = never
     created_at INTEGER NOT NULL,
     last_used_at INTEGER NOT NULL DEFAULT 0
 )

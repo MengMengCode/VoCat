@@ -289,6 +289,7 @@ type smsSendOutput struct {
 	PartsAccepted    int    `json:"parts_accepted"`
 	AllPartsAccepted bool   `json:"all_parts_accepted"`
 	SubmissionStatus string `json:"submission_status,omitempty"`
+	Warning          string `json:"warning,omitempty"`
 }
 
 func (s *Server) smsSend(ctx context.Context, _ *mcp.CallToolRequest, input smsSendInput) (*mcp.CallToolResult, smsSendOutput, error) {
@@ -329,13 +330,27 @@ func (s *Server) smsSend(ctx context.Context, _ *mcp.CallToolRequest, input smsS
 	if sendErr != nil && result.PartsAttempted == 0 {
 		return nil, smsSendOutput{}, fmt.Errorf("send failed: %w", sendErr)
 	}
+	status := "submitted"
+	warning := ""
+	// Partial submissions leave parts in flight; a retry of the whole
+	// message would duplicate them, so the agent must be told explicitly.
+	if sendErr != nil || !result.AllPartsAccepted {
+		status = "partial_or_unconfirmed"
+		warning = "some parts may not have been accepted; do not resend the whole message"
+		s.options.Logger.Warn("mcp sms send not fully confirmed",
+			"device_id", input.DeviceID,
+			"parts_attempted", result.PartsAttempted,
+			"parts_accepted", result.PartsAccepted,
+			"error", sendErr)
+	}
 	s.audit(ctx, "mcp.sms.send", input.DeviceID)
 	return nil, smsSendOutput{
-		Status:           "submitted",
+		Status:           status,
 		PartsAttempted:   result.PartsAttempted,
 		PartsAccepted:    result.PartsAccepted,
 		AllPartsAccepted: result.AllPartsAccepted,
 		SubmissionStatus: result.SubmissionStatus,
+		Warning:          warning,
 	}, nil
 }
 

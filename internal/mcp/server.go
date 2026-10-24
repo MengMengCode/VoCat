@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -82,7 +83,15 @@ func New(options Options) (*Server, error) {
 // are responsible for authentication; Vocat mounts it behind bearer-token
 // authentication on the existing listener.
 func (s *Server) Handler() http.Handler {
-	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.sdk }, nil)
+	const responseDeadline = 3 * time.Minute
+	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.sdk }, nil)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The shared listener caps writes at 30s; eSIM operations can run
+		// for minutes, and a cut-off response after a completed switch
+		// invites the agent to repeat the operation.
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(responseDeadline))
+		streamable.ServeHTTP(w, r)
+	})
 }
 
 // resolvePhysical maps a configured device ID to the live modem using the

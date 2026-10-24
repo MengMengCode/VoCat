@@ -112,6 +112,13 @@ func TestTokenValidationAndUsage(t *testing.T) {
 	if err := runToken([]string{"create", "--database", filepath.Join(t.TempDir(), "ok.db"), "--ttl", "not-a-duration", "name"}, &stdout); err == nil {
 		t.Fatal("invalid ttl accepted")
 	}
+	// Negative durations are rejected outright; only zero means never.
+	if err := runToken([]string{"create", "--database", filepath.Join(t.TempDir(), "ok.db"), "--ttl", "-1h", "name"}, &stdout); err == nil {
+		t.Fatal("negative ttl accepted")
+	}
+	if err := runToken([]string{"create", "--database", filepath.Join(t.TempDir(), "ok.db"), "--ttl", "0", "zero-is-never"}, &stdout); err != nil {
+		t.Fatalf("zero ttl rejected: %v", err)
+	}
 }
 
 func TestTokenCreateBeforeBootstrapWarningPath(t *testing.T) {
