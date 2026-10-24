@@ -355,6 +355,11 @@ func main() {
 		}
 	case "version", "-v", "--version":
 		runVersion()
+	case "token":
+		if err := runToken(rest, os.Stdout); err != nil {
+			logger.Error("token command failed", "error", err)
+			os.Exit(1)
+		}
 	case "update":
 		if err := update.Run(logger, rest); err != nil {
 			logger.Error("update failed", "error", err)

@@ -21,6 +21,13 @@ Usage:
   vocat serve        Run the server in the foreground (use from a TTY when
                      vocat without arguments would enter the menu).
   vocat version      Print the build version and exit.
+  vocat token        Manage API bearer tokens for programmatic clients:
+                       vocat token create [--read-only] [--ttl 720h] <name>
+                       vocat token list
+                       vocat token revoke <name>
+                     Flags for all: --database path (default
+                     /opt/vocat/data/vocat.db). The raw token is printed
+                     once at creation; rotate it by revoking and recreating.
   vocat doctor       Diagnose USB modem, AT, QMI, PC/SC and proxy UDP paths.
                      Use --repair-dji-qmi on Linux to restore the factory-ID
                      DJI/Baiwang 2ca3:4006 AT/QMI interface bindings and wake
