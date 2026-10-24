@@ -18,11 +18,21 @@ import (
 )
 
 var (
-	ErrInvalidCredentials = errors.New("invalid credentials")
-	ErrUnauthorized       = errors.New("unauthorized")
-	ErrInvalidCSRF        = errors.New("invalid csrf token")
-	ErrEmptyPassword      = errors.New("password cannot be empty")
+	ErrInvalidCredentials  = errors.New("invalid credentials")
+	ErrUnauthorized        = errors.New("unauthorized")
+	ErrInvalidCSRF         = errors.New("invalid csrf token")
+	ErrEmptyPassword       = errors.New("password cannot be empty")
+	ErrInvalidTokenName    = errors.New("invalid api token name")
+	ErrDuplicateTokenName  = errors.New("api token name already exists")
 )
+
+// APITokenPrefix marks bearer credentials so they are identifiable in logs
+// and detectable by secret scanners.
+const APITokenPrefix = "vcat_"
+
+// apiTokenTouchInterval throttles the last_used_at write so each
+// authenticated request does not become a database write.
+const apiTokenTouchInterval = 5 * time.Minute
 
 const bcryptPasswordLimit = 72
 
@@ -280,6 +290,120 @@ func (s *Service) Logout(ctx context.Context, sessionToken string) error {
 		return err
 	}
 	return nil
+}
+
+// APITokenCredentials is returned once at creation; the raw token is never
+// stored or retrievable again.
+type APITokenCredentials struct {
+	Token     string
+	Name      string
+	ReadOnly  bool
+	ExpiresAt time.Time // zero means the token never expires
+}
+
+// APITokenPrincipal identifies an authenticated bearer credential.
+type APITokenPrincipal struct {
+	Name     string
+	ReadOnly bool
+}
+
+// CreateAPIToken issues a bearer credential. ttl <= 0 creates a token that
+// never expires.
+func (s *Service) CreateAPIToken(
+	ctx context.Context,
+	name string,
+	readOnly bool,
+	ttl time.Duration,
+) (APITokenCredentials, error) {
+	if !validTokenName(name) {
+		return APITokenCredentials{}, fmt.Errorf("%w: use 1-64 letters, digits, dots, underscores, or hyphens", ErrInvalidTokenName)
+	}
+	if _, err := s.store.APITokenByName(ctx, name); err == nil {
+		return APITokenCredentials{}, fmt.Errorf("%w: %s", ErrDuplicateTokenName, name)
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return APITokenCredentials{}, fmt.Errorf("auth: read api tokens: %w", err)
+	}
+	random, err := randomToken()
+	if err != nil {
+		return APITokenCredentials{}, err
+	}
+	token := APITokenPrefix + random
+	var expiresAt time.Time
+	if ttl > 0 {
+		expiresAt = time.Now().UTC().Add(ttl)
+	}
+	if _, err := s.store.CreateAPIToken(ctx, name, hashToken(token), readOnly, expiresAt); err != nil {
+		return APITokenCredentials{}, fmt.Errorf("auth: create api token: %w", err)
+	}
+	return APITokenCredentials{
+		Token:     token,
+		Name:      name,
+		ReadOnly:  readOnly,
+		ExpiresAt: expiresAt,
+	}, nil
+}
+
+// AuthenticateAPIToken validates a presented bearer credential, prunes
+// expired tokens, and records usage.
+func (s *Service) AuthenticateAPIToken(ctx context.Context, token string) (APITokenPrincipal, error) {
+	if !strings.HasPrefix(token, APITokenPrefix) {
+		return APITokenPrincipal{}, ErrUnauthorized
+	}
+	if err := s.store.DeleteExpiredAPITokens(ctx, time.Now()); err != nil {
+		return APITokenPrincipal{}, fmt.Errorf("auth: prune api tokens: %w", err)
+	}
+	stored, err := s.store.APITokenByHash(ctx, hashToken(token))
+	if errors.Is(err, store.ErrNotFound) {
+		return APITokenPrincipal{}, ErrUnauthorized
+	}
+	if err != nil {
+		return APITokenPrincipal{}, fmt.Errorf("auth: load api token: %w", err)
+	}
+	if !stored.ExpiresAt.IsZero() && !stored.ExpiresAt.After(time.Now().UTC()) {
+		return APITokenPrincipal{}, ErrUnauthorized
+	}
+	if err := s.store.TouchAPIToken(ctx, hashToken(token), apiTokenTouchInterval); err != nil {
+		return APITokenPrincipal{}, fmt.Errorf("auth: touch api token: %w", err)
+	}
+	return APITokenPrincipal{Name: stored.Name, ReadOnly: stored.ReadOnly}, nil
+}
+
+// ListAPITokens returns the stored token inventory, never the credentials.
+func (s *Service) ListAPITokens(ctx context.Context) ([]store.APIToken, error) {
+	tokens, err := s.store.APITokens(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("auth: list api tokens: %w", err)
+	}
+	return tokens, nil
+}
+
+// RevokeAPIToken deletes one token by name.
+func (s *Service) RevokeAPIToken(ctx context.Context, name string) error {
+	if err := s.store.DeleteAPIToken(ctx, name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("auth: unknown api token: %s", name)
+		}
+		return fmt.Errorf("auth: revoke api token: %w", err)
+	}
+	return nil
+}
+
+// validTokenName mirrors the device-ID rules so names stay safe for logs,
+// CLI arguments, and audit records.
+func validTokenName(name string) bool {
+	if len(name) < 1 || len(name) > 64 {
+		return false
+	}
+	for index, character := range name {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			(index > 0 && (character == '.' || character == '_' || character == '-')) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // ChangePassword verifies the current password, replaces it with a fresh
