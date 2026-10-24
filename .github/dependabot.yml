@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    ignore:
+      # Tailwind 4 requires a deliberate CSS/PostCSS migration.
+      - dependency-name: tailwindcss
+        versions: [">=4"]
