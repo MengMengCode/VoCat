@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertRegular, CheckmarkRegular } from "@fluentui/react-icons";
-import { api, apiMessage, getSecuritySettings, updateSecuritySettings } from "../api";
-import type { DeveloperSettings, DeviceListItem, DevicesResponse, HTTPSSettings, NotificationSettings, SecuritySettings, SMSSettings, SystemInfo } from "../types";
+import { api, apiMessage, getApiTokens, getSecuritySettings, revokeApiToken, updateSecuritySettings } from "../api";
+import type { ApiTokenListItem, DeveloperSettings, DeviceListItem, DevicesResponse, HTTPSSettings, NotificationSettings, SecuritySettings, SMSSettings, SystemInfo } from "../types";
 import { Button, PageHeader, confirmDialog, message } from "../components/ui";
 import { CardDecor, CardIcon, CardTitle, SecurityCard, SystemInfoCard } from "../components/settings/Cards";
 import type { PasswordForm, UpdateInfo } from "../components/settings/Cards";
 import { NetworkAccessCard } from "../components/settings/NetworkAccessCard";
+import { ApiTokensCard } from "../components/settings/ApiTokensCard";
 import type { NetworkAccessForm } from "../components/settings/NetworkAccessCard";
 import { NotificationDeviceScope, SegmentedTabs } from "../components/settings/controls";
-import { useI18n } from "../lib/i18n";
+import { tf, useI18n } from "../lib/i18n";
 import { useAuth } from "../store/auth";
 import {
   buildBarkPayload,
@@ -96,6 +97,9 @@ export default function SettingsPage() {
   const [loadingDeveloper, setLoadingDeveloper] = useState(false);
   const [savingDeveloper, setSavingDeveloper] = useState(false);
   const [savingSMSLimit, setSavingSMSLimit] = useState(false);
+  const [apiTokens, setApiTokens] = useState<ApiTokenListItem[]>([]);
+  const [loadingTokens, setLoadingTokens] = useState(false);
+  const [revokingToken, setRevokingToken] = useState<string | null>(null);
   const [smsAutoClear, setSMSAutoClear] = useState(true);
   const [loadingSMSSettings, setLoadingSMSSettings] = useState(false);
   const [savingSMSSettings, setSavingSMSSettings] = useState(false);
@@ -131,6 +135,31 @@ export default function SettingsPage() {
       setLoadingNotif(false);
     }
   }, []);
+
+  const fetchApiTokens = useCallback(async () => {
+    setLoadingTokens(true);
+    try {
+      const data = await getApiTokens();
+      setApiTokens(data.tokens ?? []);
+    } catch {
+      message.error(t("API 令牌列表加载失败"));
+    } finally {
+      setLoadingTokens(false);
+    }
+  }, []);
+
+  const onRevokeApiToken = useCallback(async (name: string) => {
+    setRevokingToken(name);
+    try {
+      await revokeApiToken(name);
+      message.success(tf("令牌 {name} 已吊销", { name }));
+      await fetchApiTokens();
+    } catch (e) {
+      message.error(apiMessage(e));
+    } finally {
+      setRevokingToken(null);
+    }
+  }, [fetchApiTokens]);
 
   const applySecurity = useCallback((data: SecuritySettings) => {
     setSecurity({
@@ -195,7 +224,8 @@ export default function SettingsPage() {
     void fetchNotifications();
     void fetchSecurity();
     void fetchSMSSettings();
-  }, [fetchSystemInfo, fetchNotifications, fetchSecurity, fetchSMSSettings]);
+    void fetchApiTokens();
+  }, [fetchSystemInfo, fetchNotifications, fetchSecurity, fetchSMSSettings, fetchApiTokens]);
 
   useEffect(() => {
     if (systemInfo.developer) {
@@ -519,6 +549,12 @@ export default function SettingsPage() {
           saving={savingSecurity}
           onChange={(patch) => setSecurity((prev) => ({ ...prev, ...patch }))}
           onSave={onSaveSecurity}
+        />
+        <ApiTokensCard
+          tokens={apiTokens}
+          loading={loadingTokens}
+          revoking={revokingToken}
+          onRevoke={(name) => void onRevokeApiToken(name)}
         />
         <VoWiFiMTUCard />
         <SMSAutoClearCard

@@ -1,5 +1,6 @@
 import type {
   ApiErrorBody,
+  ApiTokenListItem,
   LoggingSettings,
   LoginResponse,
   SecuritySettings,
@@ -190,6 +191,14 @@ export async function logout() {
   } finally {
     sessionStorage.removeItem(CSRF_KEY);
   }
+}
+
+export function getApiTokens() {
+  return api<{ tokens: ApiTokenListItem[] }>("/settings/tokens");
+}
+
+export function revokeApiToken(name: string) {
+  return api<{ revoked: boolean }>(`/settings/tokens/${encodeURIComponent(name)}`, { method: "DELETE" });
 }
 
 export function getSecuritySettings() {
