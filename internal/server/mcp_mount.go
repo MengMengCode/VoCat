@@ -2,8 +2,6 @@ package server
 
 import (
 	"net/http"
-
-	"vocat/internal/auth"
 )
 
 // MCPHandlers carries the two MCP server variants mounted at /mcp. The
@@ -15,9 +13,9 @@ type MCPHandlers struct {
 }
 
 // handleMCP serves the MCP Streamable HTTP endpoint. Bearer authentication
-// is required: the endpoint is mounted only when MCP is explicitly enabled,
-// and the token's read_only flag selects which tool surface the session
-// receives. The existing access-control middleware wraps this route like
+// is required, and the token's read_only flag selects which tool surface
+// the session receives. The endpoint is mounted unless MCP is explicitly
+// disabled. The existing access-control middleware wraps this route like
 // every other, so remote clients still need an admitting mode.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if s.mcp == nil || s.mcp.ReadWrite == nil || s.mcp.ReadOnly == nil {
@@ -33,17 +31,19 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	principal, err := s.auth.AuthenticateAPIToken(r.Context(), token)
 	if err != nil {
 		s.logger.Warn("mcp token rejected", "error", err)
-		if len(token) >= len(auth.APITokenPrefix) && token[:len(auth.APITokenPrefix)] == auth.APITokenPrefix {
+		if wellFormedTokenPrefix(token) {
 			s.recordAudit(r.Context(), "", "auth.token", "api_token", "", "failure", requestRemoteHost(r))
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		writeError(w, http.StatusUnauthorized, "invalid_token", "invalid or expired api token")
 		return
 	}
+	// The SDK handler reads the body itself; apply the same size cap the
+	// /api JSON surface enforces so MCP posts cannot bypass it.
+	r.Body = http.MaxBytesReader(w, r.Body, s.maxRequestBodyBytes)
 	handler := s.mcp.ReadWrite
 	if principal.ReadOnly {
 		handler = s.mcp.ReadOnly
 	}
 	handler.ServeHTTP(w, r)
-
 }

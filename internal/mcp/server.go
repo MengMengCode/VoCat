@@ -78,12 +78,6 @@ func New(options Options) (*Server, error) {
 	return server, nil
 }
 
-// RunStdio serves the MCP protocol over stdin/stdout for local agents such
-// as Claude Desktop running vocat on the same host or over SSH.
-func (s *Server) RunStdio(ctx context.Context) error {
-	return s.sdk.Run(ctx, &mcp.StdioTransport{})
-}
-
 // Handler serves the Streamable HTTP transport for remote agents. Callers
 // are responsible for authentication; Vocat mounts it behind bearer-token
 // authentication on the existing listener.

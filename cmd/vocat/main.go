@@ -587,9 +587,9 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		}
 	}()
 
-	// MCP is opt-in: the endpoint stays unmounted unless VOCAT_MCP_ENABLED
-	// (or the config file) turns it on. Read-only tokens receive a server
-	// variant whose tool list omits the write tools entirely.
+	// MCP ships enabled; VOCAT_MCP_ENABLED=false (or the config file)
+	// removes the endpoint. Read-only tokens receive a server variant whose
+	// tool list omits the write tools entirely.
 	var mcpHandlers *server.MCPHandlers
 	if cfg.MCPEnabled {
 		readWrite, mcpErr := mcp.New(mcp.Options{

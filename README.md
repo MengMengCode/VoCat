@@ -277,7 +277,7 @@ Non-browser clients authenticate against the same `/api/...` endpoints with
 a bearer token instead of the browser's session cookie and CSRF flow:
 
 ```bash
-vocat token create ci-runner --read-only --ttl 720h   # prints the token once
+vocat token create --read-only --ttl 720h ci-runner   # prints the token once
 curl -H "Authorization: Bearer vcat_..." http://127.0.0.1:7575/api/devices
 ```
 

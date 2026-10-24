@@ -454,3 +454,42 @@ func TestReadOnlyServerOmitsWriteTools(t *testing.T) {
 		}
 	}
 }
+
+func TestSMSSendOfflineDeviceDoesNotBurnQuota(t *testing.T) {
+	ctx := context.Background()
+	// modem-a has a live physical match; modem-b is configured but offline.
+	server, database := newTestServer(t, &fakeDevices{entries: []device.Device{onlineEntry()}}, nil)
+	if err := database.UpsertDevice(ctx, store.Device{
+		ID:        "modem-b",
+		Name:      "Offline modem",
+		ModemIMEI: "000000000000000",
+	}); err != nil {
+		t.Fatalf("UpsertDevice() error = %v", err)
+	}
+	if err := database.UpsertAppSetting(ctx, store.AppSetting{
+		Key:   "developer.sms_hourly_limit",
+		Value: json.RawMessage(`{"limit":1}`),
+	}); err != nil {
+		t.Fatalf("UpsertAppSetting() error = %v", err)
+	}
+
+	if _, _, err := server.smsSend(ctx, nil, smsSendInput{
+		DeviceID: "modem-b",
+		Phone:    "+15557654321",
+		Message:  "anyone out there",
+	}); err == nil || !strings.Contains(err.Error(), "not online") {
+		t.Fatalf("offline send error = %v, want not online", err)
+	}
+
+	// The failed offline attempt consumed no send slot: the single allowed
+	// submission still works through the online device.
+	if _, output, err := server.smsSend(ctx, nil, smsSendInput{
+		DeviceID: configuredID,
+		Phone:    "+15557654321",
+		Message:  "hello",
+	}); err != nil {
+		t.Fatalf("send after offline failure error = %v, want success", err)
+	} else if !output.AllPartsAccepted {
+		t.Fatalf("output = %+v", output)
+	}
+}

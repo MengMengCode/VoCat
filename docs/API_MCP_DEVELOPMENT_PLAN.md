@@ -8,9 +8,9 @@ tokens, and an MCP (Model Context Protocol) server for AI agents.
 
 1. `Authorization: Bearer vcat_...` authenticates non-browser clients against
    the existing `/api/...` endpoints, with no cookies and no CSRF dance.
-2. `vocat mcp` exposes Vocat operations as MCP tools over stdio for local
-   agents, and an opt-in `/mcp` endpoint exposes the same tools over the
-   Streamable HTTP transport for remote agents.
+2. A `/mcp` endpoint exposes Vocat operations as MCP tools over the
+   Streamable HTTP transport for local and remote agents, enabled by
+   default and authenticated with bearer tokens.
 3. Token lifecycle is managed from the CLI (`vocat token ...`).
 
 ## Non-goals (deliberately out of scope)
@@ -111,7 +111,7 @@ and request-size limits apply unchanged.
 **Files:** `cmd/vocat/main.go` (dispatch), new `cmd/vocat/token.go`, tests.
 
 ```
-vocat token create <name> [--read-only] [--ttl 720h]   # prints the token once
+vocat token create [--read-only] [--ttl 720h] <name>   # prints the token once
 vocat token list                                        # name, read_only, created, last_used, expires
 vocat token revoke <name>
 ```
@@ -140,8 +140,8 @@ states this. Thread listings come from the store (`ListSMSContacts` /
 server's filter helpers.
 
 Constructor: `mcp` package `New(Options) (*Server, error)` with
-`Options{Store, Devices, VoWiFi, Logger, Version}` and methods
-`RunStdio(ctx)` and `Handler() http.Handler` (Streamable HTTP).
+`Options{Store, Devices, VoWiFi, Logger, Version, ReadOnly}` and method
+`Handler() http.Handler` (Streamable HTTP).
 
 Tools — read-heavy, one write per domain, all named and documented for agent
 use:
@@ -196,8 +196,9 @@ Every step lands with tests in the existing style and `go test ./...` green:
   audit rows written.
 - D: tool handlers against fake device/VoWiFi implementations (the Telegram
   bot tests already fake these); redaction assertions.
-- E: `/mcp` requires bearer, handshake over Streamable HTTP works, disabled
-  by default; stdio smoke test via pipes where the platform allows.
+- E: `/mcp` requires a bearer token, the JSON-RPC handshake over
+  Streamable HTTP works, read-only tokens receive the reduced tool list,
+  and the endpoint is absent when MCP is disabled.
 
 ## Documentation
 
@@ -205,8 +206,7 @@ README: `VOCAT_MCP_ENABLED` row, a short "API tokens" section (curl example,
 the `read_only` rule and its `sms/thread` exception, that remote bearer
 clients need an access-control mode that admits their source address — the
 default `internal` mode only serves private networks, and that tokens are
-created after the first bootstrap) and an "MCP" section (Claude Desktop /
-generic stdio + HTTP config snippets). Keep both sections brief; this
+created after the first bootstrap) and an "MCP" section with an HTTP client config snippet. Keep both sections brief; this
 document stays as the design record.
 
 ## Delivery

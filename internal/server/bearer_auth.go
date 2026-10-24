@@ -49,7 +49,7 @@ func (s *Server) requireBearer(w http.ResponseWriter, r *http.Request) (*http.Re
 		s.logger.Warn("api token rejected", "error", err)
 		// Junk probes stay in the log; only well-formed vcat_ tokens reach
 		// the audit trail.
-		if strings.HasPrefix(token, auth.APITokenPrefix) {
+		if wellFormedTokenPrefix(token) {
 			s.recordAudit(r.Context(), "", "auth.token", "api_token", "", "failure", requestRemoteHost(r))
 		}
 		w.Header().Set("Cache-Control", "no-store")
@@ -62,6 +62,12 @@ func (s *Server) requireBearer(w http.ResponseWriter, r *http.Request) (*http.Re
 		return r, false
 	}
 	return r.WithContext(context.WithValue(r.Context(), apiTokenContextKey{}, principal)), true
+}
+
+// wellFormedTokenPrefix reports whether a rejected credential at least
+// looks like a Vocat token, gating which failures reach the audit trail.
+func wellFormedTokenPrefix(token string) bool {
+	return strings.HasPrefix(token, auth.APITokenPrefix)
 }
 
 // bearerPrincipalFromRequest resolves the identity stashed by requireBearer;
