@@ -486,6 +486,14 @@ export interface NotificationSettings {
 }
 
 // 网络访问控制策略：默认仅放行内网网段，可切换到对公网开放。
+export interface ApiTokenListItem {
+  name: string;
+  readOnly: boolean;
+  createdAt: string;
+  lastUsedAt: string;
+  expiresAt: string;
+}
+
 export interface SecuritySettings {
   mode: "internal" | "public";
   allowedCidrs: string[];

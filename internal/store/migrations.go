@@ -528,6 +528,20 @@ func migrationStatements(version int) []string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS sms_raw_records_device_idx ON sms_raw_records(device_id, id DESC)`,
 		}
+	case 28:
+		return []string{
+			// Bearer credentials for non-browser API and MCP clients. Like
+			// sessions, only the SHA-256 digest of the token is stored.
+			`CREATE TABLE IF NOT EXISTS api_tokens (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL UNIQUE,
+				token_hash BLOB NOT NULL UNIQUE,
+				read_only INTEGER NOT NULL DEFAULT 0 CHECK (read_only IN (0, 1)),
+				expires_at INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				last_used_at INTEGER NOT NULL DEFAULT 0
+			)`,
+		}
 	default:
 		return nil
 	}

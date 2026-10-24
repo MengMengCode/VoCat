@@ -1162,7 +1162,7 @@ func (bot *telegramBot) confirmSMS(ctx context.Context, config telegramRuntimeCo
 		bot.sendText(ctx, config, chatID, "无法发送："+err.Error(), nil)
 		return
 	}
-	if blocked, reason := blockedSMSDestination(phone); blocked {
+	if blocked, reason := device.BlockedSMSDestination(phone); blocked {
 		bot.sendText(ctx, config, chatID, "无法发送："+reason, nil)
 		return
 	}
@@ -1272,7 +1272,7 @@ func (bot *telegramBot) handleInputMessage(ctx context.Context, config telegramR
 	}
 	switch state.Kind {
 	case "sms_phone":
-		if blocked, reason := blockedSMSDestination(value); blocked {
+		if blocked, reason := device.BlockedSMSDestination(value); blocked {
 			bot.sendText(ctx, config, message.Chat.ID, "号码不可用："+reason+"\n请重新输入号码。", telegramKeyboard([]map[string]string{telegramButton("❌ 取消", "input:cancel")}))
 			return
 		}

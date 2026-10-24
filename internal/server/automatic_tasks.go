@@ -966,7 +966,7 @@ func (s *Server) decodeAutomaticTask(r *http.Request, id int64) (store.Automatic
 		if !validDialNumber(request.Payload.Phone) || strings.TrimSpace(request.Payload.Message) == "" {
 			return store.AutomaticTask{}, errors.New("SMS phone and message are required")
 		}
-		if blocked, reason := blockedSMSDestination(request.Payload.Phone); blocked {
+		if blocked, reason := device.BlockedSMSDestination(request.Payload.Phone); blocked {
 			return store.AutomaticTask{}, errors.New(reason)
 		}
 	}
