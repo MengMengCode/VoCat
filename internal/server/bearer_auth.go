@@ -11,18 +11,23 @@ import (
 type apiTokenContextKey struct{}
 
 // bearerToken returns the credential from an Authorization: Bearer header.
-// Other schemes and absent headers return false; the session-cookie flow
-// stays authoritative for those requests.
+// A header that names the Bearer scheme without a credential is reported as
+// present with an empty token and fails closed in requireBearer. Other
+// schemes and absent headers return false; the session-cookie flow stays
+// authoritative for those requests.
 func bearerToken(r *http.Request) (string, bool) {
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
-	if len(header) <= len(bearerSchemePrefix) ||
-		!strings.EqualFold(header[:len(bearerSchemePrefix)], bearerSchemePrefix) {
+	if len(header) < len(bearerScheme) ||
+		!strings.EqualFold(header[:len(bearerScheme)], bearerScheme) {
 		return "", false
 	}
-	return strings.TrimSpace(header[len(bearerSchemePrefix):]), true
+	if len(header) == len(bearerScheme) {
+		return "", true
+	}
+	return strings.TrimSpace(header[len(bearerScheme):]), true
 }
 
-const bearerSchemePrefix = "Bearer "
+const bearerScheme = "Bearer"
 
 // mutatingMethod matches the methods the CSRF gate already treats as
 // state-changing; read-only tokens are held to the same line.

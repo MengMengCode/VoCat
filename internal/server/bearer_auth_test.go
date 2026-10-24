@@ -154,6 +154,61 @@ func TestInvalidBearerTokenRejectedWithoutCookieFallthrough(t *testing.T) {
 		t.Fatalf("GET with Basic scheme = %d (%s), want 401 unauthorized",
 			response.StatusCode, apiErrorCode(t, response))
 	}
+
+	// A bare scheme with no credential is present-but-invalid and fails
+	// closed instead of falling through to cookies.
+	if empty := bearerRequest(t, http.MethodGet, app.server.URL+"/api/devices", ""); empty.StatusCode != http.StatusUnauthorized ||
+		apiErrorCode(t, empty) != "invalid_token" {
+		t.Fatalf("GET with empty bearer = %d (%s), want 401 invalid_token",
+			empty.StatusCode, apiErrorCode(t, empty))
+	}
+}
+
+func TestAuthEndpointsStayCookieOnly(t *testing.T) {
+	app, authService, database := newBearerTestApplication(t)
+	write, err := authService.CreateAPIToken(context.Background(), "writer", false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A valid bearer credential must not authenticate the session endpoints;
+	// they manage the browser session and answer cookie-only.
+	if response := bearerRequest(t, http.MethodGet, app.server.URL+"/api/auth/session", write.Token); response.StatusCode != http.StatusUnauthorized ||
+		apiErrorCode(t, response) != "unauthorized" {
+		t.Fatalf("GET /api/auth/session with bearer = %d (%s), want 401 unauthorized",
+			response.StatusCode, apiErrorCode(t, response))
+	}
+
+	// Login is unaffected by a bearer header: the header is ignored and the
+	// cookie session is issued normally.
+	request, err := http.NewRequest(http.MethodPost, app.server.URL+"/api/auth/login",
+		bytes.NewBufferString(`{"username":"admin","password":"correct-password"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+write.Token)
+	response, err := app.server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("login with bearer header = %d (%s), want 200 (header ignored)",
+			response.StatusCode, apiErrorCode(t, response))
+	}
+
+	// Junk probes (no vcat_ prefix) stay out of the audit trail.
+	_ = bearerRequest(t, http.MethodGet, app.server.URL+"/api/devices", "not-a-vocat-token")
+	events, err := database.ListAuditEvents(context.Background(), store.AuditFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "auth.token" {
+			t.Fatalf("junk probe wrote an audit row: %+v", event)
+		}
+	}
 }
 
 func TestInvalidBearerKeepsSessionAndWritesAudit(t *testing.T) {
