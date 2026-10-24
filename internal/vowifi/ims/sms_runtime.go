@@ -50,6 +50,7 @@ type ReceivedSMS struct {
 	Text                   string
 	Timestamp              time.Time
 	ServiceCenterTimestamp *time.Time
+	TimestampCorrection    *vowifi.SMSTimestampCorrection
 	Encoding               device.SMSEncoding
 	Concat                 *device.SMSConcatInfo
 	RPReference            int
@@ -531,7 +532,7 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 		if session.provider.config.OnSIMDataDownload == nil {
 			session.logInboundSMS(slog.LevelWarn, "IMS SIM data download has no UICC handler", request,
 				"stage", "uicc", "rp_reference", int(rpdu.reference))
-      session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
+			session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
 			return
 		}
 		if err := session.provider.config.OnSIMDataDownload(context.Background(), SIMDataDownload{
@@ -593,9 +594,9 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 		session.sendLoggedDeliveryReport(request, []byte{0x02, rpdu.reference}, "rp_ack")
 
 	case message.Direction == device.SMSDirectionReceived || decodeErr != nil:
-		var serviceCenterTimestamp *time.Time
-		if message.ServiceCenterTimestamp != nil {
-			value := message.ServiceCenterTimestamp.UTC()
+		serviceCenterTimestamp, timestampCorrection := carrierProfile.NormalizeSMSTimestamp(message.ServiceCenterTimestamp)
+		if serviceCenterTimestamp != nil {
+			value := serviceCenterTimestamp.UTC()
 			serviceCenterTimestamp = &value
 		}
 		received := ReceivedSMS{
@@ -611,6 +612,7 @@ func (session *Session) processSMSMessage(request *sipRequest) {
 			Text:                   message.Text,
 			Timestamp:              receivedAt,
 			ServiceCenterTimestamp: serviceCenterTimestamp,
+			TimestampCorrection:    timestampCorrection,
 			Encoding:               message.Encoding,
 			Concat:                 message.Concat,
 			RPReference:            int(rpdu.reference),

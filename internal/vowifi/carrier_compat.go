@@ -44,6 +44,7 @@ type CarrierProfile struct {
 	IMSIPSecMode                       string
 	IMSIPSecEncryption                 string
 	SMSCenter                          string
+	SMSZeroSCTSTimezone                string
 	PANIEnabled                        *bool
 	PANICountry                        string
 	PANINode                           string
@@ -106,6 +107,11 @@ type carrierProfileRule struct {
 	EPDG     carrierProfileEPDG     `json:"epdg,omitzero"`
 	IKE      carrierProfileIKE      `json:"ike,omitzero"`
 	IMS      carrierProfileIMS      `json:"ims,omitzero"`
+	SMS      carrierProfileSMS      `json:"sms,omitzero"`
+}
+
+type carrierProfileSMS struct {
+	ZeroSCTSTimezone string `json:"zero_scts_timezone,omitempty"`
 }
 
 type carrierProfileIdentity struct {
@@ -121,12 +127,14 @@ type carrierProfileMatch struct {
 	HomePLMNs []string `json:"home_plmns,omitempty"`
 	// RequireHomePLMN prevents other selectors from matching before SIM home
 	// network information is available. Legacy profiles retain their behavior.
-	RequireHomePLMN bool     `json:"require_home_plmn,omitempty"`
-	IMSIPrefixes    []string `json:"imsi_prefixes,omitempty"`
-	ICCIDPrefixes   []string `json:"iccid_prefixes,omitempty"`
-	SPNs            []string `json:"spns,omitempty"`
-	GID1Prefixes    []string `json:"gid1_prefixes,omitempty"`
-	GID2Prefixes    []string `json:"gid2_prefixes,omitempty"`
+	RequireHomePLMN bool `json:"require_home_plmn,omitempty"`
+	// RequireICCID keeps sponsor-network matches bound to the actual SIM issuer.
+	RequireICCID  bool     `json:"require_iccid,omitempty"`
+	IMSIPrefixes  []string `json:"imsi_prefixes,omitempty"`
+	ICCIDPrefixes []string `json:"iccid_prefixes,omitempty"`
+	SPNs          []string `json:"spns,omitempty"`
+	GID1Prefixes  []string `json:"gid1_prefixes,omitempty"`
+	GID2Prefixes  []string `json:"gid2_prefixes,omitempty"`
 }
 
 type carrierProfileRoute struct {
@@ -312,6 +320,9 @@ func carrierProfilesSnapshot() []carrierProfileRule {
 }
 
 func validCarrierProfileRule(rule carrierProfileRule) bool {
+	if !validSMSTimestampTimezone(rule.SMS.ZeroSCTSTimezone) {
+		return false
+	}
 	capacity := len(rule.MatchAny)
 	if !emptyCarrierProfileMatch(rule.Match) {
 		capacity++
@@ -329,6 +340,9 @@ func validCarrierProfileRule(rule carrierProfileRule) bool {
 			return false
 		}
 		if match.RequireHomePLMN && len(match.HomePLMNs) == 0 {
+			return false
+		}
+		if match.RequireICCID && len(match.ICCIDPrefixes) == 0 {
 			return false
 		}
 		for _, plmn := range match.HomePLMNs {
@@ -584,7 +598,8 @@ func matchCarrierProfile(match carrierProfileMatch, identity SIMIdentity) (int, 
 			score += selector.weight
 			sources = append(sources, selector.name)
 			hasSelectorMatch = true
-		} else if !hasHomePLMNMatch || selector.name == "gid1" || selector.name == "gid2" {
+		} else if !hasHomePLMNMatch || selector.name == "gid1" || selector.name == "gid2" ||
+			(selector.name == "iccid" && match.RequireICCID) {
 			return 0, "", false
 		}
 	}
@@ -618,6 +633,7 @@ func matchesAny(values []string, match func(string) bool) bool {
 func applyCarrierProfileRule(base CarrierProfile, rule carrierProfileRule, source string, identity SIMIdentity) CarrierProfile {
 	base.ID = rule.ID
 	base.MatchSource = source
+	base.SMSZeroSCTSTimezone = strings.TrimSpace(rule.SMS.ZeroSCTSTimezone)
 	base.SubscriberIMSIRewrite = SubscriberIMSIRewrite{
 		FromPrefix: strings.TrimSpace(rule.Identity.SubscriberIMSIRewrite.FromPrefix),
 		ToPrefix:   strings.TrimSpace(rule.Identity.SubscriberIMSIRewrite.ToPrefix),
