@@ -84,7 +84,13 @@ func New(options Options) (*Server, error) {
 // authentication on the existing listener.
 func (s *Server) Handler() http.Handler {
 	const responseDeadline = 3 * time.Minute
-	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.sdk }, nil)
+	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s.sdk }, &mcp.StreamableHTTPOptions{
+		// Zero would keep idle sessions in the handler's map forever; a
+		// client that never sends DELETE would leak it for the process
+		// lifetime. The SDK pauses the timer while a request is in flight,
+		// so long eSIM operations are not cut short.
+		SessionTimeout: 10 * time.Minute,
+	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The shared listener caps writes at 30s; eSIM operations can run
 		// for minutes, and a cut-off response after a completed switch

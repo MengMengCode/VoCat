@@ -126,7 +126,7 @@ export function ApiTokensCard({
       {loading ? (
         <div className="text-sm text-gray-500">{t("加载中...")}</div>
       ) : error ? (
-        <div className="flex items-center justify-between rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-300">
+        <div role="alert" className="flex items-center justify-between rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-300">
           <span>{t("令牌列表加载失败")}</span>
           <Button variant="default" onClick={onRefresh}>
             {t("重试")}
