@@ -52,6 +52,15 @@ type nativeQMIUIMResetSession interface {
 	ResetUIM(context.Context) error
 }
 
+// nativeQMIProvisioningSession is intentionally optional.  A few older UIM
+// implementations expose SIM power control but do not implement the
+// provisioning-session command.  Those modems retain the existing profile
+// switch recovery behaviour.
+type nativeQMIProvisioningSession interface {
+	GetUSIMAID(context.Context) ([]byte, error)
+	RebindPrimaryGWProvisioning(context.Context, uint8, []byte) error
+}
+
 type nativeQMIVoWiFiSession interface {
 	qmiRadioSession
 	GetICCID(context.Context) (string, error)
@@ -272,6 +281,26 @@ func (session *productionQMIRadioSession) ResetUIM(ctx context.Context) error {
 		return err
 	}
 	return uim.Reset(ctx)
+}
+
+// RebindPrimaryGWProvisioning restores the primary GSM/LTE provisioning
+// session after a physical eUICC profile switch.  Some Qualcomm MHI firmware
+// clears this volatile binding when the SIM is power-cycled, despite the card
+// and its newly-enabled USIM application being ready.
+func (session *productionQMIRadioSession) RebindPrimaryGWProvisioning(ctx context.Context, slot uint8, aid []byte) error {
+	if len(aid) == 0 {
+		return errors.New("USIM AID is empty")
+	}
+	uim, err := session.uimService(ctx)
+	if err != nil {
+		return err
+	}
+	return uim.ChangeProvisioningSession(ctx, qmi.UIMChangeProvisioningSessionRequest{
+		SessionType:           qmi.UIMSessionTypePrimaryGWProvisioning,
+		Activate:              true,
+		Slot:                  &slot,
+		ApplicationIdentifier: append([]byte(nil), aid...),
+	})
 }
 
 func (session *productionQMIRadioSession) uimService(ctx context.Context) (*qmi.UIMService, error) {
