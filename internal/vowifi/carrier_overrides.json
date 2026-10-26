@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "lebara-uk-23487",
+      "match": {
+        "home_plmns": ["23487"],
+        "require_home_plmn": true,
+        "spns": ["Lebara"]
+      },
+      "ims": {
+        "register_options": {
+          "contact_format": "standard",
+          "contact_user_source": "stable-instance",
+          "instance_id_format": "gsma-imei",
+          "instance_id_fallback": "zero-imei"
+        }
+      }
+    }
+  ]
+}

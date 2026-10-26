@@ -44,6 +44,7 @@ type CarrierProfile struct {
 	IMSIPSecMode                       string
 	IMSIPSecEncryption                 string
 	SMSCenter                          string
+	SMSZeroSCTSTimezone                string
 	PANIEnabled                        *bool
 	PANICountry                        string
 	PANINode                           string
@@ -64,7 +65,11 @@ type SubscriberIMSIRewrite struct {
 // IMSRegisterOptions carries carrier-specific SIP REGISTER header values.
 // Pointer fields distinguish "use default" (nil) from "explicitly omit" ("").
 type IMSRegisterOptions struct {
-	ContactFormat       string
+	ContactFormat string
+	// Empty Contact policies preserve the carrier's existing REGISTER behavior.
+	ContactUserSource   string
+	InstanceIDFormat    string
+	InstanceIDFallback  string
 	ExpirySeconds       int
 	ContactExtraTags    []string
 	SupportedHeader     *string
@@ -77,9 +82,15 @@ type IMSRegisterOptions struct {
 }
 
 const (
-	IMSContactFormatStandard = "standard"
-	IMSContactFormatATT      = "att"
-	IMSContactFormatGSMA     = "gsma"
+	IMSContactFormatStandard      = "standard"
+	IMSContactFormatATT           = "att"
+	IMSContactFormatGSMA          = "gsma"
+	IMSContactUserPublicIdentity  = "public-identity"
+	IMSContactUserStableInstance  = "stable-instance"
+	IMSInstanceIDFormatUUID       = "uuid"
+	IMSInstanceIDFormatGSMAIMEI   = "gsma-imei"
+	IMSInstanceIDFallbackUUID     = "uuid"
+	IMSInstanceIDFallbackZeroIMEI = "zero-imei"
 )
 
 type carrierProfileDocument struct {
@@ -96,6 +107,11 @@ type carrierProfileRule struct {
 	EPDG     carrierProfileEPDG     `json:"epdg,omitzero"`
 	IKE      carrierProfileIKE      `json:"ike,omitzero"`
 	IMS      carrierProfileIMS      `json:"ims,omitzero"`
+	SMS      carrierProfileSMS      `json:"sms,omitzero"`
+}
+
+type carrierProfileSMS struct {
+	ZeroSCTSTimezone string `json:"zero_scts_timezone,omitempty"`
 }
 
 type carrierProfileIdentity struct {
@@ -108,7 +124,12 @@ type carrierProfileIMSIRewrite struct {
 }
 
 type carrierProfileMatch struct {
-	HomePLMNs     []string `json:"home_plmns,omitempty"`
+	HomePLMNs []string `json:"home_plmns,omitempty"`
+	// RequireHomePLMN prevents other selectors from matching before SIM home
+	// network information is available. Legacy profiles retain their behavior.
+	RequireHomePLMN bool `json:"require_home_plmn,omitempty"`
+	// RequireICCID keeps sponsor-network matches bound to the actual SIM issuer.
+	RequireICCID  bool     `json:"require_iccid,omitempty"`
 	IMSIPrefixes  []string `json:"imsi_prefixes,omitempty"`
 	ICCIDPrefixes []string `json:"iccid_prefixes,omitempty"`
 	SPNs          []string `json:"spns,omitempty"`
@@ -152,6 +173,9 @@ type carrierProfileIMS struct {
 
 type carrierProfileRegisterOptions struct {
 	ContactFormat       string   `json:"contact_format,omitempty"`
+	ContactUserSource   string   `json:"contact_user_source,omitempty"`
+	InstanceIDFormat    string   `json:"instance_id_format,omitempty"`
+	InstanceIDFallback  string   `json:"instance_id_fallback,omitempty"`
 	ExpirySeconds       int      `json:"expiry_seconds,omitempty"`
 	ContactExtraTags    []string `json:"contact_extra_tags,omitempty"`
 	SupportedHeader     *string  `json:"supported_header,omitempty"`
@@ -166,7 +190,16 @@ type carrierProfileRegisterOptions struct {
 //go:embed carrier_profiles.json
 var carrierProfilesJSON []byte
 
-var builtinCarrierProfiles = mustLoadCarrierProfiles(carrierProfilesJSON)
+// Curated interoperability fixes are separate from the generated bundle data
+// so refreshing carrier_profiles.json cannot discard tested overrides.
+//
+//go:embed carrier_overrides.json
+var carrierOverridesJSON []byte
+
+var builtinCarrierProfiles = append(
+	mustLoadCarrierProfiles(carrierProfilesJSON),
+	mustLoadCarrierProfiles(carrierOverridesJSON)...,
+)
 
 var externalCarrierProfiles = struct {
 	sync.RWMutex
@@ -287,6 +320,9 @@ func carrierProfilesSnapshot() []carrierProfileRule {
 }
 
 func validCarrierProfileRule(rule carrierProfileRule) bool {
+	if !validSMSTimestampTimezone(rule.SMS.ZeroSCTSTimezone) {
+		return false
+	}
 	capacity := len(rule.MatchAny)
 	if !emptyCarrierProfileMatch(rule.Match) {
 		capacity++
@@ -301,6 +337,12 @@ func validCarrierProfileRule(rule carrierProfileRule) bool {
 	}
 	for _, match := range matches {
 		if emptyCarrierProfileMatch(match) {
+			return false
+		}
+		if match.RequireHomePLMN && len(match.HomePLMNs) == 0 {
+			return false
+		}
+		if match.RequireICCID && len(match.ICCIDPrefixes) == 0 {
 			return false
 		}
 		for _, plmn := range match.HomePLMNs {
@@ -377,6 +419,23 @@ func validCarrierProfileRule(rule carrierProfileRule) bool {
 	}
 	if format := strings.ToLower(strings.TrimSpace(rule.IMS.RegisterOptions.ContactFormat)); format != "" &&
 		format != IMSContactFormatStandard && format != IMSContactFormatATT && format != IMSContactFormatGSMA {
+		return false
+	}
+	registerOptions := rule.IMS.RegisterOptions
+	if source := strings.ToLower(strings.TrimSpace(registerOptions.ContactUserSource)); source != "" &&
+		source != IMSContactUserPublicIdentity && source != IMSContactUserStableInstance {
+		return false
+	}
+	instanceFormat := strings.ToLower(strings.TrimSpace(registerOptions.InstanceIDFormat))
+	if instanceFormat != "" && instanceFormat != IMSInstanceIDFormatUUID && instanceFormat != IMSInstanceIDFormatGSMAIMEI {
+		return false
+	}
+	fallback := strings.ToLower(strings.TrimSpace(registerOptions.InstanceIDFallback))
+	if fallback != "" && fallback != IMSInstanceIDFallbackUUID && fallback != IMSInstanceIDFallbackZeroIMEI {
+		return false
+	}
+	// A synthetic equipment identity is only allowed by an explicit carrier policy.
+	if fallback == IMSInstanceIDFallbackZeroIMEI && instanceFormat != IMSInstanceIDFormatGSMAIMEI {
 		return false
 	}
 	for _, value := range rule.IMS.RegisterOptions.ContactExtraTags {
@@ -505,6 +564,9 @@ func matchCarrierProfile(match carrierProfileMatch, identity SIMIdentity) (int, 
 			return 0, "", false
 		}
 	}
+	if match.RequireHomePLMN && !hasHomePLMNMatch {
+		return 0, "", false
+	}
 	hasSelectorMatch := false
 	for _, selector := range []struct {
 		name     string
@@ -536,7 +598,8 @@ func matchCarrierProfile(match carrierProfileMatch, identity SIMIdentity) (int, 
 			score += selector.weight
 			sources = append(sources, selector.name)
 			hasSelectorMatch = true
-		} else if !hasHomePLMNMatch || selector.name == "gid1" || selector.name == "gid2" {
+		} else if !hasHomePLMNMatch || selector.name == "gid1" || selector.name == "gid2" ||
+			(selector.name == "iccid" && match.RequireICCID) {
 			return 0, "", false
 		}
 	}
@@ -570,6 +633,7 @@ func matchesAny(values []string, match func(string) bool) bool {
 func applyCarrierProfileRule(base CarrierProfile, rule carrierProfileRule, source string, identity SIMIdentity) CarrierProfile {
 	base.ID = rule.ID
 	base.MatchSource = source
+	base.SMSZeroSCTSTimezone = strings.TrimSpace(rule.SMS.ZeroSCTSTimezone)
 	base.SubscriberIMSIRewrite = SubscriberIMSIRewrite{
 		FromPrefix: strings.TrimSpace(rule.Identity.SubscriberIMSIRewrite.FromPrefix),
 		ToPrefix:   strings.TrimSpace(rule.Identity.SubscriberIMSIRewrite.ToPrefix),
@@ -710,6 +774,15 @@ func (profile CarrierProfile) EffectiveSubscriberIMSI(imsi string) string {
 func applyRegisterOptions(base IMSRegisterOptions, rule carrierProfileRegisterOptions) IMSRegisterOptions {
 	if value := strings.ToLower(strings.TrimSpace(rule.ContactFormat)); value != "" {
 		base.ContactFormat = value
+	}
+	if value := strings.ToLower(strings.TrimSpace(rule.ContactUserSource)); value != "" {
+		base.ContactUserSource = value
+	}
+	if value := strings.ToLower(strings.TrimSpace(rule.InstanceIDFormat)); value != "" {
+		base.InstanceIDFormat = value
+	}
+	if value := strings.ToLower(strings.TrimSpace(rule.InstanceIDFallback)); value != "" {
+		base.InstanceIDFallback = value
 	}
 	if rule.ExpirySeconds != 0 {
 		base.ExpirySeconds = rule.ExpirySeconds

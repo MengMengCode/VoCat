@@ -434,3 +434,17 @@ func (reader staticDeviceReader) Get(string) (device.Device, error) {
 		},
 	}, nil
 }
+
+func TestStateProjectorSaveIgnoresDeletedDevice(t *testing.T) {
+	database := testStore(t)
+	projector := StateProjector{Store: database}
+
+	err := projector.Save(context.Background(), vowifi.State{
+		DeviceID:  "deleted-device-id",
+		Phase:     vowifi.PhaseFailed,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("expected nil error for deleted device, got %v", err)
+	}
+}

@@ -73,7 +73,7 @@ type Config struct {
 	// OnSMSStatus is invoked for an SMS-STATUS-REPORT received after a
 	// submission that requested a delivery report.
 	OnSMSStatus func(context.Context, ReceivedSMSStatus) error
-  // OnSIMDataDownload receives a decoded SMS-PP download for delivery to the
+	// OnSIMDataDownload receives a decoded SMS-PP download for delivery to the
 	// UICC. The callback must return only after the UICC has processed the
 	// ENVELOPE command; a nil callback causes an RP-ACK delivery report to
 	// acknowledge transport receipt.
@@ -644,6 +644,10 @@ type Session struct {
 	ussiMu             sync.Mutex
 	ussiDialogs        map[string]*ussiDialog
 
+	// REGISTER presentation is independent from the legacy dialog instance.
+	instanceUUID           string
+	registerContactOptions *vowifi.IMSRegisterOptions
+
 	mu                  sync.Mutex
 	closed              bool
 	evidence            vowifi.IMSEvidence
@@ -706,6 +710,7 @@ func newSession(
 		callID:             callToken + "@" + addressHost(connection.LocalAddr()),
 		fromTag:            fromTag,
 		instanceID:         instanceURI,
+		instanceUUID:       instanceID,
 		pani:               resolveSessionPAccessNetworkInfo(request.Identity, provider.config.Logger),
 		paniResolved:       true,
 		cseq:               1,
@@ -721,6 +726,13 @@ func newSession(
 			RegistrationState: "registering",
 			Transport:         transport,
 		},
+	}
+	if profile.IMSRegisterOptions.ContactUserSource != "" || profile.IMSRegisterOptions.InstanceIDFormat != "" || profile.IMSRegisterOptions.InstanceIDFallback != "" {
+		// Keep an explicit Contact policy stable across registration refreshes
+		// and deregistration, even if installed carrier profiles are reloaded.
+		options := profile.IMSRegisterOptions
+		options.ContactExtraTags = append([]string(nil), options.ContactExtraTags...)
+		session.registerContactOptions = &options
 	}
 	if transport == "tcp" {
 		session.reader = bufio.NewReader(connection)
@@ -1028,7 +1040,6 @@ func minExpiresFromResponse(response *sipResponse) (int, error) {
 	return 0, errors.New("ims: missing or invalid Min-Expires header in SIP 423 response")
 }
 
-
 func (session *Session) buildRegister(
 	cseq uint32,
 	expires int,
@@ -1046,7 +1057,7 @@ func (session *Session) buildRegister(
 	transportUpper := strings.ToUpper(session.transport)
 	requestURI := "sip:" + session.identity.domain
 	routeURI := "sip:" + session.endpoint.address() + ";transport=" + session.transport + ";lr"
-	contact := session.buildContact(contactAddress, registerOptions)
+	contact := session.buildContact(contactAddress, session.contactOptions(registerOptions))
 
 	defaultSupported := "path, gruu"
 	defaultAllow := "REGISTER, INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, SUBSCRIBE, NOTIFY"
@@ -1151,8 +1162,8 @@ func (session *Session) buildRegister(
 
 // buildContact constructs the REGISTER Contact value for the selected carrier format.
 func (session *Session) buildContact(contactAddress string, registerOptions vowifi.IMSRegisterOptions) string {
-	base := fmt.Sprintf("<sip:%s@%s;transport=%s>", session.identity.user, contactAddress, session.transport)
-	instanceID := session.instanceID
+	base := "<" + session.registerContactURI(contactAddress, registerOptions) + ">"
+	instanceID := session.registerInstanceID(registerOptions)
 	icsiRef := registerContactICSIRef
 
 	switch registerOptions.ContactFormat {
@@ -1171,8 +1182,8 @@ func (session *Session) buildContact(contactAddress string, registerOptions vowi
 			extra += ";" + tag
 		}
 		return fmt.Sprintf(
-			`<sip:%s>;+g.3gpp.icsi-ref="%s"%s;+sip.instance="<%s>"`,
-			contactAddress, icsiRef, extra, instanceID,
+			`%s;+g.3gpp.icsi-ref="%s"%s;+sip.instance="<%s>"`,
+			base, icsiRef, extra, instanceID,
 		)
 	default:
 		extra := ""
@@ -1462,33 +1473,8 @@ func (session *Session) applyRegistrationEvidence(response *sipResponse) error {
 	associated := splitHeaderValues(response.values("P-Associated-URI"))
 	contacts := splitHeaderValues(response.values("Contact"))
 	serviceRoutes := splitHeaderValues(response.values("Service-Route"))
-	registeredContact := ""
-	smsConfirmed := false
-	profile := vowifi.ResolveCarrierProfile(session.request.Identity)
-	instanceLower := strings.ToLower(session.instanceID)
-	contactURILower := strings.ToLower(fmt.Sprintf(
-		"sip:%s@%s;transport=%s",
-		session.identity.user,
-		session.contactAddress(),
-		session.transport,
-	))
-	contactAddressLower := ""
-	if profile.IMSRegisterOptions.ContactFormat == vowifi.IMSContactFormatGSMA {
-		contactAddressLower = strings.ToLower("sip:" + session.contactAddress())
-	}
-	for _, contact := range contacts {
-		lower := strings.ToLower(contact)
-		matchesThisSession := strings.Contains(lower, instanceLower) ||
-			strings.Contains(lower, contactURILower) ||
-			(contactAddressLower != "" && strings.Contains(lower, contactAddressLower))
-		if matchesThisSession {
-			registeredContact = contact
-			smsConfirmed = strings.Contains(lower, "+g.3gpp.smsip")
-			if strings.Contains(lower, instanceLower) {
-				break
-			}
-		}
-	}
+	registeredContact := session.selectRegisteredContact(contacts)
+	smsConfirmed := strings.Contains(strings.ToLower(registeredContact), "+g.3gpp.smsip")
 	// Other registered devices may have longer grants; only our selected
 	// Contact determines this session's renewal deadline.
 	expiry := registrationExpiry(response, []string{registeredContact}, session.provider.config.RegistrationExpiry)
