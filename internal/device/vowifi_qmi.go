@@ -322,5 +322,43 @@ func (manager *Manager) powerCycleNativeQMISIM(ctx context.Context, id string) (
 		return true, ctx.Err()
 	case <-time.After(time.Second):
 	}
+	if provisioner, ok := session.(nativeQMIProvisioningSession); ok {
+		if err := rebindNativeQMIPrimaryGWProvisioning(ctx, provisioner); err != nil {
+			return true, err
+		}
+	}
 	return true, nil
+}
+
+// rebindNativeQMIPrimaryGWProvisioning binds the USIM selected by the newly
+// active eUICC profile to the primary GSM/LTE provisioning session.  This is
+// performed through VoCat's existing QMI lease, rather than a competing
+// qmicli/ModemManager client, so the VoCat process stays alive after a profile
+// switch.
+func rebindNativeQMIPrimaryGWProvisioning(ctx context.Context, session nativeQMIProvisioningSession) error {
+	if session == nil {
+		return errors.New("native QMI provisioning session is unavailable")
+	}
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		aid, err := session.GetUSIMAID(ctx)
+		if err == nil && len(aid) > 0 {
+			if err := session.RebindPrimaryGWProvisioning(ctx, 1, aid); err != nil {
+				return fmt.Errorf("rebind primary GSM/LTE provisioning session: %w", err)
+			}
+			return nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("USIM AID is empty")
+		}
+		if attempt == 4 {
+			break
+		}
+		if err := waitNativeQMIRecovery(ctx, time.Second); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("read USIM AID after profile switch: %w", lastErr)
 }
