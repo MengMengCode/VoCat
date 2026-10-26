@@ -444,6 +444,7 @@ type socks5UDP struct {
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 	config  transportConfig
+	route   vowifi.ProxyRoute
 	control net.Conn
 	udp     *net.UDPConn
 	relay   *net.UDPAddr
@@ -520,6 +521,7 @@ func newSOCKS5UDP(
 	_ = control.SetDeadline(time.Time{})
 	return &socks5UDP{
 		config:  config,
+		route:   route,
 		control: control,
 		udp:     udpConnection,
 		relay:   relay,
@@ -623,11 +625,31 @@ func (transport *socks5UDP) RemoteAddr() *net.UDPAddr {
 	return cloneUDPAddr(transport.remote)
 }
 
-func (transport *socks5UDP) Float(_ context.Context) error {
+func (transport *socks5UDP) Float(ctx context.Context) error {
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
-	transport.remote.Port = 4500
+	if transport.udp == nil {
+		return errors.New("ike: SOCKS5 UDP transport is closed")
+	}
+	if transport.floated {
+		return nil
+	}
+	remote := cloneUDPAddr(transport.remote)
+	remote.Port = 4500
+	replacement, err := newSOCKS5UDP(ctx, transport.config, transport.route, []*net.UDPAddr{remote})
+	if err != nil {
+		return fmt.Errorf("ike: reopen SOCKS5 association for UDP/4500: %w", err)
+	}
+	previousUDP, previousControl := transport.udp, transport.control
+	transport.udp = replacement.udp
+	transport.control = replacement.control
+	transport.relay = replacement.relay
+	transport.remote = remote
 	transport.floated = true
+	_ = previousUDP.Close()
+	if previousControl != nil {
+		_ = previousControl.Close()
+	}
 	return nil
 }
 
