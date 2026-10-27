@@ -33,6 +33,12 @@ func runToken(args []string, stdout io.Writer) error {
 }
 
 func runTokenCreate(args []string, stdout io.Writer) error {
+	return runTokenCreateWithDependencies(args, stdout, appendTokenAudit, func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), 15*time.Second)
+	})
+}
+
+func runTokenCreateWithDependencies(args []string, stdout io.Writer, appendAudit func(context.Context, *store.Store, string, string) error, newContext func() (context.Context, context.CancelFunc)) error {
 	flags := flag.NewFlagSet("token create", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	databasePath := flags.String("database", "/opt/vocat/data/vocat.db", "database path")
@@ -45,7 +51,7 @@ func runTokenCreate(args []string, stdout io.Writer) error {
 	if *ttl < 0 {
 		return errors.New("--ttl must be zero (never expires) or a positive duration")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := newContext()
 	defer cancel()
 	database, service, err := openTokenService(ctx, *databasePath)
 	if err != nil {
@@ -56,10 +62,13 @@ func runTokenCreate(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := appendTokenAudit(ctx, database, "auth.token.create", credentials.Name); err != nil {
+	if err := appendAudit(ctx, database, "auth.token.create", credentials.Name); err != nil {
 		// The credential was never shown; without cleanup the name would be
-		// stuck behind a token nobody can use.
-		if revokeErr := service.RevokeAPIToken(ctx, credentials.Name); revokeErr != nil {
+		// stuck behind a token nobody can use. Detach cleanup from the request
+		// deadline while keeping it bounded.
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cleanupCancel()
+		if revokeErr := service.RevokeAPIToken(cleanupCtx, credentials.Name); revokeErr != nil {
 			return fmt.Errorf("%w (also failed to roll back the stored token: %v)", err, revokeErr)
 		}
 		return err

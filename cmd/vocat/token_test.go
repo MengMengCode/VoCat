@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -141,5 +142,56 @@ func TestTokenCreateBeforeBootstrapWarningPath(t *testing.T) {
 	}
 	if !tokens[0].CreatedAt.After(time.Now().Add(-time.Minute)) {
 		t.Fatalf("unexpected created_at %v", tokens[0].CreatedAt)
+	}
+}
+
+func TestTokenCreateAuditFailureUsesDetachedCleanupContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vocat.db")
+	auditErr := errors.New("audit unavailable")
+	var stdout bytes.Buffer
+	var cancel context.CancelFunc
+
+	err := runTokenCreateWithDependencies([]string{"--database", path, "retryable"}, &stdout,
+		func(ctx context.Context, _ *store.Store, _, _ string) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			cancel()
+			return auditErr
+		},
+		func() (context.Context, context.CancelFunc) {
+			ctx, cancelFunc := context.WithCancel(context.Background())
+			cancel = cancelFunc
+			return ctx, cancelFunc
+		},
+	)
+	if !errors.Is(err, auditErr) {
+		t.Fatalf("create error = %v, want audit error", err)
+	}
+	if strings.Contains(stdout.String(), auth.APITokenPrefix) {
+		t.Fatalf("failed create printed a token: %q", stdout.String())
+	}
+
+	database, err := store.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := database.APITokens(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("tokens after audit failure = %+v, want none", tokens)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout.Reset()
+	if err := runTokenCreate([]string{"--database", path, "retryable"}, &stdout); err != nil {
+		t.Fatalf("same-name create after rollback error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "token: "+auth.APITokenPrefix) {
+		t.Fatalf("successful retry did not print token: %q", stdout.String())
 	}
 }
