@@ -15,11 +15,15 @@ import (
 )
 
 type ec20TranscriptStep struct {
-	command   string
-	sensitive bool
-	lines     []string
-	final     string
-	err       error
+	command     string
+	sensitive   bool
+	apduCommand modem.APDUCommand
+	channel     int
+	apdu        []byte
+	apduForm    modem.APDUForm
+	lines       []string
+	final       string
+	err         error
 }
 
 type ec20Transcript struct {
@@ -74,7 +78,47 @@ func (transcript *ec20Transcript) ExecuteAT(
 	_ string,
 	command string,
 ) (modem.Response, error) {
+	transcript.mu.Lock()
+	if transcript.next < len(transcript.steps) && transcript.steps[transcript.next].apduCommand != 0 {
+		transcript.mu.Unlock()
+		transcript.t.Fatal("adapter sent an APDU AT command instead of using ExecuteAPDU")
+	}
+	transcript.mu.Unlock()
 	return transcript.execute(command, false)
+}
+
+func (transcript *ec20Transcript) ExecuteAPDU(
+	_ context.Context,
+	_ string,
+	command modem.APDUCommand,
+	channel int,
+	apdu []byte,
+) ([]byte, error) {
+	transcript.t.Helper()
+	transcript.mu.Lock()
+	if transcript.next >= len(transcript.steps) {
+		transcript.mu.Unlock()
+		transcript.t.Fatal("unexpected EC20 ExecuteAPDU call")
+	}
+	step := transcript.steps[transcript.next]
+	transcript.mu.Unlock()
+	if step.apduCommand != 0 && (step.apduCommand != command || step.channel != channel || !bytes.Equal(step.apdu, apdu)) {
+		transcript.t.Fatal("EC20 ExecuteAPDU received an unexpected command, channel, or APDU")
+	}
+	profile := modem.ResolveATProfile(modem.Candidate{}).APDU
+	commandText, err := profile.Build(command, channel, apdu, step.apduForm)
+	if err != nil {
+		transcript.t.Fatal("could not build transcript APDU command")
+	}
+	response, err := transcript.execute(commandText, true)
+	if err != nil {
+		return nil, err
+	}
+	result, err := profile.Parse(command, response)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (transcript *ec20Transcript) ExecuteSensitiveAT(
@@ -226,20 +270,23 @@ func TestEC20AdapterCSIMFallbackSupportsSuccessAndSynchronizationFailure(
 					// The SELECT response requests GET RESPONSE. This is the
 					// behavior observed on EC20 basic-channel firmware.
 					ec20TranscriptStep{
-						command: `AT+CSIM=24,"00A4040407A0000000871002"`,
-						lines:   []string{`+CSIM: 4,"613A"`},
+						command:   `AT+CSIM=24,"00A4040407A0000000871002"`,
+						sensitive: true,
+						lines:     []string{`+CSIM: 4,"613A"`},
 					},
 					ec20TranscriptStep{
-						command: `AT+CSIM=10,"00C000003A"`,
-						lines:   []string{`+CSIM: 4,"9000"`},
+						command:   `AT+CSIM=10,"00C000003A"`,
+						sensitive: true,
+						lines:     []string{`+CSIM: 4,"9000"`},
 					},
 					ec20TranscriptStep{
 						command: "AT+CCID",
 						lines:   []string{"+CCID: 8944101234567890123"},
 					},
 					ec20TranscriptStep{
-						command: `AT+CSIM=24,"00A4040407A0000000871002"`,
-						lines:   []string{`+CSIM: 4,"9000"`},
+						command:   `AT+CSIM=24,"00A4040407A0000000871002"`,
+						sensitive: true,
+						lines:     []string{`+CSIM: 4,"9000"`},
 					},
 					ec20TranscriptStep{
 						command:   authCommand,
@@ -288,6 +335,122 @@ func TestEC20AdapterCSIMFallbackSupportsSuccessAndSynchronizationFailure(
 	}
 }
 
+func TestEC20AdapterZXICUnquotedCSIMCGLAAndBareCCHO(t *testing.T) {
+	const identityICCID = "8901000000000000001"
+	const identityIMSI = "310280000000001"
+	const fullISIM = "A0000000871004FFFFFFFF8903020000"
+	identity := SIMIdentity{ICCID: identityICCID, IMSI: identityIMSI}
+	var challenge AKAChallenge
+	for index := range challenge.RAND {
+		challenge.RAND[index] = byte(index)
+		challenge.AUTN[index] = byte(0xf0 + index)
+	}
+	authAPDU := buildUSIMAuthenticateAPDU(challenge)
+	aidBytes, err := hex.DecodeString(fullISIM)
+	if err != nil {
+		t.Fatal("invalid test ISIM AID")
+	}
+	selectAPDU := append([]byte{0x00, 0xa4, 0x04, 0x04, byte(len(aidBytes))}, aidBytes...)
+	profile := modem.ResolveATProfile(modem.Candidate{}).APDU
+	buildCommand := func(command modem.APDUCommand, channel int, apdu []byte) string {
+		t.Helper()
+		text, err := profile.Build(command, channel, apdu, modem.APDUUnquoted)
+		if err != nil {
+			t.Fatal("invalid test APDU")
+		}
+		return text
+	}
+	newAdapter := func(t *testing.T, steps []ec20TranscriptStep) (*EC20Adapter, *ec20Transcript) {
+		t.Helper()
+		transcript := &ec20Transcript{t: t, steps: steps}
+		adapter, err := NewEC20Adapter(transcript, EC20AdapterOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		adapter.bindings[identityICCID] = ec20SIMBinding{
+			deviceID: "zxic-1", iccid: identityICCID, imsi: identityIMSI,
+			aid: fullISIM, application: "ISIM",
+		}
+		return adapter, transcript
+	}
+
+	t.Run("logical CGLA accepts bare CCHO", func(t *testing.T) {
+		transcriptSteps := []ec20TranscriptStep{
+			{command: "AT+CCID", lines: []string{"+CCID: " + identityICCID}},
+			{command: `AT+CCHO="` + fullISIM + `"`, lines: []string{"2"}},
+			{
+				command:     buildCommand(modem.APDUCGLA, 2, authAPDU),
+				apduCommand: modem.APDUCGLA, channel: 2, apdu: authAPDU,
+				apduForm: modem.APDUUnquoted, sensitive: true,
+				lines: []string{fmt.Sprintf(`+CGLA: %d,"%X"`, len(successfulUSIMResponse())*2, successfulUSIMResponse())},
+			},
+			{command: "AT+CCHC=2"},
+		}
+		adapter, transcript := newAdapter(t, transcriptSteps)
+		result, err := adapter.Authenticate(context.Background(), identity, challenge)
+		if err != nil {
+			t.Fatalf("Authenticate: %v", err)
+		}
+		if !bytes.Equal(result.RES, []byte{1, 2, 3, 4, 5, 6, 7, 8}) {
+			t.Fatalf("RES = %x", result.RES)
+		}
+		transcript.assertDone()
+	})
+
+	t.Run("CCHO rejection falls back through CSIM", func(t *testing.T) {
+		cchoCommand := `AT+CCHO="` + fullISIM + `"`
+		transcriptSteps := []ec20TranscriptStep{
+			{command: "AT+CCID", lines: []string{"+CCID: " + identityICCID}},
+			{command: cchoCommand, final: "ERROR", err: &modem.CommandError{Command: cchoCommand, Final: "ERROR"}},
+			{
+				command:     buildCommand(modem.APDUCSIM, 0, selectAPDU),
+				apduCommand: modem.APDUCSIM, apdu: selectAPDU,
+				apduForm: modem.APDUUnquoted, sensitive: true,
+				lines: []string{`+CSIM: 4,9000`},
+			},
+			{
+				command:     buildCommand(modem.APDUCSIM, 0, authAPDU),
+				apduCommand: modem.APDUCSIM, apdu: authAPDU,
+				apduForm: modem.APDUUnquoted, sensitive: true,
+				lines: []string{fmt.Sprintf(`+CSIM: %d,%X`, len(successfulUSIMResponse())*2, successfulUSIMResponse())},
+			},
+		}
+		adapter, transcript := newAdapter(t, transcriptSteps)
+		result, err := adapter.Authenticate(context.Background(), identity, challenge)
+		if err != nil {
+			t.Fatalf("Authenticate after CCHO rejection: %v", err)
+		}
+		if !bytes.Equal(result.RES, []byte{1, 2, 3, 4, 5, 6, 7, 8}) {
+			t.Fatalf("RES = %x", result.RES)
+		}
+		binding, _ := adapter.bindingFor(identity)
+		if !binding.basicChannel {
+			t.Fatal("explicit CCHO rejection did not select the basic channel")
+		}
+		transcript.assertDone()
+	})
+
+	t.Run("CGLA rejection does not reroute to CSIM", func(t *testing.T) {
+		transcriptSteps := []ec20TranscriptStep{
+			{command: "AT+CCID", lines: []string{"+CCID: " + identityICCID}},
+			{command: `AT+CCHO="` + fullISIM + `"`, lines: []string{"2"}},
+			{
+				command:     buildCommand(modem.APDUCGLA, 2, authAPDU),
+				apduCommand: modem.APDUCGLA, channel: 2, apdu: authAPDU,
+				apduForm: modem.APDUUnquoted, sensitive: true,
+				err: &modem.APDUCommandRejectedError{Command: modem.APDUCGLA, Final: "ERROR"},
+			},
+			{command: "AT+CCHC=2"},
+		}
+		adapter, transcript := newAdapter(t, transcriptSteps)
+		_, err := adapter.Authenticate(context.Background(), identity, challenge)
+		if !errors.Is(err, ErrEC20AKACommand) {
+			t.Fatalf("Authenticate error = %v, want AKA command failure", err)
+		}
+		transcript.assertDone()
+	})
+}
+
 func TestEC20AdapterReadIdentityIMEIFallback(t *testing.T) {
 	steps := identityTranscriptSteps("234150123456789")
 	steps[3].lines = []string{"86123456789012M1"}
@@ -333,14 +496,14 @@ func TestEC20AdapterDiscoversFullUSIMAIDFromEFDIRWhenCUADFails(t *testing.T) {
 			[]ec20TranscriptStep{
 				{command: "AT+CCID", lines: []string{"+CCID: 8944101234567890123"}},
 				{command: "AT+CUAD", err: errors.New("+CME ERROR: 13"), final: "+CME ERROR: 13"},
-				{command: `AT+CSIM=16,"00A40004023F0000"`, lines: []string{`+CSIM: 4,"9000"`}},
-				{command: `AT+CSIM=16,"00A40004022F0000"`, lines: []string{`+CSIM: 4,"9000"`}},
-				{command: `AT+CSIM=10,"00B2010400"`, lines: []string{`+CSIM: 4,"6C1A"`}},
-				{command: `AT+CSIM=10,"00B201041A"`, lines: []string{fmt.Sprintf(`+CSIM: %d,"%s9000"`, len(record)+4, record)}},
+				{command: `AT+CSIM=16,"00A40004023F0000"`, sensitive: true, lines: []string{`+CSIM: 4,"9000"`}},
+				{command: `AT+CSIM=16,"00A40004022F0000"`, sensitive: true, lines: []string{`+CSIM: 4,"9000"`}},
+				{command: `AT+CSIM=10,"00B2010400"`, sensitive: true, lines: []string{`+CSIM: 4,"6C1A"`}},
+				{command: `AT+CSIM=10,"00B201041A"`, sensitive: true, lines: []string{fmt.Sprintf(`+CSIM: %d,"%s9000"`, len(record)+4, record)}},
 				{command: `AT+CCHO="` + fullAID + `"`, err: errors.New("unsupported"), final: "ERROR"},
-				{command: selectApplication, lines: []string{`+CSIM: 4,"9000"`}},
+				{command: selectApplication, sensitive: true, lines: []string{`+CSIM: 4,"9000"`}},
 				{command: "AT+CCID", lines: []string{"+CCID: 8944101234567890123"}},
-				{command: selectApplication, lines: []string{`+CSIM: 4,"9000"`}},
+				{command: selectApplication, sensitive: true, lines: []string{`+CSIM: 4,"9000"`}},
 				{command: authCommand, sensitive: true, lines: []string{fmt.Sprintf(`+CSIM: %d,"%s"`, len(encodedResponse), encodedResponse)}},
 			}...,
 		),
@@ -802,6 +965,10 @@ func (e *ec20PSIExecutor) LockUICC()   { e.mu.Lock() }
 func (e *ec20PSIExecutor) UnlockUICC() { e.mu.Unlock() }
 func (e *ec20PSIExecutor) ExecuteAT(ctx context.Context, id, command string) (modem.Response, error) {
 	return e.run(ctx, id, command)
+}
+
+func (*ec20PSIExecutor) ExecuteAPDU(context.Context, string, modem.APDUCommand, int, []byte) ([]byte, error) {
+	return nil, errors.New("unexpected APDU execution in PSI test")
 }
 
 func TestEC20ReadSMSCenterPSINoCacheAndLocks(t *testing.T) {

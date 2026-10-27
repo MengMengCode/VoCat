@@ -784,7 +784,10 @@ func (manager *Manager) Refresh(ctx context.Context, id string) (Snapshot, error
 		previousSnapshot = &copy
 	}
 	manager.mu.RUnlock()
-	snapshot, err := manager.readSnapshot(ctx, id, candidate, backend, previousICCID, previousSnapshot, client)
+	snapshot, err := manager.readSnapshotWithOperatorProfile(
+		ctx, id, candidate, backend, previousICCID, previousSnapshot, client,
+		operatorProfileForState(state, candidate),
+	)
 	if err == nil && strings.TrimSpace(snapshot.ICCID) != "" {
 		state.lastICCID = strings.TrimSpace(snapshot.ICCID)
 	}
@@ -916,10 +919,17 @@ func (manager *Manager) ExecuteAT(
 	commandCtx, cancel := manager.withTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 	response, err := client.Execute(commandCtx, command)
-	// An unsupported CLCC query does not indicate an unhealthy control channel.
+	// An unsupported CLCC query does not indicate an unhealthy control channel:
+	// 3GPP "operation not supported" (ERROR: 4) and the ZXIC vendor
+	// "command not recognized" (6003) are both expected on firmware without a
+	// call-list implementation.
 	var commandErr *modem.CommandError
+	final := ""
+	if errors.As(err, &commandErr) {
+		final = strings.TrimSpace(commandErr.Final)
+	}
 	if !strings.EqualFold(strings.TrimSpace(command), "AT+CLCC") ||
-		!errors.As(err, &commandErr) || strings.TrimSpace(commandErr.Final) != "+CME ERROR: 4" {
+		final != "+CME ERROR: 4" && final != "+CME ERROR: 6003" {
 		manager.setResult(id, state, nil, err)
 	}
 	return response, err

@@ -15,6 +15,7 @@ type ATProfile struct {
 	APDU     APDUCommandProfile
 	Operator OperatorATProfile
 	PDP      PDPATProfile
+	Identity IdentityATProfile
 }
 
 // ATProfileOverride replaces only the non-nil capability groups for a
@@ -24,6 +25,7 @@ type ATProfileOverride struct {
 	APDU     APDUCommandProfile
 	Operator OperatorATProfile
 	PDP      PDPATProfile
+	Identity IdentityATProfile
 }
 
 type APDUCommandProfile interface {
@@ -47,6 +49,22 @@ type PDPATProfile interface {
 	ConfigureAuthenticationCommand(cid, authCode int, username, password string) (string, error)
 	AttachCommand(enabled bool) string
 	ActivateCommand(cid int, enabled bool) string
+}
+
+// IdentityATProfile selects the commands used to read the modem's identity
+// (manufacturer/model/firmware), its ICCID, and whether the call-list query
+// AT+CLCC is implemented at all. Device flows treat every entry as optional
+// bookkeeping except the liveness rule: an entirely silent identity probe
+// still fails the snapshot.
+type IdentityATProfile interface {
+	// DeviceInfoCommands returns the ordered identification probes. The
+	// standard profile uses the single ATI probe; vendor profiles list the
+	// platform's own commands and each probe is tolerated independently.
+	DeviceInfoCommands() []string
+	// ICCIDCommands returns the ordered ICCID query fallback chain.
+	ICCIDCommands() []string
+	// SupportsCLCC reports whether AT+CLCC can be polled for call state.
+	SupportsCLCC() bool
 }
 
 type APDUCommand uint8
@@ -81,9 +99,26 @@ type ATOperatorSelection struct {
 type standardAPDUProfile struct{}
 type standardOperatorProfile struct{}
 type standardPDPProfile struct{}
+type standardIdentityATProfile struct{}
+type zxicIdentityATProfile struct{}
+
+// builtinProfileOverrides holds the chipset-family adaptations verified
+// against real hardware. Only chipsets with live evidence land here; every
+// other device keeps the standard 3GPP command set.
+var builtinProfileOverrides = []ATProfileOverride{
+	{
+		// ZXIC platform firmware ships no ATI, no AT+CCID family, and no
+		// AT+CLCC: each is answered with vendor +CME ERROR: 6003 (command
+		// not recognized). Identity comes from the prefixed +CGMI/+CGMM/
+		// +CGMR queries, the ICCID from the +ZICCID query, and call state
+		// only from vendor URCs. See docs/zxic-lab-checklist.md.
+		Chipset: ChipsetZXIC,
+		Identity: zxicIdentityATProfile{},
+	},
+}
 
 func ResolveATProfile(candidate Candidate) ATProfile {
-	return resolveATProfile(candidate, nil)
+	return resolveATProfile(candidate, builtinProfileOverrides)
 }
 
 func resolveATProfile(candidate Candidate, overrides []ATProfileOverride) ATProfile {
@@ -91,6 +126,7 @@ func resolveATProfile(candidate Candidate, overrides []ATProfileOverride) ATProf
 		APDU:     standardAPDUProfile{},
 		Operator: standardOperatorProfile{},
 		PDP:      standardPDPProfile{},
+		Identity: standardIdentityATProfile{},
 	}
 	chipset := ChipsetForUSB(candidate.VendorID, candidate.ProductID)
 	for _, override := range overrides {
@@ -106,10 +142,29 @@ func resolveATProfile(candidate Candidate, overrides []ATProfileOverride) ATProf
 		if override.PDP != nil {
 			profile.PDP = override.PDP
 		}
+		if override.Identity != nil {
+			profile.Identity = override.Identity
+		}
 		break
 	}
 	return profile
 }
+
+func (standardIdentityATProfile) DeviceInfoCommands() []string { return []string{"ATI"} }
+
+func (standardIdentityATProfile) ICCIDCommands() []string {
+	return []string{"AT+CCID", "AT+QCCID", "AT+MCCID"}
+}
+
+func (standardIdentityATProfile) SupportsCLCC() bool { return true }
+
+func (zxicIdentityATProfile) DeviceInfoCommands() []string {
+	return []string{"AT+CGMI", "AT+CGMM", "AT+CGMR"}
+}
+
+func (zxicIdentityATProfile) ICCIDCommands() []string { return []string{"AT+ZICCID?"} }
+
+func (zxicIdentityATProfile) SupportsCLCC() bool { return false }
 
 func (standardAPDUProfile) Build(command APDUCommand, channel int, apdu []byte, form APDUForm) (string, error) {
 	if len(apdu) == 0 {

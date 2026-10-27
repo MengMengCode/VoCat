@@ -33,6 +33,16 @@ func (s *isimFallbackTranscript) ExecuteSensitiveAT(ctx context.Context, id, com
 	s.assertLocked(command)
 	return s.ec20Transcript.ExecuteSensitiveAT(ctx, id, command)
 }
+func (s *isimFallbackTranscript) ExecuteAPDU(
+	ctx context.Context,
+	id string,
+	command modem.APDUCommand,
+	channel int,
+	apdu []byte,
+) ([]byte, error) {
+	s.assertLocked("APDU")
+	return s.ec20Transcript.ExecuteAPDU(ctx, id, command, channel, apdu)
+}
 
 func TestEC20ISIMStrictDiscoveryAndTransport(t *testing.T) {
 	const fullISIM = "A0000000871004FFFFFFFF8903020000"
@@ -53,10 +63,10 @@ func TestEC20ISIMStrictDiscoveryAndTransport(t *testing.T) {
 			// CUAD 只列出 USIM，完整 ISIM AID 必须从 EF_DIR 获取。
 			steps := []ec20TranscriptStep{
 				{command: "AT+CUAD", lines: []string{`+CUAD: "61124F10` + fullUSIM + `"`}},
-				{command: `AT+CSIM=16,"00A40004023F0000"`, lines: []string{`+CSIM: 4,"9000"`}},
-				{command: `AT+CSIM=16,"00A40004022F0000"`, lines: []string{`+CSIM: 4,"9000"`}},
-				{command: `AT+CSIM=10,"00B2010400"`, lines: []string{`+CSIM: 44,"61124F10` + fullUSIM + `9000"`}},
-				{command: `AT+CSIM=10,"00B2020400"`, lines: []string{`+CSIM: 44,"61124F10` + fullISIM + `9000"`}},
+				{command: `AT+CSIM=16,"00A40004023F0000"`, sensitive: true, lines: []string{`+CSIM: 4,"9000"`}},
+				{command: `AT+CSIM=16,"00A40004022F0000"`, sensitive: true, lines: []string{`+CSIM: 4,"9000"`}},
+				{command: `AT+CSIM=10,"00B2010400"`, sensitive: true, lines: []string{`+CSIM: 44,"61124F10` + fullUSIM + `9000"`}},
+				{command: `AT+CSIM=10,"00B2020400"`, sensitive: true, lines: []string{`+CSIM: 44,"61124F10` + fullISIM + `9000"`}},
 			}
 			authAPDU := strings.ToUpper(hex.EncodeToString(buildUSIMAuthenticateAPDU(AKAChallenge{})))
 			response := successfulUSIMResponse()
@@ -79,7 +89,7 @@ func TestEC20ISIMStrictDiscoveryAndTransport(t *testing.T) {
 					if test.selectFail {
 						sw = "6A82"
 					}
-					steps = append(steps, ec20TranscriptStep{command: `AT+CSIM=42,"00A4040410` + fullISIM + `"`, lines: []string{`+CSIM: 4,"` + sw + `"`}})
+					steps = append(steps, ec20TranscriptStep{command: `AT+CSIM=42,"00A4040410` + fullISIM + `"`, sensitive: true, lines: []string{`+CSIM: 4,"` + sw + `"`}})
 					if !test.selectFail {
 						step := ec20TranscriptStep{command: fmt.Sprintf(`AT+CSIM=%d,"%s"`, len(authAPDU), authAPDU), sensitive: true, lines: []string{fmt.Sprintf(`+CSIM: %d,"%s"`, len(encoded), encoded)}}
 						if test.authFail {

@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,6 +14,19 @@ import (
 	"vocat/internal/modem"
 )
 
+// iccidResponsePrefixes lists every ICCID response prefix the fallback
+// chains may parse, including the ZXIC +ZICCID query form.
+var iccidResponsePrefixes = []string{"+CCID:", "+QCCID:", "+MCCID:", "+ZICCID:"}
+
+// identityICCIDCommands returns the profile-driven ICCID query chain for a
+// device, falling back to the standard chain when the device is unknown.
+func (manager *Manager) identityICCIDCommands(id string) []string {
+	if state, err := manager.lookup(id); err == nil {
+		return modem.ResolveATProfile(manager.candidateFor(state)).Identity.ICCIDCommands()
+	}
+	return modem.ResolveATProfile(modem.Candidate{}).Identity.ICCIDCommands()
+}
+
 func (manager *Manager) readSnapshot(
 	ctx context.Context,
 	id string,
@@ -22,6 +36,91 @@ func (manager *Manager) readSnapshot(
 	previousSnapshot *Snapshot,
 	client modem.Client,
 ) (Snapshot, error) {
+	return manager.readSnapshotWithOperatorProfile(
+		ctx, id, candidate, backend, previousICCID, previousSnapshot, client,
+		modem.ResolveATProfile(candidate).Operator,
+	)
+}
+
+// probeIdentity reads the modem's identity through the profile's device-info
+// commands. The standard single ATI probe stays mandatory: on known modems a
+// silent ATI means the control channel is unusable. Multi-command vendor
+// profiles (ZXIC) tolerate each probe independently so one unsupported
+// command cannot void the snapshot.
+func (manager *Manager) probeIdentity(
+	ctx context.Context,
+	client modem.Client,
+	identity modem.IdentityATProfile,
+	snapshot *Snapshot,
+) error {
+	commands := identity.DeviceInfoCommands()
+	if len(commands) == 0 {
+		commands = []string{"ATI"}
+	}
+	if len(commands) == 1 && strings.EqualFold(strings.TrimSpace(commands[0]), "ATI") {
+		ati, err := manager.command(ctx, client, "ATI")
+		if err != nil {
+			return err
+		}
+		snapshot.Responsive = true
+		snapshot.Manufacturer, snapshot.Model, snapshot.Firmware = parseATI(ati.Lines)
+		return nil
+	}
+	var lastErr error
+	for _, command := range commands {
+		response, err := manager.command(ctx, client, command)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		snapshot.Responsive = true
+		switch {
+		case strings.Contains(strings.ToUpper(command), "CGMI"):
+			snapshot.Manufacturer = prefixedIdentityValue(response, command)
+		case strings.Contains(strings.ToUpper(command), "CGMM"):
+			snapshot.Model = prefixedIdentityValue(response, command)
+		case strings.Contains(strings.ToUpper(command), "CGMR"):
+			snapshot.Firmware = prefixedIdentityValue(response, command)
+		}
+	}
+	if !snapshot.Responsive {
+		if lastErr == nil {
+			lastErr = errors.New("identity probes returned no responses")
+		}
+		return lastErr
+	}
+	return nil
+}
+
+// prefixedIdentityValue extracts the first response line carrying the
+// command's own prefix (for example "+CGMI: value"); the ZXIC firmware
+// answers every identity query in that form. Lines without the prefix are
+// ignored so interleaved URCs cannot pollute the identity.
+func prefixedIdentityValue(response modem.Response, command string) string {
+	prefix := strings.ToUpper(strings.TrimPrefix(strings.TrimSpace(command), "AT"))
+	if !strings.HasPrefix(prefix, "+") {
+		prefix = "+" + prefix
+	}
+	prefix += ":"
+	for _, line := range response.Lines {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) >= len(prefix) && strings.EqualFold(trimmed[:len(prefix)], prefix) {
+			return strings.TrimSpace(trimmed[len(prefix):])
+		}
+	}
+	return ""
+}
+
+func (manager *Manager) readSnapshotWithOperatorProfile(
+	ctx context.Context,
+	id string,
+	candidate modem.Candidate,
+	backend string,
+	previousICCID string,
+	previousSnapshot *Snapshot,
+	client modem.Client,
+	operatorProfile modem.OperatorATProfile,
+) (Snapshot, error) {
 	snapshot := Snapshot{
 		DeviceID:      id,
 		Port:          candidate.ATPort.OpenPath(),
@@ -29,12 +128,10 @@ func (manager *Manager) readSnapshot(
 		UpdatedAt:     time.Now().UTC(),
 	}
 	ml307 := modem.IsML307(candidate)
-	ati, err := manager.command(ctx, client, "ATI")
-	if err != nil {
+	identityProfile := modem.ResolveATProfile(candidate).Identity
+	if err := manager.probeIdentity(ctx, client, identityProfile, &snapshot); err != nil {
 		return snapshot, fmt.Errorf("probe modem: %w", err)
 	}
-	snapshot.Responsive = true
-	snapshot.Manufacturer, snapshot.Model, snapshot.Firmware = parseATI(ati.Lines)
 	if ml307 {
 		if snapshot.Firmware == "" {
 			if response, firmwareErr := manager.command(ctx, client, "AT+CGMR"); firmwareErr == nil {
@@ -132,10 +229,10 @@ func (manager *Manager) readSnapshot(
 	}
 	var ccid modem.Response
 	var ccidErr error
-	for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+MCCID"} {
+	for _, command := range identityProfile.ICCIDCommands() {
 		ccid, ccidErr = manager.command(ctx, client, command)
 		if ccidErr == nil {
-			snapshot.ICCID = parseICCIDIdentifier(ccid, []string{"+CCID:", "+QCCID:", "+MCCID:"}, 18, 22)
+			snapshot.ICCID = parseICCIDIdentifier(ccid, iccidResponsePrefixes, 18, 22)
 			if snapshot.ICCID != "" {
 				break
 			}
@@ -235,17 +332,25 @@ func (manager *Manager) readSnapshot(
 			snapshot.RSSIDBm = metrics.RSSI
 		}
 	}
-	if response, ok := optional("AT+COPS?"); ok {
-		operator := parseCOPS(response)
-		if operator.Code != "" {
-			snapshot.OperatorCode = operator.Code
-		} else {
-			snapshot.OperatorCode = servingPLMN
+	if operatorProfile == nil {
+		operatorProfile = modem.ResolveATProfile(candidate).Operator
+	}
+	if response, ok := optional(operatorProfile.SelectionQueryCommand()); ok {
+		operatorCode := servingPLMN
+		fallbackName := parseCOPS(response).Name
+		if selection, selectionErr := operatorProfile.ParseSelection(response); selectionErr == nil {
+			selectedOperator := strings.TrimSpace(selection.Operator)
+			if decimalPLMN(selectedOperator) {
+				operatorCode = selectedOperator
+			} else if selectedOperator != "" {
+				fallbackName = selectedOperator
+			}
+			if snapshot.AccessTech == "" {
+				snapshot.AccessTech = accessTechnology(selection.AccessTechnologyCode)
+			}
 		}
-		snapshot.OperatorName = carrierNameForPLMN(snapshot.OperatorCode, operator.Name)
-		if snapshot.AccessTech == "" {
-			snapshot.AccessTech = operator.AccessTech
-		}
+		snapshot.OperatorCode = operatorCode
+		snapshot.OperatorName = carrierNameForPLMN(operatorCode, fallbackName)
 	}
 	for _, command := range []string{"AT+CEREG?", "AT+CGREG?", "AT+CREG?"} {
 		response, registrationErr := manager.command(ctx, client, command)

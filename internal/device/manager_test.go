@@ -449,6 +449,114 @@ func TestSnapshotReadsML307IdentityAndMUESTATS(t *testing.T) {
 	client.assertDone(t)
 }
 
+type operatorProfileSnapshotClient struct {
+	commands        []string
+	servingCellLine string
+	operatorLines   []string
+}
+
+func (client *operatorProfileSnapshotClient) Execute(ctx context.Context, command string) (modem.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return modem.Response{}, err
+	}
+	client.commands = append(client.commands, command)
+	var lines []string
+	switch command {
+	case "ATI":
+		lines = []string{"ZXIC", "UZ901", "firmware"}
+	case "AT+CPIN?":
+		lines = []string{"+CPIN: READY"}
+	case "AT+CCID":
+		lines = []string{"+CCID: 89860012345678901234"}
+	case "AT+CIMI":
+		lines = []string{"234151234567890"}
+	case "AT+CRSM=176,28486,0,0,17", "AT+CRSM=192,28589,0,0,0", "AT+CRSM=192,28478,0,0,0", "AT+CRSM=192,28479,0,0,0":
+		lines = []string{`+CRSM: 106,130,""`}
+	case "AT+CSQ":
+		lines = []string{"+CSQ: 20,99"}
+	case `AT+QENG="servingcell"`:
+		if client.servingCellLine != "" {
+			lines = []string{client.servingCellLine}
+		}
+	case "AT+CEREG?":
+		lines = []string{"+CEREG: 0,1"}
+	case "AT+CGSN":
+		lines = []string{"867530912345678"}
+	case "AT+CFUN?":
+		lines = []string{"+CFUN: 1"}
+	case "AT+CNUM":
+		lines = []string{`+CNUM: "",,145`}
+	case "AT+XOPS?":
+		lines = append([]string(nil), client.operatorLines...)
+		if lines == nil {
+			lines = []string{"+XOPS: custom selection"}
+		}
+	}
+	return modem.Response{Command: command, Lines: lines, Final: "OK"}, nil
+}
+
+func (*operatorProfileSnapshotClient) WaitURC(context.Context, func(string) bool) (string, error) {
+	return "", errors.New("unexpected URC wait")
+}
+
+func (*operatorProfileSnapshotClient) Close() error { return nil }
+
+func TestRefreshUsesResolvedOperatorProfile(t *testing.T) {
+	client := &operatorProfileSnapshotClient{}
+	manager, id := newStartedTestManager(t, client)
+	profile := testOperatorProfile{
+		queryCommand: "AT+XOPS?",
+		selection: modem.ATOperatorSelection{
+			Mode: 1, Format: 2, Operator: "99998", AccessTechnologyCode: "7",
+		},
+	}
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", profile)
+
+	snapshot, err := manager.Refresh(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if snapshot.OperatorCode != "99998" || snapshot.AccessTech != "LTE" {
+		t.Fatalf("snapshot did not use profile parser: code=%q accessTech=%q", snapshot.OperatorCode, snapshot.AccessTech)
+	}
+	for _, command := range client.commands {
+		if command == "AT+COPS?" {
+			t.Fatal("Refresh used hard-coded AT+COPS? instead of the operator profile")
+		}
+	}
+	profileQuerySeen := false
+	for _, command := range client.commands {
+		if command == "AT+XOPS?" {
+			profileQuerySeen = true
+			break
+		}
+	}
+	if !profileQuerySeen {
+		t.Fatalf("Refresh commands do not contain profile query: %v", client.commands)
+	}
+}
+
+func TestRefreshRetainsServingPLMNWhenOperatorProfileParseFails(t *testing.T) {
+	client := &operatorProfileSnapshotClient{
+		servingCellLine: `+QENG: "servingcell","NOCONN","LTE","FDD",460,01,5F1E805,37,1650,3,5,5,8340,-97,-10,-68,15,9`,
+		operatorLines:   []string{"+XOPS: malformed selection"},
+	}
+	manager, id := newStartedTestManager(t, client)
+	profile := testOperatorProfile{
+		queryCommand: "AT+XOPS?",
+		selectionErr: errors.New("operator profile response unavailable"),
+	}
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", profile)
+
+	snapshot, err := manager.Refresh(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if snapshot.OperatorCode != "46001" {
+		t.Fatalf("operator code = %q, want serving PLMN fallback 46001", snapshot.OperatorCode)
+	}
+}
+
 func TestManagerRefreshReadsNativeWWANICCIDThroughQMIUIM(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{
 		{command: "ATI", response: okResponse("Qualcomm", "PCIe/MHI WWAN modem", "Revision: native-410")},

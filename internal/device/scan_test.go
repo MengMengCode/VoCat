@@ -1,10 +1,170 @@
 package device
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"vocat/internal/modem"
 )
+
+type testOperatorProfile struct {
+	scanCommand       string
+	queryCommand      string
+	manualCommand     string
+	automaticCommand  string
+	deregisterCommand string
+	formatCommand     string
+	manualPLMN        string
+	manualAccessTech  int
+	checkManualInput  bool
+	scanResponse      string
+	selectionResponse string
+	records           []modem.ATOperatorRecord
+	selection         modem.ATOperatorSelection
+	selectionErr      error
+}
+
+func (profile testOperatorProfile) ScanCommand() string           { return profile.scanCommand }
+func (profile testOperatorProfile) SelectionQueryCommand() string { return profile.queryCommand }
+func (profile testOperatorProfile) ManualSelectionCommand(plmn string, accessTechnology *int) (string, error) {
+	if profile.checkManualInput &&
+		(plmn != profile.manualPLMN || accessTechnology == nil || *accessTechnology != profile.manualAccessTech) {
+		return "", errors.New("unexpected manual operator selection arguments")
+	}
+	return profile.manualCommand, nil
+}
+func (profile testOperatorProfile) AutomaticSelectionCommand() string {
+	return profile.automaticCommand
+}
+func (profile testOperatorProfile) DeregisterCommand() string           { return profile.deregisterCommand }
+func (profile testOperatorProfile) SetOperatorFormatCommand(int) string { return profile.formatCommand }
+func (profile testOperatorProfile) ParseScan(response modem.Response) []modem.ATOperatorRecord {
+	if profile.scanResponse != "" && !strings.Contains(response.Text(), profile.scanResponse) {
+		return nil
+	}
+	return append([]modem.ATOperatorRecord(nil), profile.records...)
+}
+func (profile testOperatorProfile) ParseSelection(response modem.Response) (modem.ATOperatorSelection, error) {
+	if profile.selectionResponse != "" && !strings.Contains(response.Text(), profile.selectionResponse) {
+		return modem.ATOperatorSelection{}, errors.New("unexpected operator selection response")
+	}
+	return profile.selection, profile.selectionErr
+}
+
+func configureTestOperatorProfile(
+	t *testing.T,
+	manager *Manager,
+	id, vendorID, productID string,
+	profile modem.OperatorATProfile,
+) {
+	t.Helper()
+	state, err := manager.lookup(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.opMu.Lock()
+	manager.mu.Lock()
+	state.candidate.VendorID = vendorID
+	state.candidate.ProductID = productID
+	state.atProfile.Operator = profile
+	manager.mu.Unlock()
+	state.opMu.Unlock()
+}
+
+func TestScanOperatorsParsesZXICCOPSResponse(t *testing.T) {
+	// This is a representative standard 3GPP COPS transcript, not a captured
+	// UZ901 hardware response; the repository has no sanitized device capture.
+	client := &transcriptClient{steps: []clientStep{{
+		command: "AT+COPS=?",
+		response: okResponse(
+			`+COPS: (2,"Roam Mobile","Roam","23415",7),(1,"Example Network","EX","99999",2),,(0-4),(0-2)`,
+		),
+	}}}
+	manager, id := newStartedTestManager(t, client)
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", modem.ResolveATProfile(modem.Candidate{
+		VendorID: "19d2", ProductID: "0536",
+	}).Operator)
+
+	result, err := manager.ScanOperators(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ScanOperators: %v", err)
+	}
+	if result.Status != "complete" || len(result.Operators) != 2 {
+		t.Fatalf("scan result = %+v", result)
+	}
+	first := result.Operators[0]
+	if first.Status != "current" || first.Numeric != "23415" || first.Act != "LTE" {
+		t.Fatalf("first operator = %+v, want current 23415 LTE", first)
+	}
+	second := result.Operators[1]
+	if second.Status != "available" || second.Numeric != "99999" || second.Act != "UTRAN" {
+		t.Fatalf("second operator = %+v, want available 99999 UTRAN", second)
+	}
+	client.assertDone(t)
+}
+
+func TestScanOperatorsUsesResolvedOperatorProfile(t *testing.T) {
+	profile := testOperatorProfile{
+		scanCommand:  "AT+XOPS=scan",
+		scanResponse: "+XOPS: opaque vendor response",
+		records: []modem.ATOperatorRecord{{
+			StatusCode: "2", LongName: "Profile Network", ShortName: "PN",
+			Numeric: "99998", AccessTechnologyCode: "7",
+		}},
+	}
+	client := &transcriptClient{steps: []clientStep{{command: "AT+XOPS=scan", response: okResponse("+XOPS: opaque vendor response")}}}
+	manager, id := newStartedTestManager(t, client)
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", profile)
+
+	result, err := manager.ScanOperators(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ScanOperators: %v", err)
+	}
+	if len(result.Operators) != 1 || result.Operators[0].Numeric != "99998" ||
+		result.Operators[0].Name != "Profile Network" || result.Operators[0].Act != "LTE" {
+		t.Fatalf("scan result did not use profile parser: %+v", result)
+	}
+	client.assertDone(t)
+}
+
+type cancelOperatorScanClient struct {
+	cancel   context.CancelFunc
+	commands []string
+}
+
+func (client *cancelOperatorScanClient) Execute(ctx context.Context, command string) (modem.Response, error) {
+	client.commands = append(client.commands, command)
+	if command != "AT+COPS=?" {
+		return modem.Response{}, errors.New("unexpected command during canceled operator scan")
+	}
+	client.cancel()
+	return modem.Response{}, context.Canceled
+}
+
+func (*cancelOperatorScanClient) WaitURC(context.Context, func(string) bool) (string, error) {
+	return "", errors.New("unexpected URC wait")
+}
+
+func (*cancelOperatorScanClient) Close() error { return nil }
+
+func TestScanOperatorsCancellationDoesNotChangeSelection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &cancelOperatorScanClient{cancel: cancel}
+	manager, id := newStartedTestManager(t, client)
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", modem.ResolveATProfile(modem.Candidate{
+		VendorID: "19d2", ProductID: "0536",
+	}).Operator)
+
+	result, err := manager.ScanOperators(ctx, id)
+	if !errors.Is(err, context.Canceled) || result.Status != "failed" {
+		t.Fatalf("ScanOperators = %+v, %v; want failed canceled scan", result, err)
+	}
+	if len(client.commands) != 1 || client.commands[0] != "AT+COPS=?" {
+		t.Fatalf("canceled scan changed selection state with commands %v", client.commands)
+	}
+}
 
 func TestParseOperatorScanNormalizesMainlandCarrierNamesByPLMN(t *testing.T) {
 	response := modem.Response{Lines: []string{

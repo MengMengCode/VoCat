@@ -24,10 +24,9 @@ type OperatorScanResult struct {
 	Operators []ScannedOperator `json:"operators"`
 }
 
-// ScanOperators runs AT+COPS=? to list the networks the modem can currently
-// see. The command is slow (tens of seconds, up to the modem's documented
-// ceiling), so it uses the manager's scan timeout rather than the normal
-// command timeout. It is abortable through the caller's context.
+// ScanOperators runs the current AT profile's network scan command. Scans can
+// take tens of seconds, so it uses the manager's scan timeout rather than the
+// normal command timeout and remains abortable through the caller's context.
 func (manager *Manager) ScanOperators(
 	ctx context.Context,
 	id string,
@@ -41,21 +40,23 @@ func (manager *Manager) ScanOperators(
 	if err := manager.validateActive(id, state); err != nil {
 		return OperatorScanResult{}, err
 	}
-	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
+	candidate := manager.candidateFor(state)
+	profile := operatorProfileForState(state, candidate)
+	client, err := manager.clientLocked(ctx, state, candidate)
 	if err != nil {
 		manager.setResult(id, state, nil, err)
 		return OperatorScanResult{}, err
 	}
 	scanContext, cancel := manager.withTimeout(ctx, manager.scanTimeout)
 	defer cancel()
-	response, err := client.Execute(scanContext, "AT+COPS=?")
+	response, err := client.Execute(scanContext, profile.ScanCommand())
 	if err != nil {
 		manager.setResult(id, state, nil, err)
 		return OperatorScanResult{Status: "failed", Operators: []ScannedOperator{}}, err
 	}
 	result := OperatorScanResult{
 		Status:    "complete",
-		Operators: parseOperatorScan(response),
+		Operators: mapATOperatorRecords(profile.ParseScan(response)),
 	}
 	manager.setResult(id, state, nil, nil)
 	return result, nil
@@ -64,37 +65,35 @@ func (manager *Manager) ScanOperators(
 // parseOperatorScan parses the +COPS: list returned by AT+COPS=?. Each entry is
 // a parenthesised tuple (stat,"long","short","numeric"[,act]).
 func parseOperatorScan(response modem.Response) []ScannedOperator {
-	operators := make([]ScannedOperator, 0)
-	for _, line := range response.Lines {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(strings.ToUpper(trimmed), "+COPS:") {
-			continue
+	profile := modem.ResolveATProfile(modem.Candidate{}).Operator
+	return mapATOperatorRecords(profile.ParseScan(response))
+}
+
+func operatorProfileForState(state *managedDevice, candidate modem.Candidate) modem.OperatorATProfile {
+	if state.atProfile.Operator != nil {
+		return state.atProfile.Operator
+	}
+	return modem.ResolveATProfile(candidate).Operator
+}
+
+func mapATOperatorRecords(records []modem.ATOperatorRecord) []ScannedOperator {
+	operators := make([]ScannedOperator, 0, len(records))
+	for _, record := range records {
+		name, country, _ := CarrierForPLMN(record.Numeric)
+		if name == "" {
+			name = strings.TrimSpace(record.LongName)
 		}
-		payload := strings.TrimSpace(trimmed[len("+COPS:"):])
-		for _, tuple := range extractScanTuples(payload) {
-			fields := csvValues(tuple)
-			if len(fields) < 4 {
-				continue
-			}
-			name, country, _ := CarrierForPLMN(fields[3])
-			if name == "" {
-				name = strings.TrimSpace(fields[1])
-			}
-			if name == "" {
-				name = strings.TrimSpace(fields[3])
-			}
-			operator := ScannedOperator{
-				Status:  operatorScanStatus(fields[0]),
-				Name:    name,
-				Short:   fields[2],
-				Numeric: fields[3],
-				Country: country,
-			}
-			if len(fields) >= 5 {
-				operator.Act = accessTechnology(fields[4])
-			}
-			operators = append(operators, operator)
+		if name == "" {
+			name = strings.TrimSpace(record.Numeric)
 		}
+		operators = append(operators, ScannedOperator{
+			Status:  operatorScanStatus(record.StatusCode),
+			Name:    name,
+			Short:   strings.TrimSpace(record.ShortName),
+			Numeric: strings.TrimSpace(record.Numeric),
+			Country: country,
+			Act:     accessTechnology(record.AccessTechnologyCode),
+		})
 	}
 	return operators
 }
@@ -111,33 +110,6 @@ func carrierNameForPLMN(plmn, fallback string) string {
 		return fallback
 	}
 	return strings.TrimSpace(plmn)
-}
-
-// extractScanTuples returns the contents of each top-level parenthesised group,
-// ignoring parentheses inside quoted strings.
-func extractScanTuples(payload string) []string {
-	tuples := make([]string, 0)
-	depth := 0
-	start := -1
-	inQuote := false
-	for index, r := range payload {
-		switch {
-		case r == '"':
-			inQuote = !inQuote
-		case r == '(' && !inQuote:
-			if depth == 0 {
-				start = index + 1
-			}
-			depth++
-		case r == ')' && !inQuote:
-			depth--
-			if depth == 0 && start >= 0 {
-				tuples = append(tuples, payload[start:index])
-				start = -1
-			}
-		}
-	}
-	return tuples
 }
 
 func operatorScanStatus(code string) string {
