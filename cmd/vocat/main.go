@@ -973,6 +973,18 @@ func configureVoWiFiRuntime(
 	if err != nil {
 		return nil, err
 	}
+	zxicAdapter, err := vowifi.NewZXICAdapter(mapper, vowifi.ATModemAdapterOptions{
+		// ZXIC follows the same fail-closed RF policy as EC20: teardown may
+		// restore CFUN but must never reactivate a PDP context.
+		RestoreCellularData: false,
+		PureAirplanePolicy: func(deviceID string) bool {
+			deviceConfig, configErr := database.Device(context.Background(), deviceID)
+			return configErr == nil && deviceConfig.VoWiFiEnabled
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 	nativeQMIAdapter, err := vowifi.NewNativeQMIAdapter(nativeQMIControllerMapper{Mapper: mapper, Devices: deviceManager}, func(deviceID string) bool {
 		deviceConfig, configErr := database.Device(context.Background(), deviceID)
 		return configErr == nil && deviceConfig.VoWiFiEnabled
@@ -1007,6 +1019,8 @@ func configureVoWiFiRuntime(
 				adapter = pcscAdapter
 			} else if deviceConfig.DeviceType == store.DeviceTypeWiFi410 {
 				adapter = nativeQMIAdapter
+			} else if deviceConfig.DeviceType == store.DeviceTypeZXIC {
+				adapter = zxicAdapter
 			}
 			return newVoWiFiOrchestrator(factoryContext, deviceConfig, database, adapter, logger, onIncomingCall)
 		},

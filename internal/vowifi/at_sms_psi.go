@@ -9,10 +9,10 @@ import (
 
 // ReadSMSCenterPSI reads record 1 of EF_PSISMSC (6FE5) under DF_TELECOM.
 // It deliberately does not cache card data or alter the modem's radio mode.
-func (adapter *EC20Adapter) ReadSMSCenterPSI(ctx context.Context, deviceID string) (string, error) {
+func (adapter *atModemAdapter) ReadSMSCenterPSI(ctx context.Context, deviceID string) (string, error) {
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" {
-		return "", errors.New("vocat: EC20 device ID is required")
+		return "", errors.New("vocat: device ID is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -29,10 +29,10 @@ func (adapter *EC20Adapter) ReadSMSCenterPSI(ctx context.Context, deviceID strin
 	}
 	response, err := adapter.execute(ctx, deviceID, `AT+CRSM=178,28645,1,4,0,,"3F007F10"`)
 	if err != nil {
-		return "", fmt.Errorf("vocat: read EC20 SMS center PSI: %w", err)
+		return "", fmt.Errorf("vocat: read SMS center PSI: %w", err)
 	}
 	if strings.TrimSpace(response.Final) != "OK" {
-		return "", errors.New("vocat: EC20 SMS center PSI read did not finish OK")
+		return "", errors.New("vocat: SMS center PSI read did not finish OK")
 	}
 	count := 0
 	for _, line := range response.Lines {
@@ -41,12 +41,12 @@ func (adapter *EC20Adapter) ReadSMSCenterPSI(ctx context.Context, deviceID strin
 		}
 	}
 	if count != 1 {
-		return "", errors.New("vocat: EC20 SMS center PSI read requires exactly one CRSM response")
+		return "", errors.New("vocat: SMS center PSI read requires exactly one CRSM response")
 	}
 	// Require completed data, not 9Fxx pending GET RESPONSE.
 	fields := parseCSV(valueAfterATPrefix(response, "+CRSM:"))
 	if len(fields) != 3 || fields[0] != "144" || fields[1] != "0" {
-		return "", errors.New("vocat: EC20 SMS center PSI read requires a complete 9000 data response")
+		return "", errors.New("vocat: SMS center PSI read requires a complete 9000 data response")
 	}
 	record, err := parseCRSMData(response)
 	if err != nil {

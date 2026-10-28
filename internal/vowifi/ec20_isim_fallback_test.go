@@ -110,7 +110,7 @@ func TestEC20ISIMStrictDiscoveryAndTransport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			original := ec20SIMBinding{deviceID: "ec20-1", iccid: identity.ICCID, imsi: identity.IMSI, aid: fullUSIM, application: "USIM", basicChannel: test.knownBasic}
+			original := atSIMBinding{deviceID: "ec20-1", iccid: identity.ICCID, imsi: identity.IMSI, aid: fullUSIM, application: "USIM", basicChannel: test.knownBasic}
 			adapter.bindings[identity.ICCID] = original
 			for attempt := 0; attempt < attempts; attempt++ {
 				result, err := adapter.AuthenticateWithPreference(context.Background(), identity, AKAChallenge{}, "isim_strict")
