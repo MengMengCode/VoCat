@@ -62,6 +62,18 @@ Vocat targets Qualcomm-based Quectel and China Mobile ML307 series modules that 
 
 Available features depend on the module firmware, USB composition, SIM/eSIM capabilities, host drivers, radio network, and carrier configuration.
 
+### ZXIC 4G modules (experimental, verification in progress)
+
+Vocat discovers and drives the verified ZXIC platform through typed 3GPP AT capability profiles with runtime APDU dialect negotiation. Support is keyed on the USB identity verified against real hardware, `19d2:0536` (UZ901 firmware); other products under the same vendor ID keep the standard 3GPP command set until they are verified individually. The AT path (enumeration, AT-port selection, IMEI snapshot, SIM readiness, AKA over the shared CSIM/CGLA executor, operator scan) is verified on real hardware. Cellular host data (CDC ECM) and the VoWiFi end-to-end flow are covered by component tests and remain gated on the deployment-environment smoke list in [docs/zxic-lab-checklist.md](docs/zxic-lab-checklist.md); the platform is promoted to the supported list only after that checklist passes.
+
+First-release data-path notes:
+
+- Host data modes: QMI, or ECM/RNDIS host networking (the verified ZXIC unit exposes CDC ECM via `cdc_ether`). Enabling data runs PDP activation first; the QMI backend then configures the interface from the runtime address settings the packet session reports, and the AT backend runs a foreground BusyBox `udhcpc` session. PPP-only data paths are out of scope.
+- Host requirements: `iproute2` for both backends, plus BusyBox `udhcpc` for the AT/ECM/RNDIS path (QMI only needs it as a fallback when the packet session reports no runtime address); serial `dialout` permission; `CAP_NET_ADMIN` for host networking (granted by the provided systemd service). A non-root run of BusyBox `udhcpc` also needs `CAP_NET_RAW` for the DHCP packet socket it opens on the link layer.
+- Routing safety: Vocat installs fwmark policy rules and per-interface routing tables (20000–29999) solely for its Export Proxy. The main routing table, system default route, and system DNS files are never modified.
+- APDU dialect: quoted/unquoted CSIM/CGLA forms are negotiated at runtime per device; timed-out APDUs are never replayed; errors and logs are scrubbed of credentials and APDU payloads.
+- Unknown modems fall back to the generic AT profile. Vendor-specific dial commands (for example the RNDIS-era `ZGACT`) are only used with hardware evidence; on the verified ZXIC ECM firmware that dial is known to fail, so the standard 3GPP flow is used instead.
+
 ## Installation
 
 ### One-click Linux installation

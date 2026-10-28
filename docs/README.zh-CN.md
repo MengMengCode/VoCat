@@ -61,6 +61,18 @@ Vocat 面向基于高通芯片、并暴露兼容 AT、QMI、串口与 USB 网络
 
 可用功能取决于模组固件、USB 复合设备配置、SIM/eSIM 能力、主机驱动、无线网络以及运营商配置。
 
+### ZXIC 4G 模组（实验性，验收进行中）
+
+Vocat 可发现并驱动已验证的 ZXIC 平台：类型化 3GPP AT 能力 profile 加运行时 APDU 方言协商。适配以真机验证过的 USB 标识 `19d2:0536`（UZ901 固件）为键；同一厂商号下的其他产品在逐一验证前仍使用标准 3GPP 命令集。AT 路径（枚举、AT 口选择、IMEI 快照、SIM 就绪、经共享 CSIM/CGLA 执行器的 AKA、运营商扫描）已在真机验证。蜂窝主机数据（CDC ECM）与 VoWiFi 端到端流程已有组件级测试，仍需通过部署环境的真机验收清单 [docs/zxic-lab-checklist.md](zxic-lab-checklist.md)；清单通过后才会把该平台列入正式支持列表。
+
+首期数据路径说明：
+
+- 主机数据模式：QMI，或 ECM/RNDIS 主机网络（已验证的 ZXIC 设备暴露 CDC ECM / `cdc_ether`）。启用数据会先激活 PDP；QMI 后端随后按数据包会话上报的运行时地址配置接口，AT 后端则运行前台 BusyBox `udhcpc` 会话。PPP-only 数据路径不在首期范围。
+- 主机要求：两种后端都需要 `iproute2`；AT/ECM/RNDIS 路径需要 BusyBox `udhcpc`（QMI 仅在数据包会话未上报运行时地址时才回退到它）；串口 `dialout` 权限；主机网络需要 `CAP_NET_ADMIN`（随附 systemd 服务已授予）；非 root 运行 BusyBox `udhcpc` 时还需要 `CAP_NET_RAW` 以创建 DHCP 数据包套接字。
+- 路由安全：Vocat 仅为 Export Proxy 安装 fwmark 策略规则与每接口路由表（20000–29999），从不修改 main 路由表、系统默认路由与系统 DNS 文件。
+- APDU 方言：CSIM/CGLA 的带引号/无引号形态按设备运行时协商；超时的 APDU 不会重放；错误与日志对凭据和 APDU 载荷脱敏。
+- 未知模组回退到通用 AT profile。厂商私有拨号命令（如 RNDIS 时代的 `ZGACT`）仅在有硬件证据时使用；在已验证的 ZXIC ECM 固件上该拨号已知失败，因此走标准 3GPP 流程。
+
 ## 安装
 
 ### Linux 一键安装
