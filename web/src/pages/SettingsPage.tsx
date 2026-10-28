@@ -579,7 +579,8 @@ export default function SettingsPage() {
                 <TelegramTab onClear={() => void clearChannel("telegram")} value={forms.telegram} onChange={(p) => updateChannel("telegram", p)} />
               ) : null}
               {activeTab === "bark" ? (
-                <BarkTab value={forms.bark} onChange={(p) => updateChannel("bark", p)} testing={testingBark} onTest={onTestBark} />
+                <BarkTab value={forms.bark} onChange={(p) => updateChannel("bark", p)} testing={testingBark} onTest={onTestBark}
+                  devices={devices} devicesFailed={devicesFailed} />
               ) : null}
               {activeTab === "email" ? (
                 <EmailTab onClear={() => void clearChannel("email")} value={forms.email} onChange={(p) => updateChannel("email", p)} testing={testingEmail} onTest={onTestEmail} />

@@ -348,7 +348,8 @@ func sendSMSNotification(ctx context.Context, channel string, config map[string]
 }
 
 func sendBarkSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
-	if !notificationMatchesDevice(configStrings(config, "device_ids"), message.DeviceID) {
+	destinations := notificationDestinations(config, message.DeviceID)
+	if len(destinations) == 0 {
 		return nil
 	}
 	client, err := restrictedHTTPClient(ctx, 6*time.Second, "")
@@ -362,7 +363,7 @@ func sendBarkSMSNotification(ctx context.Context, config map[string]any, message
 		}
 	}
 	encoded, _ := json.Marshal(payload)
-	for _, destination := range configStrings(config, "urls") {
+	for _, destination := range destinations {
 		parsed, err := validateOutboundURL(ctx, destination, false)
 		if err != nil {
 			return err

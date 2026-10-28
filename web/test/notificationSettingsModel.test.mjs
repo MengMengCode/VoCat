@@ -13,6 +13,7 @@ const compiled = ts.transpileModule(source, {
 const moduleURL = `data:text/javascript;base64,${Buffer.from(compiled.outputText).toString("base64")}`;
 const {
   DEFAULT_LARK_PAYLOAD_TEMPLATE,
+  buildBarkPayload,
   buildLarkPayload,
   buildNotificationsPayload,
   defaultNotifyForms,
@@ -141,4 +142,28 @@ test("device bindings round-trip missing, null, empty and selected scopes", () =
     assert.deepEqual(forms[channel].deviceIds, data[channel].deviceIds ?? null);
     assert.deepEqual(payload[channel].deviceIds, data[channel].deviceIds ?? null);
   }
+});
+
+test("round-trips Bark per-URL device scopes and drops stale ones", () => {
+  const a = "https://api.day.app/KeyA/";
+  const b = "https://api.day.app/KeyB/";
+  // The API client camelizes keys, so url_scopes/device_ids arrive as urlScopes/deviceIds.
+  const forms = formsFromNotifications({
+    bark: { enabled: true, urls: [a, b], urlScopes: [{ url: a, deviceIds: ["reader-1"] }] },
+  });
+  assert.deepEqual(forms.bark.urlScopes, [{ url: a, deviceIds: ["reader-1"] }]);
+  assert.deepEqual(defaultNotifyForms().bark.urlScopes, []);
+
+  const payload = buildBarkPayload({
+    ...forms.bark,
+    urls: [a, ` ${b} `],
+    urlScopes: [
+      { url: a, deviceIds: ["reader-1"] },
+      { url: a, deviceIds: ["reader-9"] },
+      { url: b, deviceIds: ["reader-2"] },
+      { url: "https://api.day.app/Removed/", deviceIds: ["reader-3"] },
+    ],
+  });
+  assert.deepEqual(payload.urlScopes, [{ url: a, deviceIds: ["reader-1"] }, { url: b, deviceIds: ["reader-2"] }]);
+  assert.equal("urlScopes" in buildBarkPayload(forms.bark, true), false);
 });
