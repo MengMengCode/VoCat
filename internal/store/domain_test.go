@@ -199,6 +199,20 @@ func TestML307DeviceTypeNormalizesAndPersists(t *testing.T) {
 	}
 }
 
+func TestZXICDeviceTypeNormalizesAndPersists(t *testing.T) {
+	if got := NormalizeDeviceType(" ZXIC "); got != DeviceTypeZXIC {
+		t.Fatalf("NormalizeDeviceType(ZXIC) = %q", got)
+	}
+	database := openTestStore(t, ":memory:")
+	if err := database.UpsertDevice(context.Background(), Device{ID: "zxic", Name: "ZXIC", DeviceType: " zxic "}); err != nil {
+		t.Fatalf("UpsertDevice: %v", err)
+	}
+	got, err := database.Device(context.Background(), "zxic")
+	if err != nil || got.DeviceType != DeviceTypeZXIC {
+		t.Fatalf("persisted type = %q, err = %v", got.DeviceType, err)
+	}
+}
+
 func TestMigration8DefaultsExistingDevicesToPCIeType(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "device-type.db")

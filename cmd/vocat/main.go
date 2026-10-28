@@ -1429,6 +1429,9 @@ func provisionDiscoveredDevices(
 }
 
 func provisionedDeviceType(candidate modem.Candidate) string {
+	if modem.ChipsetForUSB(candidate.VendorID, candidate.ProductID) == modem.ChipsetZXIC {
+		return store.DeviceTypeZXIC
+	}
 	if modem.IsML307(candidate) {
 		return store.DeviceTypeML307
 	}

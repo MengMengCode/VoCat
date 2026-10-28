@@ -258,7 +258,7 @@ func TestManagedDeviceProfileResetsOnUSBIdentityChange(t *testing.T) {
 	state.atProfile = modem.ATProfile{}
 	changed := unchanged
 	changed.VendorID, changed.ProductID = "19d2", "0536"
-	changed.Manufacturer, changed.Product = "ZXIC", "UZ901"
+	changed.Manufacturer, changed.Product = "ZXIC", "ZX297510"
 	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{changed}}
 	if _, err := manager.Discover(context.Background()); err != nil {
 		t.Fatalf("Discover changed identity: %v", err)
@@ -481,7 +481,7 @@ func (client *operatorProfileSnapshotClient) Execute(ctx context.Context, comman
 	var lines []string
 	switch command {
 	case "ATI":
-		lines = []string{"ZXIC", "UZ901", "firmware"}
+		lines = []string{"ZXIC", "ZX297510", "firmware"}
 	case "AT+CPIN?":
 		lines = []string{"+CPIN: READY"}
 	case "AT+CCID":

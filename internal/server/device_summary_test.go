@@ -28,6 +28,50 @@ func TestFillConfigFromPhysicalClassifiesDJI4G(t *testing.T) {
 	}
 }
 
+// TestFillConfigFromPhysicalClassifiesZXIC pins the discovered-device
+// marking for the verified ZXIC platform: both the discovered listing and
+// the takeover reclassification must stamp the dedicated zxic type so the UI
+// can identify the chip through the whole configuration flow. The vendor ID
+// alone is not evidence — only the USB identity verified against real
+// hardware is classified, and a sibling product under the same vendor keeps
+// the standard device type.
+func TestFillConfigFromPhysicalClassifiesZXIC(t *testing.T) {
+	config := store.Device{DeviceType: store.DeviceTypePCIeEC20EC25}
+	entry := device.Device{Candidate: modem.Candidate{
+		VendorID:  "19d2",
+		ProductID: "0536",
+	}}
+
+	fillConfigFromPhysical(&config, entry)
+
+	if config.DeviceType != store.DeviceTypeZXIC {
+		t.Fatalf("device type = %q, want %q", config.DeviceType, store.DeviceTypeZXIC)
+	}
+	if got := discoveredDeviceType(entry.Candidate); got != store.DeviceTypeZXIC {
+		t.Fatalf("discovered device type = %q, want %q", got, store.DeviceTypeZXIC)
+	}
+}
+
+// TestFillConfigFromPhysicalIgnoresUnverifiedZxicProduct pins that a product
+// under a known vendor but outside the verified USB identity is not stamped
+// as ZXIC: a vendor ID alone does not identify a chipset or its AT dialect.
+func TestFillConfigFromPhysicalIgnoresUnverifiedZxicProduct(t *testing.T) {
+	config := store.Device{DeviceType: store.DeviceTypePCIeEC20EC25}
+	entry := device.Device{Candidate: modem.Candidate{
+		VendorID:  "19d2",
+		ProductID: "ffff",
+	}}
+
+	fillConfigFromPhysical(&config, entry)
+
+	if config.DeviceType == store.DeviceTypeZXIC {
+		t.Fatalf("device type = %q, want a non-ZXIC type for an unverified product", config.DeviceType)
+	}
+	if got := discoveredDeviceType(entry.Candidate); got == store.DeviceTypeZXIC {
+		t.Fatalf("discovered device type = %q, want a non-ZXIC type for an unverified product", got)
+	}
+}
+
 func TestConfiguredDeviceSummaryIgnoresVoWiFiRuntimeFromPreviousSIM(t *testing.T) {
 	database, err := store.Open(context.Background(), ":memory:")
 	if err != nil {
