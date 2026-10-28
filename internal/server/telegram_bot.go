@@ -1700,6 +1700,12 @@ func (bot *telegramBot) executeTimedCellularCall(
 	action telegramPendingAction,
 	physicalID string,
 ) (string, error) {
+	// A timed call is confirmed through the call list, so a firmware without
+	// AT+CLCC cannot run one. The check happens before the dial command so
+	// the modem state is left untouched.
+	if !bot.server.supportsCLCC(ctx, physicalID) {
+		return "", errors.New("该模块固件不支持 AT+CLCC 查询")
+	}
 	dialContext, cancelDial := context.WithTimeout(ctx, 20*time.Second)
 	response, err := bot.server.devices.ExecuteAT(dialContext, physicalID, "ATD"+action.Argument+";")
 	cancelDial()
@@ -1770,6 +1776,9 @@ func (bot *telegramBot) executeTimedCellularCall(
 }
 
 func (bot *telegramBot) telegramCellularCalls(ctx context.Context, physicalID string) ([]map[string]any, error) {
+	if !bot.server.supportsCLCC(ctx, physicalID) {
+		return nil, errors.New("该模块固件不支持 AT+CLCC 查询")
+	}
 	queryContext, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	response, err := bot.server.devices.ExecuteAT(queryContext, physicalID, "AT+CLCC")
@@ -1937,6 +1946,12 @@ func (bot *telegramBot) executeSimpleCellularCallAction(ctx context.Context, phy
 		}
 		return formatTelegramCellularCalls(calls), nil
 	case "answer":
+		// The answer is confirmed through the call list, so a firmware
+		// without AT+CLCC cannot confirm it. The check happens before the
+		// answer command so the modem state is left untouched.
+		if !bot.server.supportsCLCC(ctx, physicalID) {
+			return "", errors.New("该模块固件不支持 AT+CLCC 查询")
+		}
 		operationContext, cancel := context.WithTimeout(ctx, 20*time.Second)
 		response, err := bot.server.devices.ExecuteAT(operationContext, physicalID, "ATA")
 		cancel()
@@ -1965,6 +1980,12 @@ func (bot *telegramBot) executeSimpleCellularCallAction(ctx context.Context, phy
 	case "hangup":
 		if err := bot.hangupCellularCall(physicalID); err != nil {
 			return "", err
+		}
+		// The hangup itself went through over the air. A firmware without a
+		// call list cannot confirm it, so the confirmation step is skipped
+		// instead of failing the operation that already succeeded.
+		if !bot.server.supportsCLCC(ctx, physicalID) {
+			return "已通过基站发送 ATH；该模块不支持 CLCC 确认。", nil
 		}
 		deadline := time.Now().Add(4 * time.Second)
 		for time.Now().Before(deadline) {
