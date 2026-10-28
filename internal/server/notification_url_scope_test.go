@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"slices"
@@ -58,6 +59,7 @@ func TestBarkURLScopesAPI(t *testing.T) {
 	}
 
 	for name, scopes := range map[string]string{
+		"null":               `null`,
 		"not an array":       `{}`,
 		"URL not in urls":    `[{"url":"https://api.day.app/Other/","device_ids":["reader-1"]}]`,
 		"duplicate URL":      `[{"url":"` + a + `","device_ids":["reader-1"]},{"url":"` + a + `","device_ids":["reader-2"]}]`,
@@ -71,6 +73,15 @@ func TestBarkURLScopesAPI(t *testing.T) {
 		if response := api.request(t, http.MethodPut, "/api/settings/notifications", body); response.Code != http.StatusBadRequest {
 			t.Errorf("%s: status=%d, want 400 (body=%s)", name, response.Code, response.Body)
 		}
+	}
+
+	// A test notification goes to every draft URL: saved scopes must not block a draft that removed a URL.
+	resolved, _, err := api.server.resolveNotificationTestConfig(context.Background(), "bark", json.RawMessage(`{"urls":["`+a+`"]}`))
+	if err != nil {
+		t.Fatalf("Bark test with a removed scoped URL: %v", err)
+	}
+	if _, present := resolved["url_scopes"]; present {
+		t.Errorf("Bark test config kept url_scopes: %v", resolved["url_scopes"])
 	}
 
 	// url_scopes is a Bark field only; other channels still reject it.

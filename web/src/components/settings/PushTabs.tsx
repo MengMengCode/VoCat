@@ -37,12 +37,13 @@ const BARK_LEVEL_OPTIONS = [
   { value: "passive", label: "Passive (passive)" },
 ];
 
-// Show a Bark URL without its device key: "https://api.day.app/AbCd…/" -> "api.day.app/AbCd…".
+// Show a Bark URL with its device key shortened but still telling URLs apart:
+// "https://api.day.app/AbCdEfGh1234/" -> "api.day.app/AbCd…1234".
 function shortBarkUrl(url: string): string {
   try {
     const parsed = new URL(url);
     const key = parsed.pathname.split("/").filter(Boolean)[0] ?? "";
-    return `${parsed.host}/${key.length > 6 ? `${key.slice(0, 4)}…` : key}`;
+    return `${parsed.host}/${key.length > 10 ? `${key.slice(0, 4)}…${key.slice(-4)}` : key}`;
   } catch {
     return url;
   }
@@ -81,7 +82,8 @@ export function BarkTab({ value, onChange, testing, onTest, devices, devicesFail
           placeholder="https://api.day.app/YOUR_KEY/"
           emptyText={t("尚未配置任何 Bark URL，点击右侧添加按钮。")}
         />
-        {urls.length > 1 ? (
+        {/* Also shown for a single URL that still has a scope, so it can be cleared after removing the others. */}
+        {urls.length > 1 || urls.some((url) => scopeOf(url) !== null) ? (
           <Field label={t("按链接指定设备")} hint={t("每个链接可以只接收部分设备的通知，例如一个链接只收读卡器 A，另一个只收读卡器 B。未开启的链接按下方「仅推送指定设备」推送。")}>
             <div className="space-y-2">
               {urls.map((url) => (

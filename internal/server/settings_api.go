@@ -611,6 +611,11 @@ func (s *Server) resolveNotificationTestConfig(
 		}
 		resolved[key] = value
 	}
+	// A Bark test goes to every draft URL, so saved per-URL scopes do not apply and must not be
+	// validated against URLs the draft may have removed.
+	if channel == "bark" {
+		delete(resolved, "url_scopes")
+	}
 	encoded, err := json.Marshal(resolved)
 	if err != nil {
 		return nil, store.NotificationSetting{}, err
@@ -1392,7 +1397,8 @@ type urlScope struct {
 // snake_case, which would corrupt case-sensitive URLs such as Bark keys.
 func decodeURLScopes(raw json.RawMessage) ([]urlScope, error) {
 	var entries []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil {
+	// null decodes without error into a nil slice; treat it as malformed rather than "no scopes".
+	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil {
 		return nil, errors.New("must be an array of {url, device_ids} objects")
 	}
 	if len(entries) > 32 {
