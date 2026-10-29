@@ -4,7 +4,8 @@ import { Button } from "../ui/Button";
 import { Input, Textarea } from "../ui/Input";
 import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
-import { ChannelHeader, EmptyLine, Field, UrlListEditor } from "./controls";
+import type { DeviceListItem } from "../../types";
+import { ChannelHeader, EmptyLine, Field, NotificationDeviceScope, UrlListEditor } from "./controls";
 import { HEADER_NAME_SUGGESTIONS, nextHeaderRowId } from "./model";
 import type { BarkForm, EmailForm, HeaderRow, LarkForm, NotifyForms, WebhookForm, WecomForm } from "./model";
 
@@ -36,9 +37,30 @@ const BARK_LEVEL_OPTIONS = [
   { value: "passive", label: "Passive (passive)" },
 ];
 
-export function BarkTab({ value, onChange, testing, onTest }: PushChannelProps<BarkForm>) {
+// Show a Bark URL with its device key shortened but still telling URLs apart:
+// "https://api.day.app/AbCdEfGh1234/" -> "api.day.app/AbCd…1234".
+function shortBarkUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const key = parsed.pathname.split("/").filter(Boolean)[0] ?? "";
+    return `${parsed.host}/${key.length > 10 ? `${key.slice(0, 4)}…${key.slice(-4)}` : key}`;
+  } catch {
+    return url;
+  }
+}
+
+export function BarkTab({ value, onChange, testing, onTest, devices, devicesFailed }: PushChannelProps<BarkForm> & {
+  devices: Pick<DeviceListItem, "id" | "name">[] | null;
+  devicesFailed: boolean;
+}) {
   const { t } = useI18n();
   const off = !value.enabled;
+  const urls = [...new Set((value.urls || []).map((url) => url.trim()).filter(Boolean))];
+  const scopeOf = (url: string) => (value.urlScopes || []).find((scope) => scope.url.trim() === url)?.deviceIds ?? null;
+  const setScope = (url: string, deviceIds: string[] | null) => {
+    const others = (value.urlScopes || []).filter((scope) => scope.url.trim() !== url);
+    onChange({ urlScopes: deviceIds === null ? others : [...others, { url, deviceIds }] });
+  };
   return (
     <div className="pt-2">
       <ChannelHeader
@@ -60,6 +82,18 @@ export function BarkTab({ value, onChange, testing, onTest }: PushChannelProps<B
           placeholder="https://api.day.app/YOUR_KEY/"
           emptyText={t("尚未配置任何 Bark URL，点击右侧添加按钮。")}
         />
+        {/* Also shown for a single URL that still has a scope, so it can be cleared after removing the others. */}
+        {urls.length > 1 || urls.some((url) => scopeOf(url) !== null) ? (
+          <Field label={t("按链接指定设备")} hint={t("每个链接可以只接收部分设备的通知，例如一个链接只收读卡器 A，另一个只收读卡器 B。未开启的链接按下方「仅推送指定设备」推送。")}>
+            <div className="space-y-2">
+              {urls.map((url) => (
+                <NotificationDeviceScope key={url} value={scopeOf(url)} onChange={(ids) => setScope(url, ids)}
+                  devices={devices} failed={devicesFailed} title={shortBarkUrl(url)} hint={t("开启后，这个链接只推送所选设备的通知。")}
+                  className="space-y-3 rounded-lg border border-gray-200 p-3 text-sm dark:border-white/10" />
+              ))}
+            </div>
+          </Field>
+        ) : null}
         <Field label={t("分组 (Group)")} hint={t("iOS 设备上的通知分组。")}>
           <Input value={value.group} onChange={(e) => onChange({ group: e.target.value })} disabled={off} placeholder={t("例如 vocat")} />
         </Field>

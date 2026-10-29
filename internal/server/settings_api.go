@@ -19,6 +19,7 @@ import (
 	"net/smtp"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,6 +63,7 @@ var notificationFields = map[string]map[string]string{
 	},
 	"bark": {
 		"urls": "strings", "group": "string", "icon": "string", "level": "string",
+		"url_scopes": "url_scopes",
 	},
 	"pushplus": {
 		"token": "string", "topic": "string", "channel": "string",
@@ -275,6 +277,9 @@ func decodeNotificationConfig(
 			return false, nil, err
 		}
 	}
+	if err := validateURLScopeTargets(channel, document); err != nil {
+		return false, nil, err
+	}
 	config, err := json.Marshal(document)
 	if err != nil {
 		return false, nil, fmt.Errorf("encode %s notification config: %w", channel, err)
@@ -421,6 +426,10 @@ func validateNotificationField(
 					return fmt.Errorf("%s contains an invalid email address", field)
 				}
 			}
+		}
+	case "url_scopes":
+		if _, err := decodeURLScopes(raw); err != nil {
+			return fmt.Errorf("%s %w", field, err)
 		}
 	case "string_map":
 		var values map[string]string
@@ -601,6 +610,11 @@ func (s *Server) resolveNotificationTestConfig(
 			value = mergeNotificationTestSecretValue(value, resolved[key])
 		}
 		resolved[key] = value
+	}
+	// A Bark test goes to every draft URL, so saved per-URL scopes do not apply and must not be
+	// validated against URLs the draft may have removed.
+	if channel == "bark" {
+		delete(resolved, "url_scopes")
 	}
 	encoded, err := json.Marshal(resolved)
 	if err != nil {
@@ -1369,6 +1383,121 @@ func configStrings(config map[string]any, key string) []string {
 	default:
 		return nil
 	}
+}
+
+// urlScope narrows one destination URL of a channel to a set of devices.
+type urlScope struct {
+	URL       string   `json:"url"`
+	DeviceIDs []string `json:"device_ids"`
+}
+
+// decodeURLScopes parses and validates a url_scopes array:
+// [{"url": "...", "device_ids": ["..."]}]. It is a list rather than a map keyed
+// by URL because the web client rewrites object keys between camelCase and
+// snake_case, which would corrupt case-sensitive URLs such as Bark keys.
+func decodeURLScopes(raw json.RawMessage) ([]urlScope, error) {
+	var entries []map[string]json.RawMessage
+	// null decodes without error into a nil slice; treat it as malformed rather than "no scopes".
+	if err := json.Unmarshal(raw, &entries); err != nil || entries == nil {
+		return nil, errors.New("must be an array of {url, device_ids} objects")
+	}
+	if len(entries) > 32 {
+		return nil, errors.New("cannot contain more than 32 entries")
+	}
+	scopes := make([]urlScope, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		for name := range entry {
+			if name != "url" && name != "device_ids" {
+				return nil, fmt.Errorf("entry field %q is not supported", name)
+			}
+		}
+		var scope urlScope
+		if json.Unmarshal(entry["url"], &scope.URL) != nil {
+			return nil, errors.New("entry url must be a string")
+		}
+		scope.URL = strings.TrimSpace(scope.URL)
+		if _, err := parseOutboundURL(scope.URL, false); err != nil {
+			return nil, errors.New("contains an invalid HTTP URL")
+		}
+		if seen[scope.URL] {
+			return nil, errors.New("lists the same URL more than once")
+		}
+		seen[scope.URL] = true
+		if json.Unmarshal(entry["device_ids"], &scope.DeviceIDs) != nil || scope.DeviceIDs == nil {
+			return nil, errors.New("entry device_ids must be an array of device IDs")
+		}
+		for _, id := range scope.DeviceIDs {
+			if strings.TrimSpace(id) == "" {
+				return nil, errors.New("contains an empty device ID")
+			}
+		}
+		scopes = append(scopes, scope)
+	}
+	return scopes, nil
+}
+
+// validateURLScopeTargets rejects url_scopes entries for URLs the channel does not send to.
+func validateURLScopeTargets(channel string, document map[string]json.RawMessage) error {
+	raw, ok := document["url_scopes"]
+	if !ok {
+		return nil
+	}
+	scopes, err := decodeURLScopes(raw)
+	if err != nil {
+		return fmt.Errorf("%s.url_scopes %w", channel, err)
+	}
+	var urls []string
+	if rawURLs, ok := document["urls"]; ok {
+		_ = json.Unmarshal(rawURLs, &urls)
+	}
+	for _, scope := range scopes {
+		if !slices.ContainsFunc(urls, func(target string) bool { return strings.TrimSpace(target) == scope.URL }) {
+			return fmt.Errorf("%s.url_scopes refers to a URL that is not in %s.urls", channel, channel)
+		}
+	}
+	return nil
+}
+
+// configURLScopes reads url_scopes from a stored config, keyed by URL.
+// Entries were validated when saved, so malformed ones are skipped here.
+func configURLScopes(config map[string]any) map[string][]string {
+	items, ok := config["url_scopes"].([]any)
+	if !ok {
+		return nil
+	}
+	scopes := make(map[string][]string, len(items))
+	for _, item := range items {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		target, _ := entry["url"].(string)
+		ids := configStrings(entry, "device_ids")
+		if target = strings.TrimSpace(target); target != "" && ids != nil {
+			scopes[target] = ids
+		}
+	}
+	return scopes
+}
+
+// notificationDestinations returns the URLs that should receive a notification
+// for deviceID. The channel-wide device_ids scope applies first; a URL listed in
+// url_scopes is further limited to its own devices, and other URLs follow the
+// channel scope alone. Configs without url_scopes behave exactly as before.
+func notificationDestinations(config map[string]any, deviceID string) []string {
+	if !notificationMatchesDevice(configStrings(config, "device_ids"), deviceID) {
+		return nil
+	}
+	scopes := configURLScopes(config)
+	var destinations []string
+	for _, target := range configStrings(config, "urls") {
+		if ids, scoped := scopes[target]; scoped && !slices.Contains(ids, deviceID) {
+			continue
+		}
+		destinations = append(destinations, target)
+	}
+	return destinations
 }
 
 func configStringMap(config map[string]any, key string) map[string]string {

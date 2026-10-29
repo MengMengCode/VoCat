@@ -27,9 +27,16 @@ export interface WebhookForm {
   headers: HeaderRow[];
 }
 
+// Limits one Bark URL to some devices. URLs without an entry follow the channel's device scope.
+export interface BarkUrlScope {
+  url: string;
+  deviceIds: string[];
+}
+
 export interface BarkForm {
   enabled: boolean;
   urls: string[];
+  urlScopes: BarkUrlScope[];
   group: string;
   icon: string;
   level: string;
@@ -196,6 +203,9 @@ export function formsFromNotifications(data: Partial<NotificationSettings>): Not
     bark: {
       enabled: !!bark.enabled,
       urls: strList(bark.urls),
+      urlScopes: Array.isArray(bark.urlScopes)
+        ? bark.urlScopes.map(asRecord).map((scope) => ({ url: str(scope.url), deviceIds: strList(scope.deviceIds) }))
+        : [],
       group: str(bark.group) || "vocat",
       icon: str(bark.icon),
       level: str(bark.level) || "active",
@@ -260,9 +270,17 @@ export function buildWebhookPayload(form: WebhookForm, forTest = false) {
 
 export function buildBarkPayload(form: BarkForm, forTest = false) {
   const urls = Array.isArray(form.urls) ? form.urls : [];
+  const listed = new Set(urls.map((url) => String(url || "").trim()).filter(Boolean));
+  // Drop scopes whose URL was removed or edited away, and keep one per URL; the server rejects both.
+  const seen = new Set<string>();
+  const urlScopes = (form.urlScopes || [])
+    .map((scope) => ({ url: String(scope.url || "").trim(), deviceIds: scope.deviceIds || [] }))
+    .filter((scope) => listed.has(scope.url) && !seen.has(scope.url) && seen.add(scope.url));
   return {
     enabled: !!form.enabled,
     urls: forTest ? urls.map((url) => String(url || "").trim()).filter(Boolean) : urls,
+    // A test notification goes to every URL, so per-URL device scopes only matter when saving.
+    ...(forTest ? {} : { urlScopes }),
     group: String(form.group || "").trim(),
     icon: String(form.icon || "").trim(),
     level: String(form.level || "").trim(),
