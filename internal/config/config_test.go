@@ -18,6 +18,7 @@ var configEnvironment = []string{
 	"VOCAT_SECURE_COOKIES",
 	"VOCAT_SHUTDOWN_TIMEOUT",
 	"VOCAT_MAX_REQUEST_BODY_BYTES",
+	"VOCAT_MCP_ENABLED",
 }
 
 func clearConfigEnvironment(t *testing.T) {
@@ -110,5 +111,36 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() unexpectedly accepted invalid duration")
+	}
+}
+
+func TestMCPEnabledEnvironmentOverride(t *testing.T) {
+	clearConfigEnvironment(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MCPEnabled {
+		t.Fatal("MCP is not enabled by default")
+	}
+	t.Setenv("VOCAT_MCP_ENABLED", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MCPEnabled {
+		t.Fatal("VOCAT_MCP_ENABLED=true did not enable MCP")
+	}
+	t.Setenv("VOCAT_MCP_ENABLED", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPEnabled {
+		t.Fatal("VOCAT_MCP_ENABLED=false did not disable MCP")
+	}
+	t.Setenv("VOCAT_MCP_ENABLED", "maybe")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid VOCAT_MCP_ENABLED accepted")
 	}
 }

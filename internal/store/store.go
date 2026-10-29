@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 27
+const schemaVersion = 28
 
 var ErrNotFound = errors.New("store: not found")
 
@@ -223,7 +223,7 @@ func scanAdmin(row rowScanner) (Admin, error) {
 }
 
 // SetAdmin inserts or replaces the single configured administrator and
-// atomically revokes all existing sessions.
+// atomically revokes all existing sessions and API tokens.
 func (s *Store) SetAdmin(ctx context.Context, username string, passwordHash []byte) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -245,6 +245,9 @@ func (s *Store) SetAdmin(ctx context.Context, username string, passwordHash []by
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM sessions"); err != nil {
 		return fmt.Errorf("revoke sessions after admin update: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM api_tokens"); err != nil {
+		return fmt.Errorf("revoke api tokens after admin update: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit admin update: %w", err)

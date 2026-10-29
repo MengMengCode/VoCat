@@ -71,11 +71,14 @@ func auditLogCategory(action string) string {
 }
 
 // audit records an event for an already-authenticated request, resolving the
-// actor from the session and the source address from the raw connection (proxy
-// headers are deliberately not trusted for the audit trail).
+// actor from the bearer token or session and the source address from the raw
+// connection (proxy headers are deliberately not trusted for the audit
+// trail).
 func (s *Server) audit(r *http.Request, action string, entityType string, entityID string, outcome string) {
 	actor := ""
-	if s.auth != nil {
+	if principal, ok := bearerPrincipalFromRequest(r); ok {
+		actor = "token:" + principal.Name
+	} else if s.auth != nil {
 		if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
 			if session, authErr := s.auth.Authenticate(r.Context(), cookie.Value); authErr == nil {
 				actor = session.Principal.Username

@@ -42,6 +42,9 @@ func (s *Server) routeGeneralAPI(w http.ResponseWriter, r *http.Request) bool {
 	if s.routeSettingsAPI(w, r, cleanPath) {
 		return true
 	}
+	if s.routeTokensAPI(w, r, cleanPath) {
+		return true
+	}
 	switch cleanPath {
 	case "logs/history":
 		s.handleLogHistory(w, r)

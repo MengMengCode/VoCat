@@ -50,6 +50,9 @@ type Options struct {
 	UpdateRepository    string
 	UpdateToken         string
 	HTTPS               *httpsmode.Manager
+	// MCP, when set, mounts the MCP Streamable HTTP endpoint at /mcp behind
+	// bearer-token authentication. nil keeps the endpoint off.
+	MCP *MCPHandlers
 }
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
@@ -83,6 +86,7 @@ type Server struct {
 	updateMu                  sync.Mutex
 	updateApplying            bool
 	https                     *httpsmode.Manager
+	mcp                       *MCPHandlers
 	netTraffic                *liveNetTracker
 	hostStats                 *hostStatsSampler
 	publicIPMu                sync.RWMutex
@@ -146,6 +150,7 @@ func New(options Options) (*Server, error) {
 		updateRepository:    strings.TrimSpace(options.UpdateRepository),
 		updateToken:         strings.TrimSpace(options.UpdateToken),
 		https:               options.HTTPS,
+		mcp:                 options.MCP,
 		netTraffic:          newLiveNetTracker(),
 		hostStats:           newHostStatsSampler(),
 		publicIPs:           make(map[string]cachedPublicIP),
@@ -168,6 +173,7 @@ func New(options Options) (*Server, error) {
 	mux.HandleFunc("/api/auth/login", server.handleLogin)
 	mux.HandleFunc("/api/auth/session", server.handleSession)
 	mux.HandleFunc("/api/auth/logout", server.handleLogout)
+	mux.HandleFunc("/mcp", server.handleMCP)
 	mux.HandleFunc("/api", server.handleAPI)
 	mux.HandleFunc("/api/", server.handleAPI)
 	mux.HandleFunc("/plugin-assets/", server.handlePluginAsset)
@@ -379,12 +385,15 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.writeUIPreferences(w, r)
 		return
 	}
-	if !s.requireAuthenticated(w, r) {
+	if _, present := bearerToken(r); present {
+		authenticated, ok := s.requireBearer(w, r)
+		if !ok {
+			return
+		}
+		r = authenticated
+	} else if !s.requireAuthenticated(w, r) {
 		return
-	}
-	if r.Method != http.MethodGet &&
-		r.Method != http.MethodHead &&
-		r.Method != http.MethodOptions {
+	} else if mutatingMethod(r.Method) {
 		sessionToken, ok := s.sessionToken(w, r)
 		if !ok {
 			return
