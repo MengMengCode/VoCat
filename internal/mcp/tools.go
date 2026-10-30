@@ -52,10 +52,12 @@ func (s *Server) registerTools() {
 		Name:        "sms_send",
 		Description: "Send an SMS over the cellular AT path. Barred destinations are rejected and the global hourly send limit applies. Messages sent here are not yet written to the web conversation history.",
 	}, s.smsSend)
-	mcp.AddTool(s.sdk, &mcp.Tool{
-		Name:        "esim_switch_profile",
-		Description: "Enable a different eSIM profile by ICCID, disabling the currently active one.",
-	}, s.esimSwitchProfile)
+	if s.options.SwitchESIM != nil {
+		mcp.AddTool(s.sdk, &mcp.Tool{
+			Name:        "esim_switch_profile",
+			Description: "Enable a different eSIM profile by ICCID, disabling the currently active one and restoring the target card's saved policy.",
+		}, s.esimSwitchProfile)
+	}
 	mcp.AddTool(s.sdk, &mcp.Tool{
 		Name:        "vowifi_reconnect",
 		Description: "Request a WiFi Calling reconnect. The tunnel re-establishes asynchronously; poll vowifi_status for the result.",
@@ -425,31 +427,19 @@ type esimSwitchOutput struct {
 }
 
 func (s *Server) esimSwitchProfile(ctx context.Context, _ *mcp.CallToolRequest, input esimSwitchInput) (*mcp.CallToolResult, esimSwitchOutput, error) {
+	if s.options.ReadOnly || s.options.SwitchESIM == nil {
+		return nil, esimSwitchOutput{}, errors.New("eSIM profile switching is not available")
+	}
+	input.DeviceID = strings.TrimSpace(input.DeviceID)
 	input.ICCID = strings.TrimSpace(input.ICCID)
 	input.AID = strings.TrimSpace(input.AID)
-	if input.ICCID == "" {
-		return nil, esimSwitchOutput{}, errors.New("iccid is required")
+	if input.DeviceID == "" || input.ICCID == "" {
+		return nil, esimSwitchOutput{}, errors.New("device_id and iccid are required")
 	}
-	physicalID, err := s.resolvePhysical(ctx, input.DeviceID)
-	if err != nil {
-		return nil, esimSwitchOutput{}, err
-	}
-	if input.AID == "" {
-		info, listErr := s.options.Devices.ESIMListProfiles(ctx, physicalID)
-		if listErr != nil {
-			return nil, esimSwitchOutput{}, fmt.Errorf("resolve profile AID: %w", listErr)
-		}
-		for _, profile := range info.Profiles {
-			if strings.TrimSpace(profile.ICCID) == input.ICCID {
-				input.AID = profile.AID
-				break
-			}
-		}
-		if input.AID == "" {
-			return nil, esimSwitchOutput{}, fmt.Errorf("no profile with ICCID %s is installed", input.ICCID)
-		}
-	}
-	if err := s.options.Devices.ESIMSwitchProfile(ctx, physicalID, input.ICCID, input.AID); err != nil {
+	// AID discovery may require the same SIM/QMI lease as the active VoWiFi
+	// session. Leave it, physical resolution and switching inside the shared
+	// operation so runtime maintenance happens before any card access.
+	if err := s.options.SwitchESIM(ctx, input.DeviceID, input.ICCID, input.AID); err != nil {
 		return nil, esimSwitchOutput{}, fmt.Errorf("switch profile: %w", err)
 	}
 	s.audit(ctx, "mcp.esim.switch", input.DeviceID)

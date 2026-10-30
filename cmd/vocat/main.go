@@ -591,6 +591,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	// removes the endpoint. Read-only tokens receive a server variant whose
 	// tool list omits the write tools entirely.
 	var mcpHandlers *server.MCPHandlers
+	var switchESIM func(context.Context, string, string, string) error
 	if cfg.MCPEnabled {
 		readWrite, mcpErr := mcp.New(mcp.Options{
 			Store:   database,
@@ -598,6 +599,12 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 			VoWiFi:  vowifiManager,
 			Logger:  logger,
 			Version: buildinfo.Version,
+			SwitchESIM: func(ctx context.Context, configuredID, iccid, aid string) error {
+				if switchESIM == nil {
+					return errors.New("profile switch service is not initialized")
+				}
+				return switchESIM(ctx, configuredID, iccid, aid)
+			},
 		})
 		if mcpErr != nil {
 			return fmt.Errorf("create MCP server: %w", mcpErr)
@@ -641,6 +648,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	if err != nil {
 		return err
 	}
+	switchESIM = handler.SwitchESIMProfile
 	onIncomingCall = func(ctx context.Context, call ims.ReceivedCall) error {
 		deviceConfig, _ := database.Device(ctx, call.DeviceID)
 		handler.NotifyIncomingCall(ctx, server.IncomingCallNotification{

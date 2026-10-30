@@ -401,6 +401,54 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 		writeError(w, http.StatusBadRequest, "invalid_request", "iccid is required")
 		return
 	}
+	// Profile recovery may outlive the shared HTTP write deadline.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	policy, err := s.switchESIMProfile(r.Context(), configuredID, physicalID, iccid,
+		firstNonEmpty(request.AIDHex, request.AIDHexCamel))
+	if err != nil {
+		var storeError esimSwitchStoreError
+		if errors.As(err, &storeError) {
+			s.writeStoreError(w, storeError.err)
+		} else {
+			s.writeDeviceError(w, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+		"status": "switched", "iccid": iccid, "verified": true,
+		"card_policy": cardPolicyResponse(policy),
+	}})
+}
+
+type esimSwitchStoreError struct{ err error }
+
+func (e esimSwitchStoreError) Error() string { return e.err.Error() }
+func (e esimSwitchStoreError) Unwrap() error { return e.err }
+
+// SwitchESIMProfile exposes the same coordinated transition used by the web UI
+// to automation. It must not bypass VoWiFi leases, RF safety, SMS synchronization
+// or the target subscription's saved policy.
+func (s *Server) SwitchESIMProfile(ctx context.Context, configuredID, iccid, aidHex string) error {
+	if s.devices == nil {
+		return errors.New("device manager is unavailable")
+	}
+	iccid = strings.TrimSpace(iccid)
+	if iccid == "" {
+		return errors.New("iccid is required")
+	}
+	config, err := s.store.Device(ctx, configuredID)
+	if err != nil {
+		return err
+	}
+	_, physicalID, present := s.physicalForConfig(config)
+	if !present {
+		return device.ErrNotFound
+	}
+	_, err = s.switchESIMProfile(ctx, configuredID, physicalID, iccid, strings.TrimSpace(aidHex))
+	return err
+}
+
+func (s *Server) switchESIMProfile(ctx context.Context, configuredID, physicalID, iccid, aidHex string) (store.CardPolicy, error) {
 	// Keep the subscription identity used by the periodic SM/ME scanner stable
 	// for the entire profile transition. syncModemSMS takes the same lock and
 	// validates its before/after snapshots before persisting any message.
@@ -409,7 +457,7 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 	dataRuntime := s.cellularDataRuntime()
 	s.clearPublicIP(configuredID)
 	desiredData := true
-	if storedConfig, configErr := s.store.Device(r.Context(), configuredID); configErr == nil {
+	if storedConfig, configErr := s.store.Device(ctx, configuredID); configErr == nil {
 		desiredData = storedConfig.NetworkEnabled && !storedConfig.VoWiFiEnabled
 	}
 	dataRuntime.invalidateWithMaintenancePhase(configuredID, desiredData, "recovering", "", "profile_switching")
@@ -422,8 +470,7 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 	endMaintenance := func() {}
 	if maintenance, ok := s.vowifi.(VoWiFiMaintenanceController); ok {
 		if err := maintenance.BeginMaintenance(configuredID); err != nil {
-			s.writeDeviceError(w, fmt.Errorf("prepare VoWiFi for profile switch: %w", err))
-			return
+			return store.CardPolicy{}, fmt.Errorf("prepare VoWiFi for profile switch: %w", err)
 		}
 		released := false
 		endMaintenance = func() {
@@ -440,50 +487,39 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 	// request times out. This only changes the runtime desired state. The saved
 	// per-ICCID policy is left intact and the target profile's policy is restored
 	// after the verified switch below.
-	if err := s.quiesceVoWiFiForProfileSwitch(r.Context(), configuredID); err != nil {
-		s.writeDeviceError(w, err)
-		return
+	if err := s.quiesceVoWiFiForProfileSwitch(ctx, configuredID); err != nil {
+		return store.CardPolicy{}, err
 	}
 	// Profile operations run with RF disabled. The eUICC remains accessible in
 	// CFUN=4. Devices that consume the requested eUICC REFRESH stay online;
 	// older AT modems enter the reset recovery path and reapply CFUN=4 when the
 	// port returns.
-	if _, err := s.devices.SetFlight(r.Context(), physicalID, true); err != nil {
-		s.writeDeviceError(w, err)
-		return
+	if _, err := s.devices.SetFlight(ctx, physicalID, true); err != nil {
+		return store.CardPolicy{}, err
 	}
-	// A confirmed profile switch always includes a live ICCID read and may also
-	// include the EC20 reset fallback, so it can exceed the ordinary deadline.
-	controller := http.NewResponseController(w)
-	_ = controller.SetWriteDeadline(time.Time{})
-	aidHex := firstNonEmpty(request.AIDHex, request.AIDHexCamel)
-	switchErr := s.devices.ESIMSwitchProfile(r.Context(), physicalID, iccid, aidHex)
+	switchErr := s.devices.ESIMSwitchProfile(ctx, physicalID, iccid, aidHex)
 	// The device manager keeps a committed profile change alive across client
 	// disconnects. Apply its verified result to the saved policy and runtime even
 	// when the original request was canceled, with a separate time budget.
-	finalizeContext, cancelFinalize := context.WithTimeout(context.WithoutCancel(r.Context()), 45*time.Second)
+	finalizeContext, cancelFinalize := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
 	defer cancelFinalize()
-	r = r.WithContext(finalizeContext)
+	ctx = finalizeContext
 	if switchErr != nil {
 		endMaintenance()
-		s.restoreProfileSwitchFailureState(r.Context(), configuredID, physicalID)
-		s.writeDeviceError(w, switchErr)
-		return
+		s.restoreProfileSwitchFailureState(ctx, configuredID, physicalID)
+		return store.CardPolicy{}, switchErr
 	}
-	if _, err := s.devices.SetFlight(r.Context(), physicalID, true); err != nil {
-		s.writeDeviceError(w, err)
-		return
+	if _, err := s.devices.SetFlight(ctx, physicalID, true); err != nil {
+		return store.CardPolicy{}, err
 	}
-	policy, err := s.store.CardPolicy(r.Context(), iccid)
+	policy, err := s.store.CardPolicy(ctx, iccid)
 	if errors.Is(err, store.ErrNotFound) {
 		policy = defaultCardPolicy(iccid)
-		if err := s.store.UpsertCardPolicy(r.Context(), policy); err != nil {
-			s.writeStoreError(w, err)
-			return
+		if err := s.store.UpsertCardPolicy(ctx, policy); err != nil {
+			return store.CardPolicy{}, esimSwitchStoreError{err}
 		}
 	} else if err != nil {
-		s.writeStoreError(w, err)
-		return
+		return store.CardPolicy{}, esimSwitchStoreError{err}
 	}
 	// Never replace a returning profile's policy with defaults. VoWiFi still
 	// implies airplane mode, but every user-selected value and APN belongs to
@@ -491,22 +527,19 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 	if policy.VoWiFiEnabled && (!policy.AirplaneEnabled || policy.NetworkEnabled) {
 		policy.AirplaneEnabled = true
 		policy.NetworkEnabled = false
-		if err := s.store.UpsertCardPolicy(r.Context(), policy); err != nil {
-			s.writeStoreError(w, err)
-			return
+		if err := s.store.UpsertCardPolicy(ctx, policy); err != nil {
+			return store.CardPolicy{}, esimSwitchStoreError{err}
 		}
 	}
-	config, err := s.store.Device(r.Context(), configuredID)
+	config, err := s.store.Device(ctx, configuredID)
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
+		return store.CardPolicy{}, esimSwitchStoreError{err}
 	}
 	config.VoWiFiEnabled = policy.VoWiFiEnabled
 	config.NetworkEnabled = false
 	config.APN = policy.APN
-	if err := s.store.UpsertDevice(r.Context(), config); err != nil {
-		s.writeStoreError(w, err)
-		return
+	if err := s.store.UpsertDevice(ctx, config); err != nil {
+		return store.CardPolicy{}, esimSwitchStoreError{err}
 	}
 	dataRuntime.invalidate(configuredID, false, "disabled", "")
 	switchCompleted = true
@@ -534,14 +567,11 @@ func (s *Server) handleEsimSwitch(w http.ResponseWriter, r *http.Request, config
 		}
 	}
 	if !policy.VoWiFiEnabled && canRestoreFlightImmediately && !policy.AirplaneEnabled {
-		if _, err := s.devices.SetFlight(r.Context(), physicalID, false); err != nil {
+		if _, err := s.devices.SetFlight(ctx, physicalID, false); err != nil {
 			s.logger.Warn("profile switched but saved airplane state will require reconciliation", "device_id", configuredID, "iccid", iccid, "error", err)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
-		"status": "switched", "iccid": iccid, "verified": true,
-		"card_policy": cardPolicyResponse(policy),
-	}})
+	return policy, nil
 }
 
 func (s *Server) quiesceVoWiFiForProfileSwitch(ctx context.Context, configuredID string) error {

@@ -49,6 +49,10 @@ type Options struct {
 	// read-write and one read-only server and picks per bearer token, so a
 	// read-only agent never even sees the write tools in its tool list.
 	ReadOnly bool
+	// SwitchESIM performs the complete configured-device operation, including
+	// runtime maintenance, RF policy and target card-policy restoration. The
+	// low-level DeviceManager switch is deliberately not a safe fallback.
+	SwitchESIM func(context.Context, string, string, string) error
 }
 
 // Server wraps an MCP SDK server bound to the Vocat service seams.

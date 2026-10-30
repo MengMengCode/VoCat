@@ -36,6 +36,31 @@ func mutatingMethod(method string) bool {
 	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
 }
 
+// mutatingBearerRequest also accounts for the legacy GET endpoints that
+// perform hardware operations or establish a bidirectional media channel.
+// HTTP methods alone do not enforce a read-only credential boundary.
+func mutatingBearerRequest(r *http.Request) bool {
+	if mutatingMethod(r.Method) {
+		return true
+	}
+	if r.Method != http.MethodGet {
+		return false
+	}
+	// Mirror the actual API router's normalization and segment unescaping,
+	// including encoded operation segments and trailing slashes.
+	cleanPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api"), "/")
+	segments := splitAPIPath(cleanPath)
+	if len(segments) < 3 || segments[0] != "devices" {
+		return false
+	}
+	switch strings.Join(segments[2:], "/") {
+	case "esim/actions/download", "calls/media", "operator_selection/scan", "operator_selection/scan/stream":
+		return true
+	default:
+		return false
+	}
+}
+
 // requireBearer authenticates a request that carried a Bearer header and
 // returns the request carrying the token principal in its context. The
 // session-cookie flow, including CSRF, is deliberately skipped: a token in
@@ -65,7 +90,7 @@ func (s *Server) requireBearer(w http.ResponseWriter, r *http.Request) (*http.Re
 		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 		return r, false
 	}
-	if principal.ReadOnly && mutatingMethod(r.Method) {
+	if principal.ReadOnly && mutatingBearerRequest(r) {
 		w.Header().Set("Cache-Control", "no-store")
 		writeError(w, http.StatusForbidden, "token_read_only", "this api token is read-only")
 		return r, false

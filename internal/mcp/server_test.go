@@ -309,7 +309,7 @@ func TestSMSThreadsReadChronologically(t *testing.T) {
 	}
 }
 
-func TestESIMSwitchResolvesAIDAndAudits(t *testing.T) {
+func TestESIMSwitchUsesConfiguredOperationAndAudits(t *testing.T) {
 	ctx := context.Background()
 	fake := &fakeDevices{
 		entries: []device.Device{onlineEntry()},
@@ -322,6 +322,14 @@ func TestESIMSwitchResolvesAIDAndAudits(t *testing.T) {
 		},
 	}
 	server, database := newTestServer(t, fake, nil)
+	var operations []recordedSwitch
+	server.options.SwitchESIM = func(_ context.Context, deviceID, iccid, aid string) error {
+		if iccid != "8986000000000000002" {
+			return errors.New("target profile not installed")
+		}
+		operations = append(operations, recordedSwitch{PhysicalID: deviceID, ICCID: iccid, AID: aid})
+		return nil
+	}
 
 	_, listed, err := server.esimListProfiles(ctx, nil, deviceIDInput{DeviceID: configuredID})
 	if err != nil {
@@ -341,8 +349,8 @@ func TestESIMSwitchResolvesAIDAndAudits(t *testing.T) {
 	if result.SwitchedTo != "8986000000000000002" {
 		t.Fatalf("switched to = %+v", result)
 	}
-	if len(fake.switches) != 1 || fake.switches[0].AID != "AID2" || fake.switches[0].PhysicalID != physicalID {
-		t.Fatalf("switch records = %+v", fake.switches)
+	if len(operations) != 1 || operations[0].AID != "" || operations[0].PhysicalID != configuredID || len(fake.switches) != 0 {
+		t.Fatalf("configured operations = %+v, direct switches = %+v", operations, fake.switches)
 	}
 
 	// Unknown ICCIDs fail without touching the modem.
