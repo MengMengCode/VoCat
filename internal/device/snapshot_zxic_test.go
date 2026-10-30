@@ -50,7 +50,7 @@ func (client *zxicScriptedClient) called(command string) bool {
 }
 
 // newZXICSnapshotTestManager starts a manager over one ZXIC candidate whose
-// USB identity selects the chipset-family profile.
+// verified USB identity selects the ZXIC profile.
 func newZXICSnapshotTestManager(t *testing.T, client modem.Client) (*Manager, string) {
 	t.Helper()
 	const id = "zxic-snapshot"
