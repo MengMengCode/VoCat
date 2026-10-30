@@ -17,6 +17,7 @@ type ATDeviceController interface {
 	List() []device.Device
 	ExecuteAT(context.Context, string, string) (modem.Response, error)
 	ExecuteSensitiveAT(context.Context, string, string) (modem.Response, error)
+	ExecuteAPDU(context.Context, string, modem.APDUCommand, int, []byte) ([]byte, error)
 }
 
 // ATMapper lets runtime IDs remain stable configuration IDs even when Linux
@@ -73,6 +74,20 @@ func (mapper ATMapper) ExecuteSensitiveAT(
 		return modem.Response{}, err
 	}
 	return mapper.Devices.ExecuteSensitiveAT(ctx, physicalID, command)
+}
+
+func (mapper ATMapper) ExecuteAPDU(
+	ctx context.Context,
+	configuredID string,
+	command modem.APDUCommand,
+	channel int,
+	apdu []byte,
+) ([]byte, error) {
+	physicalID, err := mapper.resolve(ctx, configuredID)
+	if err != nil {
+		return nil, err
+	}
+	return mapper.Devices.ExecuteAPDU(ctx, physicalID, command, channel, apdu)
 }
 
 // ReadSMSCenter reads the SIM-provisioned service-centre address through the

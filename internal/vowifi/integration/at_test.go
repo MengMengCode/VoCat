@@ -13,6 +13,10 @@ type fakeATDevices struct {
 	entries     []device.Device
 	executedID  string
 	sensitiveID string
+	apduID      string
+	apduCommand modem.APDUCommand
+	apduChannel int
+	apdu        []byte
 }
 
 func (devices *fakeATDevices) Get(id string) (device.Device, error) {
@@ -44,6 +48,20 @@ func (devices *fakeATDevices) ExecuteSensitiveAT(
 ) (modem.Response, error) {
 	devices.sensitiveID = id
 	return modem.Response{Final: "OK"}, nil
+}
+
+func (devices *fakeATDevices) ExecuteAPDU(
+	_ context.Context,
+	id string,
+	command modem.APDUCommand,
+	channel int,
+	apdu []byte,
+) ([]byte, error) {
+	devices.apduID = id
+	devices.apduCommand = command
+	devices.apduChannel = channel
+	devices.apdu = append([]byte(nil), apdu...)
+	return []byte{0x90, 0x00}, nil
 }
 
 func TestATMapperResolvesConfiguredIDByStableATPath(t *testing.T) {
@@ -85,6 +103,38 @@ func TestATMapperResolvesConfiguredIDByStableATPath(t *testing.T) {
 	}
 	if devices.sensitiveID != "usb-1-2" {
 		t.Fatalf("ExecuteSensitiveAT physical ID = %q", devices.sensitiveID)
+	}
+}
+
+func TestATMapperExecuteAPDU(t *testing.T) {
+	database := testStore(t)
+	if err := database.UpsertDevice(context.Background(), store.Device{
+		ID:     "living-room",
+		Name:   "UZ901",
+		ATPort: "/dev/serial/by-id/usb-zxic-if02",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	devices := &fakeATDevices{entries: []device.Device{{
+		ID:         "usb-1-2",
+		Discovered: true,
+		Candidate: modem.Candidate{ATPort: modem.Port{
+			Path:       "/dev/ttyUSB2",
+			StablePath: "/dev/serial/by-id/usb-zxic-if02",
+		}},
+	}}}
+	mapper := ATMapper{Store: database, Devices: devices}
+	apdu := []byte{0x00, 0x88, 0x00, 0x81}
+	response, err := mapper.ExecuteAPDU(context.Background(), "living-room", modem.APDUCGLA, 2, apdu)
+	if err != nil {
+		t.Fatalf("ExecuteAPDU: %v", err)
+	}
+	if devices.apduID != "usb-1-2" || devices.apduCommand != modem.APDUCGLA ||
+		devices.apduChannel != 2 || string(devices.apdu) != string(apdu) {
+		t.Fatalf("ExecuteAPDU forwarded ID=%q command=%d channel=%d APDU=%X", devices.apduID, devices.apduCommand, devices.apduChannel, devices.apdu)
+	}
+	if string(response) != string([]byte{0x90, 0x00}) {
+		t.Fatalf("ExecuteAPDU response = %X", response)
 	}
 }
 

@@ -232,28 +232,6 @@ func isHexAID(id string) bool {
 	return false
 }
 
-// parseCSIM extracts the payload and status word from an AT+CSIM response.
-func parseCSIM(response modem.Response) ([]byte, int, error) {
-	value := valueAfterPrefix(response, "+CSIM:")
-	if value == "" {
-		return nil, 0, errors.New("esim: modem did not return a +CSIM result")
-	}
-	parts := csvValues(value)
-	if len(parts) < 2 {
-		return nil, 0, fmt.Errorf("esim: malformed +CSIM result %q", value)
-	}
-	hexData := strings.Trim(parts[1], `"`)
-	if len(hexData) < 4 {
-		return nil, 0, fmt.Errorf("esim: short +CSIM data %q", hexData)
-	}
-	raw, err := hex.DecodeString(hexData)
-	if err != nil {
-		return nil, 0, fmt.Errorf("esim: decode +CSIM data: %w", err)
-	}
-	sw := int(raw[len(raw)-2])<<8 | int(raw[len(raw)-1])
-	return raw[:len(raw)-2], sw, nil
-}
-
 // euiccChannel is an open logical channel to the eUICC's ISD-R.
 type euiccChannel struct {
 	manager      *Manager
@@ -327,10 +305,12 @@ const csimAPDUTimeout = 30 * time.Second
 
 // csim sends one raw APDU over AT+CSIM and returns payload + status word.
 func (manager *Manager) csim(ctx context.Context, id string, apdu []byte) ([]byte, int, error) {
-	command := fmt.Sprintf("AT+CSIM=%d,\"%s\"", len(apdu)*2, strings.ToUpper(hex.EncodeToString(apdu)))
 	state, err := manager.lookup(id)
 	if err != nil {
 		return nil, 0, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if err := lockMutexContext(ctx, &state.opMu); err != nil {
 		return nil, 0, err
@@ -339,19 +319,22 @@ func (manager *Manager) csim(ctx context.Context, id string, apdu []byte) ([]byt
 	if err := manager.validateActive(id, state); err != nil {
 		return nil, 0, err
 	}
-	client, err := manager.clientLocked(ctx, state, manager.candidateFor(state))
+	candidate := manager.candidateFor(state)
+	client, err := manager.clientLocked(ctx, state, candidate)
+	if err != nil {
+		err = sanitizeManagerAPDUError(err)
+		manager.setResult(id, state, nil, err)
+		return nil, 0, err
+	}
+	response, err := manager.executeAPDULocked(ctx, id, state, client, modem.APDUCSIM, 0, apdu)
 	if err != nil {
 		return nil, 0, err
 	}
-	// Give each eUICC APDU its own generous deadline (withTimeout preserves an
-	// existing one, so a shorter caller deadline still wins).
-	apduCtx, cancel := context.WithTimeout(ctx, csimAPDUTimeout)
-	defer cancel()
-	response, err := manager.command(apduCtx, client, command)
-	if err != nil {
-		return nil, 0, err
+	if len(response) < 2 {
+		return nil, 0, modem.ErrAPDUResponseInvalid
 	}
-	return parseCSIM(response)
+	sw := int(response[len(response)-2])<<8 | int(response[len(response)-1])
+	return response[:len(response)-2], sw, nil
 }
 
 // openEuicc opens a logical channel and selects the ISD-R AID on it.
@@ -596,6 +579,10 @@ func (manager *Manager) discoverEuiccAIDsForInventory(ctx context.Context, id st
 }
 
 func isTransientEuiccCME(err error) bool {
+	var rejected *modem.APDUCommandRejectedError
+	if errors.As(err, &rejected) {
+		return rejected.Final == "+CME ERROR: 0"
+	}
 	var commandErr *modem.CommandError
 	return errors.As(err, &commandErr) &&
 		strings.EqualFold(strings.TrimSpace(commandErr.Final), "+CME ERROR: 0")
@@ -1735,7 +1722,7 @@ func (manager *Manager) verifySwitchedICCIDAttempts(
 			}
 			lastErr = err
 		} else {
-			for _, command := range []string{"AT+CCID", "AT+QCCID", "AT+MCCID"} {
+			for _, command := range manager.identityICCIDCommands(id) {
 				commandContext, cancel := context.WithTimeout(ctx, manager.commandTimeout)
 				response, err := manager.ExecuteAT(commandContext, id, command)
 				cancel()
@@ -1743,7 +1730,7 @@ func (manager *Manager) verifySwitchedICCIDAttempts(
 					lastErr = err
 					continue
 				}
-				live := parseICCIDIdentifier(response, []string{"+CCID:", "+QCCID:", "+MCCID:"}, 18, 22)
+				live := parseICCIDIdentifier(response, iccidResponsePrefixes, 18, 22)
 				if live == "" {
 					lastErr = errors.New("modem response contained no valid ICCID")
 					continue

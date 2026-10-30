@@ -20,6 +20,17 @@ func (opener SerialOpener) Open(ctx context.Context, port Port) (Client, error) 
 	if path == "" {
 		return nil, errors.New("modem: candidate has no AT port")
 	}
+	release, ok := tryAcquireATPort(path)
+	if !ok {
+		return nil, fmt.Errorf("open AT port %s: %w", path, ErrATPortBusy)
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred {
+			release()
+		}
+	}()
+
 	if isNativeWWANATPath(path) {
 		rawPort, err := openNativeWWANATTransport(path)
 		if err != nil {
@@ -34,6 +45,8 @@ func (opener SerialOpener) Open(ctx context.Context, port Port) (Client, error) 
 			_ = rawPort.Close()
 			return nil, err
 		}
+		session.setCloseHook(release)
+		leaseTransferred = true
 		return session, nil
 	}
 	baudRate := opener.BaudRate
@@ -53,6 +66,8 @@ func (opener SerialOpener) Open(ctx context.Context, port Port) (Client, error) 
 		_ = rawPort.Close()
 		return nil, err
 	}
+	session.setCloseHook(release)
+	leaseTransferred = true
 	return session, nil
 }
 

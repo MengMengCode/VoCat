@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +67,220 @@ func TestManagerDiscoverReturnsOnlyCurrentlyPresentDevices(t *testing.T) {
 	retained := manager.List()
 	if len(retained) != 1 || retained[0].ID != id || retained[0].Discovered {
 		t.Fatalf("retained devices after unplug = %#v", retained)
+	}
+}
+
+func TestManagerDiscoverRetainsOnlyVerifiedPortForCurrentUSBInstance(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		deferred, reset, newIdentity bool
+	}{
+		{name: "busy same enumeration"}, {name: "deferred same enumeration", deferred: true},
+		{name: "busy new enumeration", reset: true}, {name: "busy new identity", reset: true, newIdentity: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &transcriptClient{steps: []clientStep{{command: "AT", response: okResponse()}}}
+			manager, id := newStartedTestManager(t, client)
+			if _, err := manager.ExecuteAT(context.Background(), id, "AT"); err != nil {
+				t.Fatal(err)
+			}
+			before, err := manager.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate := before.Candidate
+			candidate.ATProbeRequired = true
+			candidate.ATProbeBusy = !tc.deferred
+			candidate.ATProbeDeferred = tc.deferred
+			candidate.Product = "fresh product metadata"
+			candidate.ATPort = modem.Port{Path: "/dev/ttyUSB9", Name: "ttyUSB9"}
+			candidate.Ports = []modem.Port{before.Candidate.ATPort, candidate.ATPort}
+			candidate.DiscoveryIssue = "at_probe_pending"
+			if tc.reset {
+				candidate.USBGeneration = "new-enumeration"
+				candidate.ATPort = before.Candidate.ATPort
+			}
+			if tc.newIdentity {
+				candidate.VendorID = "ffff"
+				candidate.ProductID = "0001"
+			}
+			manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{candidate}}
+			items, err := manager.Discover(context.Background())
+			if err != nil || len(items) != 1 {
+				t.Fatalf("Discover: %v %#v", err, items)
+			}
+			after := items[0].Candidate
+			if after.USBGeneration != candidate.USBGeneration || after.VendorID != candidate.VendorID || after.Product != "fresh product metadata" {
+				t.Fatalf("fresh metadata discarded: %+v", after)
+			}
+			if tc.reset {
+				if client.closeCount != 1 || !after.ATProbeRequired {
+					t.Fatalf("old session survived reset: closes=%d candidate=%+v", client.closeCount, after)
+				}
+			} else if client.closeCount != 0 || after.ATPort.OpenPath() != before.Candidate.ATPort.OpenPath() || after.DiscoveryIssue != "" || after.ATProbeRequired {
+				t.Fatalf("verified port lost while deferred: closes=%d candidate=%+v", client.closeCount, after)
+			}
+		})
+	}
+}
+
+type cancelingPartialDiscoverer struct {
+	cancel    context.CancelFunc
+	candidate modem.Candidate
+}
+
+func (discoverer cancelingPartialDiscoverer) Discover(context.Context) ([]modem.Candidate, error) {
+	discoverer.cancel()
+	return []modem.Candidate{discoverer.candidate}, context.Canceled
+}
+
+func TestManagerDiscoverCancellationDoesNotMarkDevicesOffline(t *testing.T) {
+	initial := modem.Candidate{
+		ID: "initial", VendorID: "2c7c", ProductID: "0125", USBGeneration: "old",
+		ATPort: modem.Port{Path: "/dev/ttyUSB2", Name: "ttyUSB2", Role: modem.PortRoleAT},
+	}
+	manager, err := NewManager(Options{
+		Discoverer:  staticDiscoverer{candidates: []modem.Candidate{initial}},
+		Opener:      &staticOpener{},
+		CardReaders: pcsc.NewWithBackend(testPCSCBackend{}),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = manager.Stop(context.Background()) })
+
+	replacement := initial
+	replacement.VendorID = "ffff"
+	replacement.ProductID = "0001"
+	replacement.USBGeneration = "new"
+	replacement.ATPort = modem.Port{Path: "/dev/ttyUSB9", Name: "ttyUSB9"}
+	ctx, cancel := context.WithCancel(context.Background())
+	manager.discoverer = cancelingPartialDiscoverer{cancel: cancel, candidate: replacement}
+	if _, err := manager.Discover(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Discover error = %v, want context.Canceled", err)
+	}
+
+	items := manager.List()
+	if len(items) != 1 || !items[0].Discovered ||
+		items[0].Candidate.VendorID != initial.VendorID ||
+		items[0].Candidate.ProductID != initial.ProductID ||
+		items[0].Candidate.USBGeneration != initial.USBGeneration ||
+		items[0].Candidate.ATPort.OpenPath() != initial.ATPort.OpenPath() {
+		t.Fatalf("device changed after canceled partial discovery: %#v", items)
+	}
+}
+
+func TestManagerExecuteAPDUSanitizesCommandAndResponse(t *testing.T) {
+	const apduHex = "00A40400"
+	const quotedCommand = `AT+CSIM=8,"` + apduHex + `"`
+	const unquotedCommand = `AT+CSIM=8,` + apduHex
+	client := &transcriptClient{steps: []clientStep{
+		{
+			command:  quotedCommand,
+			response: modem.Response{Final: "+CME ERROR: 13", Lines: []string{`+CSIM: 8,"response-` + apduHex + `"`}},
+			err:      &modem.CommandError{Command: quotedCommand, Final: "+CME ERROR: 13", Lines: []string{`+CSIM: request-` + apduHex}},
+		},
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	_, err := manager.ExecuteAPDU(context.Background(), id, modem.APDUCSIM, 0, []byte{0x00, 0xA4, 0x04, 0x00})
+	var rejected *modem.APDUCommandRejectedError
+	if !errors.As(err, &rejected) {
+		t.Fatalf("ExecuteAPDU error = %v, want APDUCommandRejectedError; transcript=%v steps remaining=%d", err, client.unexpected, len(client.steps))
+	}
+	for _, secret := range []string{apduHex, quotedCommand, unquotedCommand, "request-", "response-"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("ExecuteAPDU error leaked %q: %v", secret, err)
+		}
+	}
+	entry, err := manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{apduHex, quotedCommand, unquotedCommand, "request-", "response-"} {
+		if strings.Contains(entry.LastError, secret) {
+			t.Fatalf("device LastError leaked %q: %q", secret, entry.LastError)
+		}
+	}
+	client.assertDone(t)
+}
+
+func TestManagerExecuteAPDUSanitizesMalformedResponse(t *testing.T) {
+	const secretResponse = "DEADBEEFCAFEBABE"
+	client := &transcriptClient{steps: []clientStep{{
+		command: `AT+CSIM=2,"00"`,
+		response: modem.Response{
+			Final: "OK", Lines: []string{`+CSIM: 4,"` + secretResponse + `ZZ9000"`},
+		},
+	}}}
+	manager, id := newStartedTestManager(t, client)
+
+	_, err := manager.ExecuteAPDU(context.Background(), id, modem.APDUCSIM, 0, []byte{0x00})
+	if !errors.Is(err, modem.ErrAPDUResponseInvalid) {
+		t.Fatalf("ExecuteAPDU error = %v, want safe APDU parse sentinel", err)
+	}
+	if strings.Contains(err.Error(), secretResponse) {
+		t.Fatalf("ExecuteAPDU error leaked response payload: %v", err)
+	}
+	entry, err := manager.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(entry.LastError, secretResponse) {
+		t.Fatalf("device LastError leaked response payload: %q", entry.LastError)
+	}
+	client.assertDone(t)
+}
+
+func TestManagedDeviceProfileResetsOnUSBIdentityChange(t *testing.T) {
+	manager, id := newStartedTestManager(t, nil)
+	state, err := manager.lookup(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialDialect := state.apduDialect
+	if initialDialect == nil || state.atProfile.APDU == nil || state.atProfile.Operator == nil || state.atProfile.PDP == nil {
+		t.Fatalf("initial profile/dialect not initialized: profile=%#v dialect=%p", state.atProfile, initialDialect)
+	}
+
+	unchanged := state.candidate
+	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{unchanged}}
+	if _, err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover unchanged identity: %v", err)
+	}
+	if state.apduDialect != initialDialect {
+		t.Fatal("unchanged USB identity unexpectedly reset the APDU dialect")
+	}
+
+	state.atProfile = modem.ATProfile{}
+	changed := unchanged
+	changed.VendorID, changed.ProductID = "19d2", "0536"
+	changed.Manufacturer, changed.Product = "ZXIC", "UZ901"
+	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{changed}}
+	if _, err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover changed identity: %v", err)
+	}
+	if state.apduDialect == nil || state.apduDialect == initialDialect {
+		t.Fatal("USB identity change did not replace the APDU dialect")
+	}
+	if state.atProfile.APDU == nil || state.atProfile.Operator == nil || state.atProfile.PDP == nil {
+		t.Fatalf("USB identity change did not resolve a complete profile: %#v", state.atProfile)
+	}
+
+	identityChangedDialect := state.apduDialect
+	manager.discoverer = staticDiscoverer{}
+	if _, err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover removed modem: %v", err)
+	}
+	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{changed}}
+	if _, err := manager.Discover(context.Background()); err != nil {
+		t.Fatalf("Discover reconnected modem: %v", err)
+	}
+	if state.apduDialect == identityChangedDialect {
+		t.Fatal("reconnected hardware reused the prior APDU dialect")
 	}
 }
 
@@ -250,6 +465,114 @@ func TestSnapshotReadsML307IdentityAndMUESTATS(t *testing.T) {
 		t.Fatalf("unexpected MUESTATS metrics: %+v", snapshot)
 	}
 	client.assertDone(t)
+}
+
+type operatorProfileSnapshotClient struct {
+	commands        []string
+	servingCellLine string
+	operatorLines   []string
+}
+
+func (client *operatorProfileSnapshotClient) Execute(ctx context.Context, command string) (modem.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return modem.Response{}, err
+	}
+	client.commands = append(client.commands, command)
+	var lines []string
+	switch command {
+	case "ATI":
+		lines = []string{"ZXIC", "UZ901", "firmware"}
+	case "AT+CPIN?":
+		lines = []string{"+CPIN: READY"}
+	case "AT+CCID":
+		lines = []string{"+CCID: 89860012345678901234"}
+	case "AT+CIMI":
+		lines = []string{"234151234567890"}
+	case "AT+CRSM=176,28486,0,0,17", "AT+CRSM=192,28589,0,0,0", "AT+CRSM=192,28478,0,0,0", "AT+CRSM=192,28479,0,0,0":
+		lines = []string{`+CRSM: 106,130,""`}
+	case "AT+CSQ":
+		lines = []string{"+CSQ: 20,99"}
+	case `AT+QENG="servingcell"`:
+		if client.servingCellLine != "" {
+			lines = []string{client.servingCellLine}
+		}
+	case "AT+CEREG?":
+		lines = []string{"+CEREG: 0,1"}
+	case "AT+CGSN":
+		lines = []string{"867530912345678"}
+	case "AT+CFUN?":
+		lines = []string{"+CFUN: 1"}
+	case "AT+CNUM":
+		lines = []string{`+CNUM: "",,145`}
+	case "AT+XOPS?":
+		lines = append([]string(nil), client.operatorLines...)
+		if lines == nil {
+			lines = []string{"+XOPS: custom selection"}
+		}
+	}
+	return modem.Response{Command: command, Lines: lines, Final: "OK"}, nil
+}
+
+func (*operatorProfileSnapshotClient) WaitURC(context.Context, func(string) bool) (string, error) {
+	return "", errors.New("unexpected URC wait")
+}
+
+func (*operatorProfileSnapshotClient) Close() error { return nil }
+
+func TestRefreshUsesResolvedOperatorProfile(t *testing.T) {
+	client := &operatorProfileSnapshotClient{}
+	manager, id := newStartedTestManager(t, client)
+	profile := testOperatorProfile{
+		queryCommand: "AT+XOPS?",
+		selection: modem.ATOperatorSelection{
+			Mode: 1, Format: 2, Operator: "99998", AccessTechnologyCode: "7",
+		},
+	}
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", profile)
+
+	snapshot, err := manager.Refresh(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if snapshot.OperatorCode != "99998" || snapshot.AccessTech != "LTE" {
+		t.Fatalf("snapshot did not use profile parser: code=%q accessTech=%q", snapshot.OperatorCode, snapshot.AccessTech)
+	}
+	for _, command := range client.commands {
+		if command == "AT+COPS?" {
+			t.Fatal("Refresh used hard-coded AT+COPS? instead of the operator profile")
+		}
+	}
+	profileQuerySeen := false
+	for _, command := range client.commands {
+		if command == "AT+XOPS?" {
+			profileQuerySeen = true
+			break
+		}
+	}
+	if !profileQuerySeen {
+		t.Fatalf("Refresh commands do not contain profile query: %v", client.commands)
+	}
+}
+
+func TestRefreshRetainsServingPLMNWhenOperatorProfileParseFails(t *testing.T) {
+	client := &operatorProfileSnapshotClient{
+		servingCellLine: `+QENG: "servingcell","NOCONN","LTE","FDD",460,01,5F1E805,37,1650,3,5,5,8340,-97,-10,-68,15,9`,
+		operatorLines:   []string{"+XOPS: malformed selection"},
+	}
+	manager, id := newStartedTestManager(t, client)
+	profile := testOperatorProfile{
+		queryCommand: "AT+XOPS?",
+		selectionErr: errors.New("operator profile response unavailable"),
+	}
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", profile)
+
+	snapshot, err := manager.Refresh(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if snapshot.OperatorCode != "46001" {
+		t.Fatalf("operator code = %q, want serving PLMN fallback 46001", snapshot.OperatorCode)
+	}
 }
 
 func TestManagerRefreshReadsNativeWWANICCIDThroughQMIUIM(t *testing.T) {

@@ -12,6 +12,108 @@ import (
 	"testing"
 )
 
+func TestSystemDiscovererRequiresUnknownUSBOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		d := NewSystemDiscovererWithOptions(DiscoveryOptions{ProbeUnknownUSB: enabled}).(*ATProbingDiscoverer)
+		if d.ProbeUnknownUSB != enabled {
+			t.Fatalf("unknown USB probing = %v, want %v", d.ProbeUnknownUSB, enabled)
+		}
+	}
+	if NewSystemDiscoverer().(*ATProbingDiscoverer).ProbeUnknownUSB {
+		t.Fatal("default system discovery enables unknown USB probing")
+	}
+}
+
+func TestSysFSDiscoveryIncludesUnknownUSBWithTTY(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+	writeUSBInterfaceFixture(t, usbRoot, "7-1", "1234", "5678", "ttyUSB0")
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	if candidates[0].VendorID != "1234" || candidates[0].ProductID != "5678" ||
+		!candidates[0].ATProbeRequired || len(candidates[0].Ports) != 1 || candidates[0].Ports[0].Name != "ttyUSB0" {
+		t.Fatalf("candidate = %#v, want unknown USB 1234:5678 with ttyUSB0", candidates[0])
+	}
+}
+
+func TestSysFSDiscoverySkipsUnknownUSBWithoutTTY(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+	writeUSBInterfaceFixture(t, usbRoot, "7-2", "1234", "5679", "")
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("got %d candidates, want no unknown USB device without a tty", len(candidates))
+	}
+}
+
+func TestSysFSDiscoveryIdentifiesSupportedZXICUSB(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+	writeUSBInterfaceFixture(t, usbRoot, "7-3", "19d2", "0536", "ttyUSB0")
+	mustWrite(t, filepath.Join(usbRoot, "7-3", "manufacturer"), "Android\n")
+	mustWrite(t, filepath.Join(usbRoot, "7-3", "product"), "Linux\n")
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.Manufacturer != "ZXIC" || candidate.Product != "ZXIC" {
+		t.Fatalf("identity = %q/%q, want ZXIC family labels over placeholder strings",
+			candidate.Manufacturer, candidate.Product)
+	}
+	if candidate.VendorID != "19d2" || candidate.ProductID != "0536" ||
+		!candidate.ATProbeRequired || len(candidate.Ports) != 1 || candidate.Ports[0].Name != "ttyUSB0" {
+		t.Fatalf("candidate = %#v, want ZXIC family USB identity and AT port", candidate)
+	}
+}
+
+func TestSysFSDiscoveryKeepsZXICReportedProductText(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	devRoot := filepath.Join(root, "dev")
+	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
+	writeUSBInterfaceFixture(t, usbRoot, "7-4", "19d2", "0536", "ttyUSB1")
+	mustWrite(t, filepath.Join(usbRoot, "7-4", "product"), "ZX297510\n")
+
+	candidates, err := NewSysFSDiscoverer(sysRoot, devRoot).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(candidates) != 1 || candidates[0].Product != "ZX297510" {
+		t.Fatalf("candidates = %#v, want the firmware-reported product kept", candidates)
+	}
+}
+
+func writeUSBInterfaceFixture(t *testing.T, usbRoot, deviceName, vendorID, productID, ttyName string) {
+	t.Helper()
+	mustWrite(t, filepath.Join(usbRoot, deviceName, "idVendor"), vendorID+"\n")
+	mustWrite(t, filepath.Join(usbRoot, deviceName, "idProduct"), productID+"\n")
+	mustWrite(t, filepath.Join(usbRoot, deviceName+":1.0", "bInterfaceNumber"), "00\n")
+	if ttyName != "" {
+		mustMkdir(t, filepath.Join(usbRoot, deviceName+":1.0", ttyName, "tty", ttyName))
+	}
+}
+
 func TestSysFSDiscoverySelectsML307Interface02(t *testing.T) {
 	root := t.TempDir()
 	sysRoot := filepath.Join(root, "sys")
@@ -249,11 +351,12 @@ func TestSysFSDiscoveryDoesNotCollapseModemsWithSharedFactorySerial(t *testing.T
 	}
 }
 
-func TestSysFSDiscoveryIgnoresUSBWithoutQMIWWANBinding(t *testing.T) {
+func TestSysFSDiscoveryIncludesUnknownUSBSerialDeviceForATProbe(t *testing.T) {
 	root := t.TempDir()
 	usbRoot := filepath.Join(root, "sys", "bus", "usb", "devices")
-	// A plain USB serial adapter (FTDI) exposes ttyUSB but no QMI interface and
-	// is never bound to qmi_wwan, so it must not be treated as a modem.
+	// A plain USB serial adapter may expose ttyUSB without QMI. Sysfs discovery
+	// only marks it for a harmless AT probe; the probing discoverer decides
+	// whether it is actually a modem.
 	mustWrite(t, filepath.Join(usbRoot, "2-1", "idVendor"), "0403\n")
 	mustWrite(t, filepath.Join(usbRoot, "2-1:1.0", "bInterfaceNumber"), "00\n")
 	mustMkdir(t, filepath.Join(usbRoot, "2-1:1.0", "ttyUSB9"))
@@ -265,8 +368,8 @@ func TestSysFSDiscoveryIgnoresUSBWithoutQMIWWANBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	if len(candidates) != 0 {
-		t.Fatalf("got %#v, want no candidates", candidates)
+	if len(candidates) != 1 || !candidates[0].ATProbeRequired || candidates[0].QMIControl != "" {
+		t.Fatalf("got %#v, want one generic candidate pending AT probe", candidates)
 	}
 }
 

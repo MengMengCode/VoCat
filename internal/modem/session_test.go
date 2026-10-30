@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -727,4 +728,34 @@ func newTestSessionWithOptions(t *testing.T, transport *transcriptTransport, opt
 		}
 	})
 	return session
+}
+
+func TestSessionCloseReleasesATPortLeaseOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ttyUSB0")
+	release, ok := tryAcquireATPort(path)
+	if !ok {
+		t.Fatal("initial lease acquisition failed")
+	}
+
+	var hookCalls int
+	session := newTestSession(t, &transcriptTransport{})
+	session.setCloseHook(func() {
+		hookCalls++
+		release()
+	})
+	if err := session.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("close hook called %d times, want 1", hookCalls)
+	}
+
+	if nextRelease, nextOK := tryAcquireATPort(path); !nextOK {
+		t.Fatal("lease remained held after Session.Close")
+	} else {
+		nextRelease()
+	}
 }

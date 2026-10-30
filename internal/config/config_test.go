@@ -19,6 +19,7 @@ var configEnvironment = []string{
 	"VOCAT_SHUTDOWN_TIMEOUT",
 	"VOCAT_MAX_REQUEST_BODY_BYTES",
 	"VOCAT_MCP_ENABLED",
+	"VOCAT_PROBE_UNKNOWN_USB",
 }
 
 func clearConfigEnvironment(t *testing.T) {
@@ -40,6 +41,29 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Address != "0.0.0.0:7575" {
 		t.Fatalf("Address = %q", cfg.Address)
+	}
+	if cfg.ProbeUnknownUSB {
+		t.Fatal("unknown USB serial probing must be opt-in")
+	}
+}
+
+func TestUnknownUSBProbingRequiresExplicitConfiguration(t *testing.T) {
+	clearConfigEnvironment(t)
+	path := filepath.Join(t.TempDir(), "vocat.json")
+	if err := os.WriteFile(path, []byte(`{"probe_unknown_usb":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VOCAT_CONFIG", path)
+	if cfg, err := Load(); err != nil || !cfg.ProbeUnknownUSB {
+		t.Fatalf("file opt-in: %+v %v", cfg, err)
+	}
+	t.Setenv("VOCAT_PROBE_UNKNOWN_USB", "false")
+	if cfg, err := Load(); err != nil || cfg.ProbeUnknownUSB {
+		t.Fatalf("environment override: %+v %v", cfg, err)
+	}
+	t.Setenv("VOCAT_PROBE_UNKNOWN_USB", "invalid")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid opt-in accepted")
 	}
 }
 

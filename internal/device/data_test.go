@@ -147,6 +147,168 @@ func TestOperatorSelectionManualAndAutomatic(t *testing.T) {
 	client.assertDone(t)
 }
 
+func TestSetOperatorSelectionUsesATForZXICCandidate(t *testing.T) {
+	client := &transcriptClient{steps: []clientStep{
+		{command: `AT+COPS=1,2,"23415",7`, response: okResponse()},
+		{command: "AT+COPS?", response: okResponse(`+COPS: 1,2,"23415",7`)},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", modem.ResolveATProfile(modem.Candidate{
+		VendorID: "19d2", ProductID: "0536",
+	}).Operator)
+
+	act := 7
+	selection, err := manager.SetOperatorSelection(context.Background(), id, false, "23415", &act)
+	if err != nil {
+		t.Fatalf("SetOperatorSelection: %v", err)
+	}
+	if selection.Mode != 1 || selection.Format != 2 || selection.Operator != "23415" || selection.AccessTechnology != "LTE" {
+		t.Fatalf("selection = %+v", selection)
+	}
+	client.assertDone(t)
+}
+
+func TestSetOperatorSelectionUsesResolvedOperatorProfile(t *testing.T) {
+	profile := testOperatorProfile{
+		manualCommand:     "AT+XOPS=manual",
+		queryCommand:      "AT+XOPS?",
+		manualPLMN:        "99998",
+		manualAccessTech:  7,
+		checkManualInput:  true,
+		selectionResponse: "+XOPS: custom locked selection",
+		selection: modem.ATOperatorSelection{
+			Mode: 1, Format: 2, Operator: "99998", AccessTechnologyCode: "7",
+		},
+	}
+	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+XOPS=manual", response: okResponse()},
+		{command: "AT+XOPS?", response: okResponse("+XOPS: custom locked selection")},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", profile)
+
+	act := 7
+	selection, err := manager.SetOperatorSelection(context.Background(), id, false, "99998", &act)
+	if err != nil {
+		t.Fatalf("SetOperatorSelection: %v", err)
+	}
+	if selection.Mode != 1 || selection.Operator != "99998" || selection.AccessTechnology != "LTE" {
+		t.Fatalf("selection did not use profile parser: %+v", selection)
+	}
+	client.assertDone(t)
+}
+
+func TestOperatorSelectionUsesResolvedOperatorProfile(t *testing.T) {
+	profile := testOperatorProfile{
+		queryCommand:      "AT+XOPS?",
+		selectionResponse: "+XOPS: custom selection",
+		selection: modem.ATOperatorSelection{
+			Mode: 1, Format: 2, Operator: "99998", AccessTechnologyCode: "7",
+		},
+	}
+	client := &transcriptClient{steps: []clientStep{{
+		command: "AT+XOPS?", response: okResponse("+XOPS: custom selection"),
+	}}}
+	manager, id := newStartedTestManager(t, client)
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", profile)
+
+	selection, err := manager.OperatorSelection(context.Background(), id)
+	if err != nil {
+		t.Fatalf("OperatorSelection: %v", err)
+	}
+	if selection.Mode != 1 || selection.Operator != "99998" || selection.AccessTechnology != "LTE" {
+		t.Fatalf("selection did not use profile parser: %+v", selection)
+	}
+	client.assertDone(t)
+}
+
+func TestSetOperatorSelectionAutomaticUsesResolvedOperatorProfile(t *testing.T) {
+	profile := testOperatorProfile{
+		queryCommand:      "AT+XOPS?",
+		automaticCommand:  "AT+XOPS=automatic",
+		deregisterCommand: "AT+XOPS=detach",
+		selectionResponse: "+XOPS: custom automatic selection",
+		selection: modem.ATOperatorSelection{
+			Mode: 0, Format: 2, Operator: "99998", AccessTechnologyCode: "7",
+		},
+	}
+	client := &transcriptClient{steps: []clientStep{
+		{command: `AT+QCFG="nwscanmode",0,1`, response: okResponse()},
+		{command: "AT+XOPS=detach", response: okResponse()},
+		{command: "AT+XOPS=automatic", response: okResponse()},
+		{command: "AT+XOPS?", response: okResponse("+XOPS: custom automatic selection")},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", profile)
+
+	selection, err := manager.SetOperatorSelection(context.Background(), id, true, "", nil)
+	if err != nil {
+		t.Fatalf("SetOperatorSelection automatic: %v", err)
+	}
+	if selection.Mode != 0 || selection.Operator != "99998" || selection.AccessTechnology != "LTE" {
+		t.Fatalf("automatic selection did not use profile flow: %+v", selection)
+	}
+	client.assertDone(t)
+}
+
+func TestSetOperatorSelectionAutomaticKeepsQuectelScanModeResetForEveryModem(t *testing.T) {
+	// The RAT-scan reset is a best-effort compatibility command. Quectel-based
+	// modules are also sold under other USB identities (for example the DJI
+	// 4G module), so narrowing it to one vendor ID would silently drop the
+	// LTE-only lock recovery for those devices.
+	client := &transcriptClient{steps: []clientStep{
+		{command: `AT+QCFG="nwscanmode",0,1`, response: okResponse()},
+		{command: "AT+COPS=2", response: okResponse()},
+		{command: "AT+COPS=0", response: okResponse()},
+		{command: "AT+COPS?", response: okResponse(`+COPS: 0,2,"99998",7`)},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", modem.ResolveATProfile(modem.Candidate{
+		VendorID: "19d2", ProductID: "0536",
+	}).Operator)
+
+	selection, err := manager.SetOperatorSelection(context.Background(), id, true, "", nil)
+	if err != nil {
+		t.Fatalf("SetOperatorSelection automatic: %v", err)
+	}
+	if selection.Mode != 0 || selection.Operator != "99998" {
+		t.Fatalf("automatic selection = %+v", selection)
+	}
+	client.assertDone(t)
+}
+
+func TestReRegisterOperatorUsesResolvedOperatorProfile(t *testing.T) {
+	profile := testOperatorProfile{
+		queryCommand:      "AT+XOPS?",
+		manualCommand:     "AT+XOPS=manual",
+		deregisterCommand: "AT+XOPS=detach",
+		manualPLMN:        "99998",
+		manualAccessTech:  7,
+		checkManualInput:  true,
+		selectionResponse: "+XOPS:",
+		selection: modem.ATOperatorSelection{
+			Mode: 1, Format: 2, Operator: "99998", AccessTechnologyCode: "7",
+		},
+	}
+	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+XOPS?", response: okResponse("+XOPS: current selection")},
+		{command: "AT+XOPS=detach", response: okResponse()},
+		{command: "AT+XOPS=manual", response: okResponse()},
+		{command: "AT+XOPS?", response: okResponse("+XOPS: reapplied selection")},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	configureTestOperatorProfile(t, manager, id, "19d2", "0536", profile)
+
+	selection, err := manager.ReRegisterOperator(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ReRegisterOperator: %v", err)
+	}
+	if selection.Mode != 1 || selection.Operator != "99998" || selection.AccessTechnology != "LTE" {
+		t.Fatalf("re-registration did not use profile flow: %+v", selection)
+	}
+	client.assertDone(t)
+}
+
 func TestOperatorSelectionRejectsAutomaticFallbackAsSuccess(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{
 		{command: `AT+COPS=1,2,"46000",7`, response: okResponse()},
