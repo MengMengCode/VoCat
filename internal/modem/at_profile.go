@@ -33,6 +33,12 @@ type APDUCommandProfile interface {
 	Parse(command APDUCommand, response Response) ([]byte, error)
 }
 
+// APDUFormPreference optionally supplies a verified initial command form.
+// A dialect's successfully learned form takes precedence over this hint.
+type APDUFormPreference interface {
+	PreferredForm(command APDUCommand) APDUForm
+}
+
 type OperatorATProfile interface {
 	ScanCommand() string
 	SelectionQueryCommand() string
@@ -97,22 +103,23 @@ type ATOperatorSelection struct {
 }
 
 type standardAPDUProfile struct{}
+type zxicAPDUProfile struct{ standardAPDUProfile }
 type standardOperatorProfile struct{}
 type standardPDPProfile struct{}
 type standardIdentityATProfile struct{}
 type zxicIdentityATProfile struct{}
 
-// builtinProfileOverrides holds the chipset-family adaptations verified
-// against real hardware. Only chipsets with live evidence land here; every
-// other device keeps the standard 3GPP command set.
+// builtinProfileOverrides holds adaptations for the USB identities verified
+// by ChipsetForUSB. Unverified products retain the standard command set.
 var builtinProfileOverrides = []ATProfileOverride{
 	{
-		// ZXIC platform firmware ships no ATI, no AT+CCID family, and no
+		// The verified UZ901 firmware ships no ATI, no AT+CCID family, and no
 		// AT+CLCC: each is answered with vendor +CME ERROR: 6003 (command
 		// not recognized). Identity comes from the prefixed +CGMI/+CGMM/
 		// +CGMR queries, the ICCID from the +ZICCID query, and call state
-		// only from vendor URCs. See docs/zxic-lab-checklist.md.
-		Chipset: ChipsetZXIC,
+		// only from vendor URCs.
+		Chipset:  ChipsetZXIC,
+		APDU:     zxicAPDUProfile{},
 		Identity: zxicIdentityATProfile{},
 	},
 }
@@ -165,6 +172,10 @@ func (zxicIdentityATProfile) DeviceInfoCommands() []string {
 func (zxicIdentityATProfile) ICCIDCommands() []string { return []string{"AT+ZICCID?"} }
 
 func (zxicIdentityATProfile) SupportsCLCC() bool { return false }
+
+// The lab UZ901 firmware accepts unquoted CSIM/CGLA payloads. Prefer that
+// verified form directly rather than replaying APDUs after vendor errors.
+func (zxicAPDUProfile) PreferredForm(APDUCommand) APDUForm { return APDUUnquoted }
 
 func (standardAPDUProfile) Build(command APDUCommand, channel int, apdu []byte, form APDUForm) (string, error) {
 	if len(apdu) == 0 {

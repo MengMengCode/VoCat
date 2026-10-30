@@ -2,12 +2,7 @@ package modem
 
 import "testing"
 
-// The chipset family keys on the USB vendor ID: every ZXIC-platform product
-// shares the vendor's AT dialect (no ATI, no +CCID family, no +CLCC), while
-// each retail module still exposes its own product ID. Family matching must
-// not depend on the product ID or on the manufacturer strings the firmware
-// reports, which are frequently placeholders.
-func TestChipsetForUSBKeysOnVendorFamily(t *testing.T) {
+func TestChipsetForUSBRequiresVerifiedIdentity(t *testing.T) {
 	cases := []struct {
 		name     string
 		vendorID string
@@ -17,8 +12,13 @@ func TestChipsetForUSBKeysOnVendorFamily(t *testing.T) {
 		{"UZ901 lab unit", "19d2", "0536", ChipsetZXIC},
 		{"uppercase vendor", "19D2", "0536", ChipsetZXIC},
 		{"padded vendor", " 19d2 ", "0536", ChipsetZXIC},
-		{"other ZXIC product", "19d2", "ffff", ChipsetZXIC},
-		{"empty product", "19d2", "", ChipsetZXIC},
+		{"padded product", "19d2", " 0536 ", ChipsetZXIC},
+		{"ME3630 RNDIS", "19d2", "0601", ChipsetGeneric},
+		{"ME3630 MBIM", "19d2", "0602", ChipsetGeneric},
+		{"ME3630 serial", "19d2", "1476", ChipsetGeneric},
+		{"unknown ZTE product", "19d2", "ffff", ChipsetGeneric},
+		{"empty product", "19d2", "", ChipsetGeneric},
+		{"other vendor with same product", "ffff", "0536", ChipsetGeneric},
 		{"Quectel", "2c7c", "0125", ChipsetGeneric},
 		{"DJI 4G", "2ca3", "4006", ChipsetGeneric},
 		{"empty identity", "", "", ChipsetGeneric},
@@ -45,6 +45,10 @@ func TestChipsetForCandidateAndIsZXICFamily(t *testing.T) {
 	generic := Candidate{VendorID: "2c7c", ProductID: "0125", Manufacturer: "ZXIC", Product: "UZ901"}
 	if ChipsetForCandidate(generic) != ChipsetGeneric {
 		t.Fatal("manufacturer/product text must not influence chipset family detection")
+	}
+	generic.VendorID, generic.ProductID = "19d2", "ffff"
+	if ChipsetForCandidate(generic) != ChipsetGeneric {
+		t.Fatal("unverified ZTE product must not inherit the ZXIC dialect from its strings")
 	}
 }
 

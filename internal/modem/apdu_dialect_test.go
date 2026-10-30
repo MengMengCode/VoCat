@@ -3,6 +3,7 @@ package modem
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -16,7 +17,7 @@ func TestATAPDUDialectRetriesUnquotedAfterCommandError(t *testing.T) {
 	responseBytes, err := dialect.Execute(context.Background(), profile, APDUCSIM, 0, []byte{0x00, 0xA4}, func(_ context.Context, command string) (Response, error) {
 		commands = append(commands, command)
 		if len(commands) == 1 {
-			return Response{Final: "+CME ERROR: 13"}, &CommandError{Command: command, Final: "+CME ERROR: 13"}
+			return Response{Final: "ERROR"}, &CommandError{Command: command, Final: "ERROR"}
 		}
 		if command != `AT+CSIM=4,00A4` {
 			return Response{}, errors.New("unexpected APDU command shape")
@@ -31,6 +32,118 @@ func TestATAPDUDialectRetriesUnquotedAfterCommandError(t *testing.T) {
 	}
 	if !reflect.DeepEqual(responseBytes, []byte{0x90, 0x00}) {
 		t.Fatal("APDU response bytes did not include the expected status word")
+	}
+}
+
+func TestATAPDUDialectUsesZXICPreferredFormWithoutReplayingSIMFailure(t *testing.T) {
+	profile := ResolveATProfile(Candidate{VendorID: "19d2", ProductID: "0536"}).APDU
+	for _, commandKind := range []APDUCommand{APDUCSIM, APDUCGLA} {
+		t.Run(apduCommandName(commandKind), func(t *testing.T) {
+			dialect := &ATAPDUDialect{}
+			apdu := []byte{0x00, 0x70, 0x00, 0x00, 0x01}
+			want, _ := profile.Build(commandKind, 1, apdu, APDUUnquoted)
+			calls := 0
+			_, err := dialect.Execute(context.Background(), profile, commandKind, 1, apdu, func(_ context.Context, command string) (Response, error) {
+				calls++
+				if command != want {
+					t.Fatal("ZXIC did not start with its verified unquoted form")
+				}
+				return Response{Final: "+CME ERROR: 13"}, &CommandError{Command: command, Final: "+CME ERROR: 13"}
+			})
+			var rejected *APDUCommandRejectedError
+			if calls != 1 || !errors.As(err, &rejected) || rejected.Final != "+CME ERROR: 13" {
+				t.Fatalf("preferred-form SIM failure was replayed or replaced: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestATAPDUDialectLearnsQuotedAfterPreferredFormRejected(t *testing.T) {
+	profile := ResolveATProfile(Candidate{VendorID: "19d2", ProductID: "0536"}).APDU
+	dialect := &ATAPDUDialect{}
+	calls := 0
+	for range 2 {
+		_, err := dialect.Execute(context.Background(), profile, APDUCSIM, 0, []byte{0x00, 0xA4}, func(_ context.Context, command string) (Response, error) {
+			calls++
+			if calls == 1 {
+				if command != `AT+CSIM=4,00A4` {
+					t.Fatal("first exchange ignored the profile preference")
+				}
+				return Response{Final: "ERROR"}, &CommandError{Command: command, Final: "ERROR"}
+			}
+			if command != `AT+CSIM=4,"00A4"` {
+				t.Fatal("quoted fallback was not retained after success")
+			}
+			return Response{Final: "OK", Lines: []string{`+CSIM: 4,"9000"`}}, nil
+		})
+		if err != nil {
+			t.Fatalf("quoted fallback failed: %v", err)
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("preferred form fallback used %d exchanges, want 3", calls)
+	}
+}
+
+func TestATAPDUDialectDoesNotReplayCMEFailure(t *testing.T) {
+	for _, commandKind := range []APDUCommand{APDUCSIM, APDUCGLA} {
+		for _, final := range []string{"+CME ERROR: 0", "+CME ERROR: 13", "+CME ERROR: 14", "+CME ERROR: 6004", "+CME ERROR: 9999"} {
+			for _, withError := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/commandError=%v", apduCommandName(commandKind), final, withError), func(t *testing.T) {
+					dialect := &ATAPDUDialect{}
+					calls := 0
+					// MANAGE CHANNEL changes card state. A failed card exchange must
+					// not be replayed merely to test a different quoting form.
+					_, err := dialect.Execute(context.Background(), standardAPDUProfile{}, commandKind, 1, []byte{0x00, 0x70, 0x00, 0x00, 0x01}, func(_ context.Context, command string) (Response, error) {
+						calls++
+						if calls > 1 {
+							return Response{Final: "ERROR"}, &CommandError{Command: command, Final: "ERROR"}
+						}
+						if withError {
+							return Response{Final: final}, &CommandError{Command: command, Final: final, Lines: []string{"private-response"}}
+						}
+						return Response{Final: final}, nil
+					})
+					var rejected *APDUCommandRejectedError
+					if !errors.As(err, &rejected) || rejected.Final != final {
+						t.Fatalf("first card failure was replaced: %v", err)
+					}
+					if calls != 1 || dialect.learned[0] || dialect.learned[1] {
+						t.Fatalf("card failure replayed or learned a quoting form: calls=%d learned=%v", calls, dialect.learned)
+					}
+					if strings.Contains(err.Error(), "0070000001") || strings.Contains(err.Error(), "private-response") {
+						t.Fatal("card failure exposed command or response data")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestATAPDUDialectDoesNotReplayErrorWithAPDUResponse(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		responseLines []string
+		errorLines    []string
+	}{
+		{name: "response data", responseLines: []string{`+CSIM: 6,"019000"`}},
+		{name: "error data", errorLines: []string{`+CGLA: 4,"9000"`}},
+		{name: "malformed response", responseLines: []string{`+CSIM: invalid-private-response`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dialect := &ATAPDUDialect{}
+			calls := 0
+			_, err := dialect.Execute(context.Background(), standardAPDUProfile{}, APDUCSIM, 0, []byte{0x00, 0x70, 0x00, 0x00, 0x01}, func(_ context.Context, command string) (Response, error) {
+				calls++
+				return Response{Final: "ERROR", Lines: test.responseLines}, &CommandError{Command: command, Final: "ERROR", Lines: test.errorLines}
+			})
+			if !errors.Is(err, ErrAPDUCommandRejected) || calls != 1 {
+				t.Fatalf("ERROR carrying an APDU response must not replay: calls=%d err=%v", calls, err)
+			}
+			if strings.Contains(err.Error(), "private-response") || strings.Contains(err.Error(), "0070000001") {
+				t.Fatal("uncertain APDU response exposed command or response data")
+			}
+		})
 	}
 }
 

@@ -499,6 +499,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	cardReaders := pcsc.New()
 	deviceLogger := logger.With("category", "hardware")
 	deviceManager, err := device.NewManager(device.Options{
+		Discoverer:  modem.NewSystemDiscovererWithOptions(modem.DiscoveryOptions{ProbeUnknownUSB: cfg.ProbeUnknownUSB}),
 		CardReaders: cardReaders,
 		Logger:      deviceLogger,
 		MBNProfileForICCID: func(ctx context.Context, iccid string) (string, error) {

@@ -12,6 +12,18 @@ import (
 	"testing"
 )
 
+func TestSystemDiscovererRequiresUnknownUSBOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		d := NewSystemDiscovererWithOptions(DiscoveryOptions{ProbeUnknownUSB: enabled}).(*ATProbingDiscoverer)
+		if d.ProbeUnknownUSB != enabled {
+			t.Fatalf("unknown USB probing = %v, want %v", d.ProbeUnknownUSB, enabled)
+		}
+	}
+	if NewSystemDiscoverer().(*ATProbingDiscoverer).ProbeUnknownUSB {
+		t.Fatal("default system discovery enables unknown USB probing")
+	}
+}
+
 func TestSysFSDiscoveryIncludesUnknownUSBWithTTY(t *testing.T) {
 	root := t.TempDir()
 	sysRoot := filepath.Join(root, "sys")
@@ -48,15 +60,12 @@ func TestSysFSDiscoverySkipsUnknownUSBWithoutTTY(t *testing.T) {
 	}
 }
 
-func TestSysFSDiscoveryIdentifiesZXICByVendorFamily(t *testing.T) {
+func TestSysFSDiscoveryIdentifiesSupportedZXICUSB(t *testing.T) {
 	root := t.TempDir()
 	sysRoot := filepath.Join(root, "sys")
 	devRoot := filepath.Join(root, "dev")
 	usbRoot := filepath.Join(sysRoot, "bus", "usb", "devices")
-	// The lab unit is 19d2:0536, but family matching must cover every
-	// ZXIC product ID: a future module must not be dropped from discovery
-	// just because its PID is unknown here.
-	writeUSBInterfaceFixture(t, usbRoot, "7-3", "19d2", "ffff", "ttyUSB0")
+	writeUSBInterfaceFixture(t, usbRoot, "7-3", "19d2", "0536", "ttyUSB0")
 	mustWrite(t, filepath.Join(usbRoot, "7-3", "manufacturer"), "Android\n")
 	mustWrite(t, filepath.Join(usbRoot, "7-3", "product"), "Linux\n")
 
@@ -72,7 +81,7 @@ func TestSysFSDiscoveryIdentifiesZXICByVendorFamily(t *testing.T) {
 		t.Fatalf("identity = %q/%q, want ZXIC family labels over placeholder strings",
 			candidate.Manufacturer, candidate.Product)
 	}
-	if candidate.VendorID != "19d2" || candidate.ProductID != "ffff" ||
+	if candidate.VendorID != "19d2" || candidate.ProductID != "0536" ||
 		!candidate.ATProbeRequired || len(candidate.Ports) != 1 || candidate.Ports[0].Name != "ttyUSB0" {
 		t.Fatalf("candidate = %#v, want ZXIC family USB identity and AT port", candidate)
 	}

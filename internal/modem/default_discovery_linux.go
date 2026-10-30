@@ -2,12 +2,14 @@
 
 package modem
 
-import "time"
-
 func NewSystemDiscoverer() Discoverer {
-	return ATProbingDiscoverer{
-		Base:    NewSysFSDiscoverer("/sys", "/dev"),
-		Probe:   probeATPort,
-		Timeout: 1500 * time.Millisecond,
+	return NewSystemDiscovererWithOptions(DiscoveryOptions{})
+}
+
+func NewSystemDiscovererWithOptions(options DiscoveryOptions) Discoverer {
+	return &ATProbingDiscoverer{
+		Base:            NewSysFSDiscoverer("/sys", "/dev"),
+		Probe:           probeATPort,
+		ProbeUnknownUSB: options.ProbeUnknownUSB,
 	}
 }

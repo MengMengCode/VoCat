@@ -70,34 +70,57 @@ func TestManagerDiscoverReturnsOnlyCurrentlyPresentDevices(t *testing.T) {
 	}
 }
 
-func TestManagerDiscoverRetainsActiveCandidateWhenATProbeBusy(t *testing.T) {
-	manager, id := newStartedTestManager(t, nil)
-	before, err := manager.Get(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	busyCandidate := before.Candidate
-	busyCandidate.VendorID = "ffff"
-	busyCandidate.ProductID = "0001"
-	busyCandidate.USBGeneration = "replacement-generation"
-	busyCandidate.ATPort = modem.Port{Path: "/dev/ttyUSB9", Name: "ttyUSB9", Role: modem.PortRoleAT}
-	busyCandidate.ATProbeBusy = true
-	manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{busyCandidate}}
-
-	present, err := manager.Discover(context.Background())
-	if err != nil {
-		t.Fatalf("Discover while prior AT session owns the port: %v", err)
-	}
-	if len(present) != 1 {
-		t.Fatalf("present devices = %#v, want prior active candidate retained", present)
-	}
-	after := present[0].Candidate
-	if after.VendorID != before.Candidate.VendorID ||
-		after.ProductID != before.Candidate.ProductID ||
-		after.USBGeneration != before.Candidate.USBGeneration ||
-		after.ATPort.OpenPath() != before.Candidate.ATPort.OpenPath() {
-		t.Fatalf("candidate changed while AT probe was busy: before=%#v after=%#v", before.Candidate, after)
+func TestManagerDiscoverRetainsOnlyVerifiedPortForCurrentUSBInstance(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		deferred, reset, newIdentity bool
+	}{
+		{name: "busy same enumeration"}, {name: "deferred same enumeration", deferred: true},
+		{name: "busy new enumeration", reset: true}, {name: "busy new identity", reset: true, newIdentity: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &transcriptClient{steps: []clientStep{{command: "AT", response: okResponse()}}}
+			manager, id := newStartedTestManager(t, client)
+			if _, err := manager.ExecuteAT(context.Background(), id, "AT"); err != nil {
+				t.Fatal(err)
+			}
+			before, err := manager.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate := before.Candidate
+			candidate.ATProbeRequired = true
+			candidate.ATProbeBusy = !tc.deferred
+			candidate.ATProbeDeferred = tc.deferred
+			candidate.Product = "fresh product metadata"
+			candidate.ATPort = modem.Port{Path: "/dev/ttyUSB9", Name: "ttyUSB9"}
+			candidate.Ports = []modem.Port{before.Candidate.ATPort, candidate.ATPort}
+			candidate.DiscoveryIssue = "at_probe_pending"
+			if tc.reset {
+				candidate.USBGeneration = "new-enumeration"
+				candidate.ATPort = before.Candidate.ATPort
+			}
+			if tc.newIdentity {
+				candidate.VendorID = "ffff"
+				candidate.ProductID = "0001"
+			}
+			manager.discoverer = staticDiscoverer{candidates: []modem.Candidate{candidate}}
+			items, err := manager.Discover(context.Background())
+			if err != nil || len(items) != 1 {
+				t.Fatalf("Discover: %v %#v", err, items)
+			}
+			after := items[0].Candidate
+			if after.USBGeneration != candidate.USBGeneration || after.VendorID != candidate.VendorID || after.Product != "fresh product metadata" {
+				t.Fatalf("fresh metadata discarded: %+v", after)
+			}
+			if tc.reset {
+				if client.closeCount != 1 || !after.ATProbeRequired {
+					t.Fatalf("old session survived reset: closes=%d candidate=%+v", client.closeCount, after)
+				}
+			} else if client.closeCount != 0 || after.ATPort.OpenPath() != before.Candidate.ATPort.OpenPath() || after.DiscoveryIssue != "" || after.ATProbeRequired {
+				t.Fatalf("verified port lost while deferred: closes=%d candidate=%+v", client.closeCount, after)
+			}
+		})
 	}
 }
 
@@ -159,11 +182,6 @@ func TestManagerExecuteAPDUSanitizesCommandAndResponse(t *testing.T) {
 			command:  quotedCommand,
 			response: modem.Response{Final: "+CME ERROR: 13", Lines: []string{`+CSIM: 8,"response-` + apduHex + `"`}},
 			err:      &modem.CommandError{Command: quotedCommand, Final: "+CME ERROR: 13", Lines: []string{`+CSIM: request-` + apduHex}},
-		},
-		{
-			command:  unquotedCommand,
-			response: modem.Response{Final: "ERROR", Lines: []string{`+CSIM: response-` + apduHex}},
-			err:      &modem.CommandError{Command: unquotedCommand, Final: "ERROR", Lines: []string{`+CSIM: response-` + apduHex}},
 		},
 	}}
 	manager, id := newStartedTestManager(t, client)

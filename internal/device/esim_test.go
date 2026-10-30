@@ -299,8 +299,8 @@ func TestESIMCSIMDialectFallbackAndLearnedShape(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{
 		{
 			command:  `AT+CSIM=10,"0070000001"`,
-			response: modem.Response{Final: "+CME ERROR: 6004"},
-			err:      &modem.CommandError{Command: `AT+CSIM=10,"0070000001"`, Final: "+CME ERROR: 6004"},
+			response: modem.Response{Final: "ERROR"},
+			err:      &modem.CommandError{Command: `AT+CSIM=10,"0070000001"`, Final: "ERROR"},
 		},
 		{command: `AT+CSIM=10,0070000001`, response: okResponse(`+CSIM: 6,019000`)},
 		{command: `AT+CSIM=10,0070800100`, response: okResponse(`+CSIM: 4,9000`)},
@@ -329,8 +329,8 @@ func TestESIMCSIMSharesManagerAPDUDialect(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{
 		{
 			command:  `AT+CSIM=4,"00A4"`,
-			response: modem.Response{Final: "+CME ERROR: 6004"},
-			err:      &modem.CommandError{Command: `AT+CSIM=4,"00A4"`, Final: "+CME ERROR: 6004"},
+			response: modem.Response{Final: "ERROR"},
+			err:      &modem.CommandError{Command: `AT+CSIM=4,"00A4"`, Final: "ERROR"},
 		},
 		{command: `AT+CSIM=4,00A4`, response: okResponse(`+CSIM: 4,9000`)},
 		{command: `AT+CSIM=4,00B0`, response: okResponse(`+CSIM: 4,9000`)},
@@ -344,6 +344,38 @@ func TestESIMCSIMSharesManagerAPDUDialect(t *testing.T) {
 	if err != nil || !bytes.Equal(response, []byte{0x90, 0x00}) {
 		t.Fatalf("Manager.ExecuteAPDU response = %X, %v; want 9000", response, err)
 	}
+	client.assertDone(t)
+}
+
+func TestESIMCSIMPreservesTransientFailureWithoutQuotingRetry(t *testing.T) {
+	const command = `AT+CSIM=10,"0070000001"`
+	client := &transcriptClient{steps: []clientStep{{
+		command:  command,
+		response: modem.Response{Final: "+CME ERROR: 0"},
+		err:      &modem.CommandError{Command: command, Final: "+CME ERROR: 0"},
+	}}}
+	manager, id := newStartedTestManager(t, client)
+	_, _, err := manager.csim(context.Background(), id, []byte{0x00, 0x70, 0x00, 0x00, 0x01})
+	if !isTransientEuiccCME(err) {
+		t.Fatalf("initial card failure must retain eSIM recovery classification: %v", err)
+	}
+	client.assertDone(t)
+}
+
+func TestOpenEuiccRetriesTransientFailureWithOriginalQuoting(t *testing.T) {
+	const command = `AT+CSIM=10,"0070000001"`
+	client := &transcriptClient{steps: []clientStep{
+		{command: command, err: &modem.CommandError{Command: command, Final: "+CME ERROR: 0"}},
+		{command: command, response: okResponse(`+CSIM: 6,"019000"`)},
+		{command: fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, isdRAID), response: okResponse(`+CSIM: 4,"9000"`)},
+		{command: `AT+CSIM=10,"0070800100"`, response: okResponse(`+CSIM: 4,"9000"`)},
+	}}
+	manager, id := newStartedTestManager(t, client)
+	channel, err := manager.openEuiccAID(context.Background(), id, isdRAID)
+	if err != nil {
+		t.Fatalf("transient card failure did not reach the existing recovery retry: %v", err)
+	}
+	channel.close(context.Background())
 	client.assertDone(t)
 }
 

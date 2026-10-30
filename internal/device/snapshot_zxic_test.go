@@ -60,13 +60,13 @@ func newZXICSnapshotTestManager(t *testing.T, client modem.Client) (*Manager, st
 			VendorID:  "19d2",
 			ProductID: "0536",
 			ATPort: modem.Port{
-				Path:    "/dev/ttyUSB0",
-				Name:    "ttyUSB0",
-				Role:    modem.PortRoleAT,
+				Path: "/dev/ttyUSB0",
+				Name: "ttyUSB0",
+				Role: modem.PortRoleAT,
 			},
 		}}},
 		Opener:         &staticOpener{client: client},
-		CommandTimeout:  time.Second,
+		CommandTimeout: time.Second,
 		LongTimeout:    time.Second,
 	})
 	if err != nil {
@@ -86,17 +86,17 @@ func newZXICSnapshotTestManager(t *testing.T, client modem.Client) (*Manager, st
 // AT+CLCC) may be issued.
 func TestManagerRefreshBuildsZXICSnapshot(t *testing.T) {
 	client := &zxicScriptedClient{responses: map[string][]string{
-		"AT+CGMI":   {"+CGMI: UZ901_KSBC_JH_VSIM"},
-		"AT+CGMM":   {"+CGMM: UZ901"},
-		"AT+CGMR":   {"+CGMR: UZ901DW3.0_KSBC_JH_VSIM_SL_V01.01.02P48U06_01"},
-		"AT+CPIN?":  {"+CPIN: READY"},
+		"AT+CGMI":    {"+CGMI: UZ901_KSBC_JH_VSIM"},
+		"AT+CGMM":    {"+CGMM: UZ901"},
+		"AT+CGMR":    {"+CGMR: UZ901DW3.0_KSBC_JH_VSIM_SL_V01.01.02P48U06_01"},
+		"AT+CPIN?":   {"+CPIN: READY"},
 		"AT+ZICCID?": {"+ZICCID: 89441000400317114751"},
-		"AT+CIMI":   {"+CIMI: 234159612827125"},
-		"AT+CSQ":    {"+CSQ: 20,99"},
-		"AT+COPS?":  {`+COPS: 0,2,"46000",7,0`},
-		"AT+CEREG?": {`+CEREG: 2,5,"268A","0BB766C0",7,0`},
-		"AT+CGSN":   {"+CGSN: 865240070019472"},
-		"AT+CFUN?":  {"+CFUN: 1"},
+		"AT+CIMI":    {"+CIMI: 234159612827125"},
+		"AT+CSQ":     {"+CSQ: 20,99"},
+		"AT+COPS?":   {`+COPS: 0,2,"46000",7,0`},
+		"AT+CEREG?":  {`+CEREG: 2,5,"268A","0BB766C0",7,0`},
+		"AT+CGSN":    {"+CGSN: 865240070019472"},
+		"AT+CFUN?":   {"+CFUN: 1"},
 	}}
 	manager, id := newZXICSnapshotTestManager(t, client)
 
@@ -142,6 +142,58 @@ func TestManagerRefreshBuildsZXICSnapshot(t *testing.T) {
 		if client.called(forbidden) {
 			t.Fatalf("ZXIC snapshot issued %s, which the firmware rejects with +CME ERROR: 6003", forbidden)
 		}
+	}
+}
+
+func TestSnapshotKeepsME3630ATIIdentity(t *testing.T) {
+	client := &zxicScriptedClient{responses: map[string][]string{
+		"ATI":     {"Manufacturer:GOSUNCNWELINK", "Model:ME3630", "Revision:ME3630U1AV1.0B04"},
+		"AT+CCID": {"+CCID: 89441000400317114751"},
+	}}
+	manager := &Manager{commandTimeout: time.Second}
+	snapshot, err := manager.readSnapshot(context.Background(), "me3630", modem.Candidate{
+		VendorID: "19d2", ProductID: "0601", Product: "ME3630",
+	}, "at", "", nil, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Firmware != "ME3630U1AV1.0B04" || snapshot.ICCID != "89441000400317114751" {
+		t.Fatalf("standard ZTE identity was lost: %+v", snapshot)
+	}
+	if !client.called("ATI") || !client.called("AT+CCID") || client.called("AT+ZICCID?") {
+		t.Fatalf("ME3630 used vendor override: %v", client.calls)
+	}
+}
+
+func TestZXICIdentityAcceptsBareResponsesWithoutURCs(t *testing.T) {
+	client := &zxicScriptedClient{responses: map[string][]string{
+		"AT+CGMI": {"RDY", "AT+CGMI", "+CEREG: 1", "UZ901_KSBC_JH_VSIM"},
+		"AT+CGMM": {"RING", "^SYSSTART", "UZ901", "OK"},
+		"AT+CGMR": {"PB DONE", "+QIURC: ready", "UZ901_V01.02", "NO CARRIER"},
+	}}
+	manager := &Manager{commandTimeout: time.Second}
+	var snapshot Snapshot
+	profile := modem.ResolveATProfile(modem.Candidate{VendorID: "19d2", ProductID: "0536"})
+	if err := manager.probeIdentity(context.Background(), client, profile.Identity, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Manufacturer != "UZ901_KSBC_JH_VSIM" || snapshot.Model != "UZ901" || snapshot.Firmware != "UZ901_V01.02" {
+		t.Fatalf("bare identity = %+v", snapshot)
+	}
+}
+
+func TestIdentityValueRejectsUnrelatedLines(t *testing.T) {
+	for _, lines := range [][]string{
+		{"AT+CGMM", "RING", "RDY", "SMS READY", "CALL READY", "PB DONE", "OK"},
+		{"+CEREG: 1", "^SYSSTART", "%READY", "$QIND: 1"},
+		{"unsolicited bare text", "UZ901"},
+	} {
+		if got := identityValue(modem.Response{Lines: lines}, "AT+CGMM"); got != "" {
+			t.Fatalf("identityValue(%v) = %q, want no identity", lines, got)
+		}
+	}
+	if got := identityValue(modem.Response{Lines: []string{"unrelated", "+CGMM: UZ901"}}, "AT+CGMM"); got != "UZ901" {
+		t.Fatalf("prefixed identity did not take priority: %q", got)
 	}
 }
 

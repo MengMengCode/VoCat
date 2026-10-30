@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -15,6 +16,9 @@ func TestATPortLeaseIsExclusiveUntilRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, alias); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("creating a symlink requires Windows developer mode or elevation: %v", err)
+		}
 		t.Fatal(err)
 	}
 

@@ -76,11 +76,11 @@ func (manager *Manager) probeIdentity(
 		snapshot.Responsive = true
 		switch {
 		case strings.Contains(strings.ToUpper(command), "CGMI"):
-			snapshot.Manufacturer = prefixedIdentityValue(response, command)
+			snapshot.Manufacturer = identityValue(response, command)
 		case strings.Contains(strings.ToUpper(command), "CGMM"):
-			snapshot.Model = prefixedIdentityValue(response, command)
+			snapshot.Model = identityValue(response, command)
 		case strings.Contains(strings.ToUpper(command), "CGMR"):
-			snapshot.Firmware = prefixedIdentityValue(response, command)
+			snapshot.Firmware = identityValue(response, command)
 		}
 	}
 	if !snapshot.Responsive {
@@ -92,23 +92,46 @@ func (manager *Manager) probeIdentity(
 	return nil
 }
 
-// prefixedIdentityValue extracts the first response line carrying the
-// command's own prefix (for example "+CGMI: value"); the ZXIC firmware
-// answers every identity query in that form. Lines without the prefix are
-// ignored so interleaved URCs cannot pollute the identity.
-func prefixedIdentityValue(response modem.Response, command string) string {
-	prefix := strings.ToUpper(strings.TrimPrefix(strings.TrimSpace(command), "AT"))
-	if !strings.HasPrefix(prefix, "+") {
-		prefix = "+" + prefix
+// identityValue prefers the query's own prefix. Firmware may also return a
+// single bare identity line; ignore notifications, echoes and result codes,
+// and do not guess when multiple bare lines remain.
+func identityValue(response modem.Response, command string) string {
+	command = strings.ToUpper(strings.TrimSpace(command))
+	switch command {
+	case "AT+CGMI", "AT+CGMM", "AT+CGMR":
+	default:
+		return ""
 	}
-	prefix += ":"
+	prefix := strings.TrimPrefix(command, "AT") + ":"
 	for _, line := range response.Lines {
 		trimmed := strings.TrimSpace(line)
 		if len(trimmed) >= len(prefix) && strings.EqualFold(trimmed[:len(prefix)], prefix) {
 			return strings.TrimSpace(trimmed[len(prefix):])
 		}
 	}
-	return ""
+	bare := ""
+	for _, line := range response.Lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.EqualFold(line, command) || strings.ContainsAny(line, ":\r\n") ||
+			strings.ContainsAny(line[:1], "+^%#$@") || identityNotification(line) {
+			continue
+		}
+		if bare != "" {
+			return ""
+		}
+		bare = line
+	}
+	return bare
+}
+
+func identityNotification(line string) bool {
+	upper := strings.ToUpper(line)
+	switch upper {
+	case "OK", "ERROR", "RING", "RDY", "READY", "SMS READY", "CALL READY", "PB DONE", "SMS DONE", "APP RDY",
+		"NO CARRIER", "BUSY", "NO ANSWER", "NO DIALTONE", "NO DIAL TONE", "NORMAL POWER DOWN", "POWERED DOWN":
+		return true
+	}
+	return upper == "CONNECT" || strings.HasPrefix(upper, "CONNECT ")
 }
 
 func (manager *Manager) readSnapshotWithOperatorProfile(

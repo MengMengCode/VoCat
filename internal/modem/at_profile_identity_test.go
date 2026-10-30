@@ -2,11 +2,8 @@ package modem
 
 import "testing"
 
-// The ZXIC platform firmware has no ATI, no AT+CCID family, and no +CLCC;
-// identity probes must use the platform commands documented in the vendor
-// manual and verified on the live hardware (prefixed +CGMI/+CGMM/+CGMR and
-// the +ZICCID query). The override keys on the chipset family, so every
-// ZXIC product ID inherits it.
+// Only the verified UZ901 USB identity receives its nonstandard identity
+// commands. Other products sharing ZTE's vendor ID retain the default probes.
 func TestResolveATProfileZXICIdentityCommands(t *testing.T) {
 	standard := ResolveATProfile(Candidate{})
 	if commands := standard.Identity.DeviceInfoCommands(); len(commands) != 1 || commands[0] != "ATI" {
@@ -32,16 +29,17 @@ func TestResolveATProfileZXICIdentityCommands(t *testing.T) {
 		t.Fatal("ZXIC firmware returns +CME ERROR: 6003 for AT+CLCC; polling must be gated off")
 	}
 
-	// Family semantics: an unlisted ZXIC product ID inherits the platform
-	// dialect instead of silently falling back to commands the firmware
-	// does not implement.
-	otherZXIC := ResolveATProfile(Candidate{VendorID: "19d2", ProductID: "ffff"})
-	if commands := otherZXIC.Identity.DeviceInfoCommands(); len(commands) != 3 ||
-		commands[0] != "AT+CGMI" {
-		t.Fatalf("other ZXIC product DeviceInfoCommands = %v, want the family override", commands)
-	}
-	if otherZXIC.Identity.SupportsCLCC() {
-		t.Fatal("other ZXIC product must inherit SupportsCLCC=false")
+	for _, productID := range []string{"0601", "0602", "1476", "ffff", ""} {
+		otherZTE := ResolveATProfile(Candidate{VendorID: "19d2", ProductID: productID})
+		if commands := otherZTE.Identity.DeviceInfoCommands(); len(commands) != 1 || commands[0] != "ATI" {
+			t.Fatalf("ZTE product %q DeviceInfoCommands = %v, want [ATI]", productID, commands)
+		}
+		if commands := otherZTE.Identity.ICCIDCommands(); len(commands) != 3 || commands[0] != "AT+CCID" {
+			t.Fatalf("ZTE product %q ICCIDCommands = %v, want standard fallback", productID, commands)
+		}
+		if !otherZTE.Identity.SupportsCLCC() {
+			t.Fatalf("ZTE product %q must retain standard call-list capability", productID)
+		}
 	}
 
 	// Non-ZXIC vendors never inherit the override.

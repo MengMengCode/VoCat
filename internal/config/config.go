@@ -24,6 +24,7 @@ type Config struct {
 	ShutdownTimeout     time.Duration
 	MaxRequestBodyBytes int64
 	MCPEnabled          bool
+	ProbeUnknownUSB     bool
 }
 
 type fileConfig struct {
@@ -39,6 +40,7 @@ type fileConfig struct {
 	ShutdownTimeout     *string `json:"shutdown_timeout"`
 	MaxRequestBodyBytes *int64  `json:"max_request_body_bytes"`
 	MCPEnabled          *bool   `json:"mcp_enabled"`
+	ProbeUnknownUSB     *bool   `json:"probe_unknown_usb"`
 }
 
 // Default returns the non-secret process configuration. Administrator
@@ -142,6 +144,9 @@ func applyFile(cfg *Config, values fileConfig) error {
 	if values.MCPEnabled != nil {
 		cfg.MCPEnabled = *values.MCPEnabled
 	}
+	if values.ProbeUnknownUSB != nil {
+		cfg.ProbeUnknownUSB = *values.ProbeUnknownUSB
+	}
 	return nil
 }
 
@@ -189,6 +194,13 @@ func applyEnvironment(cfg *Config) error {
 			return fmt.Errorf("VOCAT_MCP_ENABLED: %w", err)
 		}
 		cfg.MCPEnabled = enabled
+	}
+	if value, ok := os.LookupEnv("VOCAT_PROBE_UNKNOWN_USB"); ok {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("VOCAT_PROBE_UNKNOWN_USB: %w", err)
+		}
+		cfg.ProbeUnknownUSB = enabled
 	}
 	return nil
 }

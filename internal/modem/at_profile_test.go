@@ -2,6 +2,7 @@ package modem
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -43,12 +44,11 @@ func TestResolveATProfileUsesChipsetFamilyOverlay(t *testing.T) {
 		t.Fatalf("chipset family overlay command = %q, %v", got, err)
 	}
 
-	// Every product ID of the family shares the platform dialect, so a
-	// future ZXIC module inherits the family override without a code change.
+	// A shared vendor ID is insufficient evidence for a chipset override.
 	candidate.ProductID = "ffff"
 	profile = resolveATProfile(candidate, overrides)
-	if got, err := profile.PDP.ConfigureContextCommand(1, "IP", "internet"); err != nil || got != "family:context" {
-		t.Fatalf("other family product missed overlay: %q, %v", got, err)
+	if got, err := profile.PDP.ConfigureContextCommand(1, "IP", "internet"); err != nil || got == "family:context" {
+		t.Fatalf("unverified ZTE product selected overlay: %q, %v", got, err)
 	}
 
 	// Firmware-reported identity text never influences chipset detection.
@@ -79,6 +79,33 @@ func TestResolveATProfileFallsBackForUnknownUSBID(t *testing.T) {
 	other := ResolveATProfile(Candidate{VendorID: "abcd", ProductID: "1234"})
 	if other.Operator.ScanCommand() != profile.Operator.ScanCommand() {
 		t.Fatalf("unknown USB identities resolved differently: %q vs %q", profile.Operator.ScanCommand(), other.Operator.ScanCommand())
+	}
+}
+
+func TestResolveATProfileLimitsAPDUPreferenceToVerifiedZXIC(t *testing.T) {
+	profile := ResolveATProfile(Candidate{VendorID: "19d2", ProductID: "0536"}).APDU
+	preference, ok := profile.(APDUFormPreference)
+	if !ok {
+		t.Fatal("verified ZXIC profile has no APDU form preference")
+	}
+	for _, command := range []APDUCommand{APDUCSIM, APDUCGLA} {
+		form := preference.PreferredForm(command)
+		if form != APDUUnquoted {
+			t.Fatalf("command %d preference = %v, want unquoted", command, form)
+		}
+		built, err := profile.Build(command, 1, []byte{0x00, 0xa4}, form)
+		if err != nil || strings.Contains(built, `"`) || !strings.HasSuffix(built, ",00A4") {
+			t.Fatalf("preferred command = %q, %v", built, err)
+		}
+	}
+	for _, candidate := range []Candidate{{}, {VendorID: "19d2", ProductID: "0601"}, {VendorID: "19d2", ProductID: "ffff"}, {VendorID: "2c7c", ProductID: "0125"}} {
+		generic := ResolveATProfile(candidate).APDU
+		if _, ok := generic.(APDUFormPreference); ok {
+			t.Fatalf("unverified candidate inherited vendor APDU preference: %+v", candidate)
+		}
+		if command, err := generic.Build(APDUCSIM, 0, []byte{0x00, 0xa4}, APDUQuoted); err != nil || command != `AT+CSIM=4,"00A4"` {
+			t.Fatalf("standard quoted command = %q, %v", command, err)
+		}
 	}
 }
 

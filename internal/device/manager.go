@@ -306,8 +306,8 @@ func (manager *Manager) Discover(ctx context.Context) ([]Device, error) {
 			continue
 		}
 		state := manager.devices[candidate.ID]
-		if candidate.ATProbeBusy && state != nil && state.discovered {
-			candidate = state.candidate
+		if state != nil && state.discovered {
+			candidate = preserveVerifiedATPort(state.candidate, candidate)
 		}
 		seen[candidate.ID] = struct{}{}
 		if state == nil {
@@ -531,6 +531,33 @@ func (manager *Manager) resetChangedClients() {
 func sameUSBIdentity(left, right modem.Candidate) bool {
 	return strings.EqualFold(strings.TrimSpace(left.VendorID), strings.TrimSpace(right.VendorID)) &&
 		strings.EqualFold(strings.TrimSpace(left.ProductID), strings.TrimSpace(right.ProductID))
+}
+
+// A busy/deferred probe is not a new device observation. Keep only the
+// verified port on the same enumeration; fresh USB metadata must still reach
+// endpointChanged so a reset cannot retain old AT/WDS file descriptors.
+func preserveVerifiedATPort(previous, current modem.Candidate) modem.Candidate {
+	if (!current.ATProbeBusy && !current.ATProbeDeferred) || previous.ATProbeRequired ||
+		!previous.HasATPort() || !sameUSBIdentity(previous, current) || previous.USBGeneration != current.USBGeneration {
+		return current
+	}
+	ports := current.Ports
+	if len(ports) == 0 && current.HasATPort() {
+		ports = []modem.Port{current.ATPort}
+	}
+	for _, port := range ports {
+		if port.OpenPath() != previous.ATPort.OpenPath() && (port.Name == "" || port.Name != previous.ATPort.Name) {
+			continue
+		}
+		port.Role = previous.ATPort.Role
+		current.ATPort = port
+		current.ATProbeRequired = false
+		if current.DiscoveryIssue == "at_port_missing" || current.DiscoveryIssue == "at_probe_pending" {
+			current.DiscoveryIssue = previous.DiscoveryIssue
+		}
+		break
+	}
+	return current
 }
 
 func setATProfileLocked(state *managedDevice, candidate modem.Candidate) {

@@ -60,6 +60,10 @@ func (dialect *ATAPDUDialect) Execute(
 	form := APDUQuoted
 	if dialect.learned[index] {
 		form = dialect.forms[index]
+	} else if preference, ok := profile.(APDUFormPreference); ok {
+		if preferred := preference.PreferredForm(command); preferred == APDUQuoted || preferred == APDUUnquoted {
+			form = preferred
+		}
 	}
 	result, rejected, err := executeAPDUForm(ctx, profile, command, channel, apdu, form, execute)
 	if err != nil {
@@ -111,13 +115,24 @@ func executeAPDUForm(
 		if isUncertainAPDUExecutionError(err) {
 			return nil, nil, sanitizeAPDUExecutionError(err)
 		}
-		if final := commandErrorRejection(err); final != "" {
-			return nil, newAPDUCommandRejectedError(command, final), nil
+		var commandErr *CommandError
+		if errors.As(err, &commandErr) {
+			if final := normalizedATRejection(commandErr.Final); final != "" {
+				rejected := newAPDUCommandRejectedError(command, final)
+				if canRetryAPDUQuoting(final, response.Lines, commandErr.Lines) {
+					return nil, rejected, nil
+				}
+				return nil, nil, rejected
+			}
 		}
 		return nil, nil, sanitizeAPDUExecutionError(err)
 	}
 	if final := normalizedATRejection(response.Final); final != "" {
-		return nil, newAPDUCommandRejectedError(command, final), nil
+		rejected := newAPDUCommandRejectedError(command, final)
+		if canRetryAPDUQuoting(final, response.Lines) {
+			return nil, rejected, nil
+		}
+		return nil, nil, rejected
 	}
 	if !response.OK() {
 		return nil, nil, ErrAPDUExecutionFailed
@@ -141,12 +156,22 @@ func newAPDUCommandRejectedError(command APDUCommand, final string) *APDUCommand
 	return &APDUCommandRejectedError{Command: command, Final: final}
 }
 
-func commandErrorRejection(err error) string {
-	var commandErr *CommandError
-	if !errors.As(err, &commandErr) {
-		return ""
+// A CME failure is not proof that the modem rejected the quoting syntax:
+// phone/SIM failures can occur after a stateful APDU reached the card. Only
+// a plain ERROR without an APDU response permits trying the other form.
+func canRetryAPDUQuoting(final string, lineSets ...[]string) bool {
+	if final != "ERROR" {
+		return false
 	}
-	return normalizedATRejection(commandErr.Final)
+	for _, lines := range lineSets {
+		for _, line := range lines {
+			line = strings.ToUpper(strings.TrimSpace(line))
+			if strings.HasPrefix(line, "+CSIM:") || strings.HasPrefix(line, "+CGLA:") {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func normalizedATRejection(final string) string {
