@@ -12,6 +12,7 @@ import (
 
 	"vocat/internal/modem"
 	"vocat/internal/pcsc"
+	"vocat/internal/remoteproc"
 )
 
 type Options struct {
@@ -34,6 +35,9 @@ type Manager struct {
 	esimMu             sync.Mutex // serializes eSIM card access (list/switch/download)
 	esimRecoveryMu     sync.Mutex
 	esimRecoveries     map[string]*esimRecovery
+	esimLastRecoveries map[string]*esimRecovery
+	esimSwitchLeases   map[string]*esimSwitchLease
+	esimSwitchPending  map[string]struct{}
 	esimCacheMu        sync.RWMutex
 	esimCache          map[string]EsimInfo
 	discoverer         modem.Discoverer
@@ -53,6 +57,7 @@ type Manager struct {
 	smsArrivals             chan struct{}
 
 	qmiRadioOpener                qmiRadioSessionOpener
+	remoteprocObserver            func(string) (remoteproc.Observation, error)
 	qmiDataOpener                 qmiDataSessionOpener
 	nativeQMIRegistrationMu       sync.Mutex
 	nativeQMIRegistrationInFlight map[string]struct{}
@@ -124,24 +129,27 @@ type ussdSession struct {
 }
 
 type managedDevice struct {
-	opMu               sync.Mutex
-	dataMu             sync.Mutex
-	dataSession        qmiDataSession
-	dataSessionHandle  uint32
-	dataSessionControl string
-	dataEventCancel    context.CancelFunc
-	candidate          modem.Candidate
-	backend            string
-	esimTransport      string
-	lastICCID          string
-	client             modem.Client
-	snapshot           *Snapshot
-	lastError          string
-	lastUpdated        time.Time
-	discovered         bool
-	preFlightMode      *int
-	resetClientOnLock  bool
-	simPIN             string
+	profileSwitchMu      sync.RWMutex // excludes ordinary snapshot/auto hot-swap work during a profile transaction
+	opMu                 sync.Mutex
+	dataMu               sync.Mutex
+	dataSession          qmiDataSession
+	dataSessionHandle    uint32
+	dataSessionControl   string
+	dataEventCancel      context.CancelFunc
+	candidate            modem.Candidate
+	backend              string
+	esimTransport        string
+	lastICCID            string
+	client               modem.Client
+	snapshot             *Snapshot
+	lastError            string
+	lastUpdated          time.Time
+	discovered           bool
+	preFlightMode        *int
+	resetClientOnLock    bool
+	remoteprocOwner      string
+	remoteprocGeneration uint64
+	simPIN               string
 }
 
 func NewManager(options Options) (*Manager, error) {
@@ -543,6 +551,32 @@ func (manager *Manager) clientLocked(
 	state *managedDevice,
 	candidate modem.Candidate,
 ) (modem.Client, error) {
+	observe := manager.remoteprocObserver
+	if observe == nil {
+		observe = remoteproc.CheckPort
+	}
+	observation, healthErr := observe(candidate.ATPort.OpenPath())
+	if healthErr != nil {
+		if state.client != nil {
+			_ = state.client.Close()
+			state.client = nil
+		}
+		manager.mu.Lock()
+		if state.snapshot != nil {
+			state.snapshot.Responsive = false
+		}
+		manager.mu.Unlock()
+		return nil, healthErr
+	}
+	if observation.Path != "" && (state.remoteprocOwner != observation.Path || state.remoteprocGeneration != observation.Generation) {
+		if state.client != nil {
+			_ = state.client.Close()
+			state.client = nil
+		}
+		state.preFlightMode = nil
+		state.remoteprocOwner = observation.Path
+		state.remoteprocGeneration = observation.Generation
+	}
 	if state.client != nil {
 		if poisoned, ok := state.client.(modem.PoisonedClient); ok && poisoned.Poisoned() {
 			// The cached session hit a transport-fatal error (a failed
@@ -657,11 +691,25 @@ func (manager *Manager) validateActive(
 }
 
 func (manager *Manager) Refresh(ctx context.Context, id string) (Snapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state, err := manager.lookup(id)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	state.opMu.Lock()
+	// A snapshot can perform its own SIM power-cycle. It must not compete
+	// with a committed eSIM REFRESH/reset, including detached recovery after
+	// the initiating request has already failed. Only the transaction's own
+	// bounded verification/refresh context may cross this maintenance gate.
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer unlockProfileRead()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return Snapshot{}, err
+	}
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
 		return Snapshot{}, err
@@ -801,7 +849,9 @@ func (manager *Manager) ExecuteAT(
 	if err != nil {
 		return modem.Response{}, err
 	}
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return modem.Response{}, err
+	}
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
 		return modem.Response{}, err
@@ -914,7 +964,9 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 	if err != nil {
 		return err
 	}
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return err
+	}
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
 		return err

@@ -268,10 +268,18 @@ func (manager *Manager) SetFlight(
 	id string,
 	enabled bool,
 ) (FlightResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state, err := manager.lookup(id)
 	if err != nil {
 		return FlightResult{}, err
 	}
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return FlightResult{}, err
+	}
+	defer unlockProfileRead()
 	state.opMu.Lock()
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {

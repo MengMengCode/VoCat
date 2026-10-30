@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"vocat/internal/device"
@@ -452,8 +453,17 @@ func (s *Server) switchESIMProfile(ctx context.Context, configuredID, physicalID
 	// Keep the subscription identity used by the periodic SM/ME scanner stable
 	// for the entire profile transition. syncModemSMS takes the same lock and
 	// validates its before/after snapshots before persisting any message.
-	s.smsSyncMu.Lock()
-	defer s.smsSyncMu.Unlock()
+	if err := lockProfileTransition(ctx, &s.smsSyncMu); err != nil {
+		return store.CardPolicy{}, err
+	}
+	endMaintenance := func() {}
+	transferred := false
+	defer func() {
+		if !transferred {
+			endMaintenance()
+			s.smsSyncMu.Unlock()
+		}
+	}()
 	dataRuntime := s.cellularDataRuntime()
 	s.clearPublicIP(configuredID)
 	desiredData := true
@@ -467,19 +477,14 @@ func (s *Server) switchESIMProfile(ctx context.Context, configuredID, physicalID
 			dataRuntime.invalidate(configuredID, desiredData, "failed", "eSIM profile switch did not complete")
 		}
 	}()
-	endMaintenance := func() {}
 	if maintenance, ok := s.vowifi.(VoWiFiMaintenanceController); ok {
 		if err := maintenance.BeginMaintenance(configuredID); err != nil {
 			return store.CardPolicy{}, fmt.Errorf("prepare VoWiFi for profile switch: %w", err)
 		}
-		released := false
+		var released sync.Once
 		endMaintenance = func() {
-			if !released {
-				released = true
-				maintenance.EndMaintenance(configuredID)
-			}
+			released.Do(func() { maintenance.EndMaintenance(configuredID) })
 		}
-		defer endMaintenance()
 	}
 	// A live VoWiFi runtime owns the SIM/QMI session while AKA, IMS and SMS are
 	// active. Tear it down before touching flight mode or the ISD-R logical
@@ -505,8 +510,17 @@ func (s *Server) switchESIMProfile(ctx context.Context, configuredID, physicalID
 	defer cancelFinalize()
 	ctx = finalizeContext
 	if switchErr != nil {
-		endMaintenance()
-		s.restoreProfileSwitchFailureState(ctx, configuredID, physicalID)
+		if waiter, ok := s.devices.(esimRecoveryWaiter); ok {
+			var recoveryErr error
+			transferred, recoveryErr = s.waitProfileRecovery(ctx, waiter, configuredID, physicalID, endMaintenance)
+			if recoveryErr != nil {
+				if !transferred {
+					s.stopUnverifiedProfileRuntime(ctx, configuredID)
+				}
+				return store.CardPolicy{}, errors.Join(switchErr, fmt.Errorf("profile-switch recovery: %w", recoveryErr))
+			}
+		}
+		s.restoreProfileSwitchFailureState(ctx, configuredID, physicalID, endMaintenance)
 		return store.CardPolicy{}, switchErr
 	}
 	if _, err := s.devices.SetFlight(ctx, physicalID, true); err != nil {
@@ -608,10 +622,10 @@ func (s *Server) quiesceVoWiFiForProfileSwitch(ctx context.Context, configuredID
 	}
 }
 
-// restoreProfileSwitchFailureState keeps RF off unless the live subscription
-// explicitly permits cellular operation. VoWiFi=false alone is insufficient;
-// a rejected switch can leave the old identity cached or the new one unreadable.
-func (s *Server) restoreProfileSwitchFailureState(ctx context.Context, configuredID, physicalID string) {
+// A transport error does not prove EnableProfile was rejected. Restore only
+// the live subscription's policy, never the old device's cached Wi-Fi intent.
+// An unreadable or unknown card stays RF-off with VoWiFi stopped.
+func (s *Server) restoreProfileSwitchFailureState(ctx context.Context, configuredID, physicalID string, beforeResume ...func()) {
 	if s.store == nil || s.devices == nil {
 		return
 	}
@@ -622,21 +636,37 @@ func (s *Server) restoreProfileSwitchFailureState(ctx context.Context, configure
 		_, _ = s.devices.SetFlight(ctx, physicalID, true)
 		return
 	}
-	if config.VoWiFiEnabled && s.vowifi != nil {
-		if _, err := s.vowifi.RequestEnabled(configuredID, true); err != nil {
+	policy := store.CardPolicy{AirplaneEnabled: true}
+	if snapshot, refreshErr := s.devices.Refresh(ctx, physicalID); refreshErr == nil && strings.TrimSpace(snapshot.ICCID) != "" {
+		if livePolicy, policyErr := s.store.CardPolicy(ctx, strings.TrimSpace(snapshot.ICCID)); policyErr == nil {
+			policy = livePolicy
+		}
+	}
+	config.VoWiFiEnabled = policy.VoWiFiEnabled
+	config.NetworkEnabled = false
+	config.APN = policy.APN
+	if err := s.store.UpsertDevice(ctx, config); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("profile switch failed; live card policy could not be saved", "device_id", configuredID, "error", err)
+		}
+		return
+	}
+	flightEnabled := policy.AirplaneEnabled || policy.VoWiFiEnabled
+	if _, err := s.devices.SetFlight(ctx, physicalID, flightEnabled); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("profile switch failed; error restoring airplane mode", "device_id", configuredID, "error", err)
+		}
+		return
+	}
+	// Keep background reconciliation suppressed until the live identity's
+	// persisted policy and RF state are ready. Release only to apply that policy.
+	for _, release := range beforeResume {
+		release()
+	}
+	if s.vowifi != nil {
+		if _, err := s.vowifi.RequestEnabled(configuredID, policy.VoWiFiEnabled); err != nil && s.logger != nil {
 			s.logger.Warn("profile switch failed; error restoring VoWiFi runtime", "device_id", configuredID, "error", err)
 		}
-	}
-	flightEnabled := true
-	if !config.VoWiFiEnabled {
-		if snapshot, refreshErr := s.devices.Refresh(ctx, physicalID); refreshErr == nil && snapshot.ICCID != "" {
-			if policy, policyErr := s.store.CardPolicy(ctx, snapshot.ICCID); policyErr == nil {
-				flightEnabled = policy.AirplaneEnabled || policy.VoWiFiEnabled
-			}
-		}
-	}
-	if _, err := s.devices.SetFlight(ctx, physicalID, flightEnabled); err != nil {
-		s.logger.Warn("profile switch failed; error restoring airplane mode", "device_id", configuredID, "error", err)
 	}
 }
 

@@ -200,6 +200,9 @@ func (manager *Manager) SetNetwork(
 	id string,
 	request NetworkRequest,
 ) (NetworkResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state, err := manager.lookup(id)
 	if err != nil {
 		return NetworkResult{}, err
@@ -219,6 +222,11 @@ func (manager *Manager) SetNetwork(
 	if ipVersion == "" {
 		return NetworkResult{}, errors.New("IP version must be IP, IPV6, or IPV4V6")
 	}
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return NetworkResult{}, err
+	}
+	defer unlockProfileRead()
 
 	candidate := manager.candidateFor(state)
 	backend := strings.ToLower(strings.TrimSpace(request.Backend))
@@ -378,6 +386,9 @@ func (manager *Manager) PrepareRegistration(
 	apn string,
 	ipVersion string,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	apn = strings.TrimSpace(apn)
 	if apn == "" {
 		return nil
@@ -393,6 +404,11 @@ func (manager *Manager) PrepareRegistration(
 	if err != nil {
 		return err
 	}
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return err
+	}
+	defer unlockProfileRead()
 	state.opMu.Lock()
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
@@ -551,6 +567,9 @@ func (manager *Manager) SetOperatorSelection(
 	plmn string,
 	accessTechnologyValue *int,
 ) (OperatorSelection, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	result := OperatorSelection{Mode: 0}
 	command := ""
 	if !automatic {
@@ -576,6 +595,11 @@ func (manager *Manager) SetOperatorSelection(
 	if err != nil {
 		return OperatorSelection{}, err
 	}
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return OperatorSelection{}, err
+	}
+	defer unlockProfileRead()
 	state.opMu.Lock()
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {
@@ -684,10 +708,18 @@ func rollbackOperatorSelection(manager *Manager, client modem.Client) {
 // passive refresh: it forces a new registration attempt without changing the
 // user's lock policy.
 func (manager *Manager) ReRegisterOperator(ctx context.Context, id string) (OperatorSelection, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	state, err := manager.lookup(id)
 	if err != nil {
 		return OperatorSelection{}, err
 	}
+	unlockProfileRead, err := manager.lockProfileSwitchRead(ctx, id, state)
+	if err != nil {
+		return OperatorSelection{}, err
+	}
+	defer unlockProfileRead()
 	state.opMu.Lock()
 	defer state.opMu.Unlock()
 	if err := manager.validateActive(id, state); err != nil {

@@ -330,6 +330,8 @@ func TestESIMSwitchProfileFallsBackToAIDOnCommandError(t *testing.T) {
 	}
 
 	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 4")},
+		{command: "AT+CFUN?", response: okResponse("+CFUN: 4")},
 		manageChannelOpen,
 		selectISDR,
 		enableICCIDStoreData,

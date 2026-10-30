@@ -13,6 +13,7 @@ import (
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 
 	"vocat/internal/qmiport"
+	"vocat/internal/qmiproxy"
 )
 
 type qmiRadioSession interface {
@@ -187,7 +188,7 @@ func openQMIRadioSession(ctx context.Context, controlDevice string) (qmiRadioSes
 	opts := qmi.DefaultClientOptions()
 	opts.UseProxy = true
 	opts.Logf = func(qmi.ClientLogLevel, string, ...any) {}
-	client, err := qmi.NewClientWithOptions(openContext, controlDevice, opts)
+	client, err := qmiproxy.OpenClient(openContext, controlDevice, opts)
 	if err != nil {
 		lease.Release()
 		return nil, err

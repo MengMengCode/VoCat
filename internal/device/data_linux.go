@@ -19,6 +19,7 @@ import (
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 
 	"vocat/internal/modem"
+	"vocat/internal/qmiproxy"
 )
 
 const (
@@ -42,9 +43,8 @@ func openQMIDataSession(ctx context.Context, controlDevice string) (qmiDataSessi
 	opts := qmi.DefaultClientOptions()
 	opts.UseProxy = true
 	opts.ProxyFallbackToRaw = false
-	opts.ProxyExecutable = qmiProxyExecutable()
 	opts.Logf = func(qmi.ClientLogLevel, string, ...any) {}
-	client, err := qmi.NewClientWithOptions(openContext, controlDevice, opts)
+	client, err := qmiproxy.OpenClient(openContext, controlDevice, opts)
 	if err != nil {
 		return nil, fmt.Errorf("open QMI WDS transport: %w", err)
 	}
@@ -58,19 +58,6 @@ func openQMIDataSession(ctx context.Context, controlDevice string) (qmiDataSessi
 		wds:                wds,
 		packetStatusEvents: make(chan struct{}, 1),
 	}, nil
-}
-
-func qmiProxyExecutable() string {
-	if path, err := exec.LookPath("qmi-proxy"); err == nil {
-		return path
-	}
-	for _, path := range []string{"/usr/libexec/qmi-proxy", "/usr/lib/qmi-proxy", "/usr/lib/libqmi-glib/qmi-proxy"} {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return path
-		}
-	}
-	// Keep the library's conventional path in the resulting diagnostic.
-	return "/usr/libexec/qmi-proxy"
 }
 
 // enableQMIDataEvents is best-effort. Some modem firmware accepts WDS event

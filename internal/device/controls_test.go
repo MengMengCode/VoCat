@@ -3,7 +3,9 @@ package device
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 
@@ -119,14 +121,80 @@ func newStartedNativeQMITestManager(t *testing.T) (*Manager, *staticOpener, stri
 	return manager, opener, id
 }
 
+// Each QMI open owns a distinct session, while DMS state belongs to the modem.
+// Flight-mode changes also launch an asynchronous NAS capability probe; it
+// must not close or mutate the foreground operation's fake session.
+type flightQMITestModem struct {
+	mu          sync.Mutex
+	mode        qmi.OperatingMode
+	getModes    []qmi.OperatingMode
+	setModes    []qmi.OperatingMode
+	openedPaths []string
+	closeCount  int
+}
+
+type flightQMITestSession struct{ modem *flightQMITestModem }
+
+func (modem *flightQMITestModem) open(_ context.Context, path string) (qmiRadioSession, error) {
+	modem.mu.Lock()
+	modem.openedPaths = append(modem.openedPaths, path)
+	modem.mu.Unlock()
+	return &flightQMITestSession{modem: modem}, nil
+}
+
+func (session *flightQMITestSession) GetOperatingMode(context.Context) (qmi.OperatingMode, error) {
+	modem := session.modem
+	modem.mu.Lock()
+	defer modem.mu.Unlock()
+	if len(modem.getModes) > 0 {
+		mode := modem.getModes[0]
+		modem.getModes = modem.getModes[1:]
+		return mode, nil
+	}
+	return modem.mode, nil
+}
+
+func (session *flightQMITestSession) SetOperatingMode(_ context.Context, mode qmi.OperatingMode) error {
+	modem := session.modem
+	modem.mu.Lock()
+	defer modem.mu.Unlock()
+	modem.mode = mode
+	modem.setModes = append(modem.setModes, mode)
+	return nil
+}
+
+func (session *flightQMITestSession) Close() error {
+	session.modem.mu.Lock()
+	session.modem.closeCount++
+	session.modem.mu.Unlock()
+	return nil
+}
+
+func waitForFlightQMIRegistration(t *testing.T, manager *Manager, id string) {
+	t.Helper()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		manager.nativeQMIRegistrationMu.Lock()
+		_, running := manager.nativeQMIRegistrationInFlight[id]
+		manager.nativeQMIRegistrationMu.Unlock()
+		if !running {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatal("background NAS capability probe did not finish")
+		}
+	}
+}
+
 func TestSetFlightUsesQMIDMSForNativeWWAN(t *testing.T) {
 	manager, atOpener, id := newStartedNativeQMITestManager(t)
-	session := &fakeQMIRadioSession{mode: qmi.ModeOffline}
-	var openedPath string
-	manager.qmiRadioOpener = func(_ context.Context, path string) (qmiRadioSession, error) {
-		openedPath = path
-		return session, nil
-	}
+	modem := &flightQMITestModem{mode: qmi.ModeOffline}
+	manager.qmiRadioOpener = modem.open
 
 	disabled, err := manager.SetFlight(context.Background(), id, false)
 	if err != nil {
@@ -144,14 +212,21 @@ func TestSetFlightUsesQMIDMSForNativeWWAN(t *testing.T) {
 		!enabled.FlightMode || !enabled.RadioOff {
 		t.Fatalf("enable result = %#v", enabled)
 	}
-	if openedPath != "/dev/wwan0qmi0" {
-		t.Fatalf("QMI path = %q", openedPath)
+	waitForFlightQMIRegistration(t, manager, id)
+	modem.mu.Lock()
+	defer modem.mu.Unlock()
+	// Two DMS operations and the background NAS probe each open and close
+	// their own session. The unsupported NAS probe changes no radio mode.
+	if len(modem.openedPaths) != 3 || modem.closeCount != 3 {
+		t.Fatalf("QMI session counts: opened=%d closed=%d, want 3 each", len(modem.openedPaths), modem.closeCount)
 	}
-	if len(session.setModes) != 2 || session.setModes[0] != qmi.ModeOnline || session.setModes[1] != qmi.ModeLowPower {
-		t.Fatalf("QMI modes = %v", session.setModes)
+	for _, path := range modem.openedPaths {
+		if path != "/dev/wwan0qmi0" {
+			t.Fatalf("QMI path = %q", path)
+		}
 	}
-	if session.closeCount != 2 {
-		t.Fatalf("QMI close count = %d", session.closeCount)
+	if len(modem.setModes) != 2 || modem.setModes[0] != qmi.ModeOnline || modem.setModes[1] != qmi.ModeLowPower {
+		t.Fatalf("QMI modes = %v", modem.setModes)
 	}
 	if atOpener.openCount != 0 {
 		t.Fatalf("AT opener used %d times for native QMI flight mode", atOpener.openCount)
@@ -182,13 +257,11 @@ func TestSetFlightDoesNotFallBackToUnsupportedATWhenQMIUnavailable(t *testing.T)
 
 func TestSetFlightWaitsForAsynchronousQMIModeTransition(t *testing.T) {
 	manager, atOpener, id := newStartedNativeQMITestManager(t)
-	session := &fakeQMIRadioSession{
+	modem := &flightQMITestModem{
 		mode:     qmi.ModeShutdown,
 		getModes: []qmi.OperatingMode{qmi.ModeShutdown, qmi.ModeShutdown, qmi.ModeOnline},
 	}
-	manager.qmiRadioOpener = func(context.Context, string) (qmiRadioSession, error) {
-		return session, nil
-	}
+	manager.qmiRadioOpener = modem.open
 
 	result, err := manager.SetFlight(context.Background(), id, false)
 	if err != nil {
@@ -197,8 +270,14 @@ func TestSetFlightWaitsForAsynchronousQMIModeTransition(t *testing.T) {
 	if !result.Changed || result.PreviousMode != 7 || result.CurrentMode != 1 || result.FlightMode {
 		t.Fatalf("result = %#v", result)
 	}
-	if len(session.setModes) != 1 || session.setModes[0] != qmi.ModeOnline {
-		t.Fatalf("QMI modes = %v", session.setModes)
+	waitForFlightQMIRegistration(t, manager, id)
+	modem.mu.Lock()
+	defer modem.mu.Unlock()
+	if len(modem.setModes) != 1 || modem.setModes[0] != qmi.ModeOnline {
+		t.Fatalf("QMI modes = %v", modem.setModes)
+	}
+	if len(modem.openedPaths) != 2 || modem.closeCount != 2 {
+		t.Fatalf("DMS/NAS sessions: opened=%d closed=%d, want 2 each", len(modem.openedPaths), modem.closeCount)
 	}
 	if atOpener.openCount != 0 {
 		t.Fatalf("AT opener used %d times during QMI transition", atOpener.openCount)

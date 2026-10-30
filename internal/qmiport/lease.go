@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"vocat/internal/remoteproc"
 )
 
 type portHandle interface {
@@ -21,14 +23,17 @@ type portOpener func(string) (portHandle, error)
 type entry struct {
 	gate chan struct{}
 
-	keeperMu sync.Mutex
-	keeper   portHandle
+	keeperMu         sync.Mutex
+	keeper           portHandle
+	keeperOwner      string
+	keeperGeneration uint64
 }
 
 type coordinator struct {
 	mu      sync.Mutex
 	entries map[string]*entry
 	opener  portOpener
+	observe func(string) (remoteproc.Observation, error)
 }
 
 // Lease serializes one QMI transaction sequence for a control port. Release
@@ -46,6 +51,7 @@ func newCoordinator(opener portOpener) *coordinator {
 	return &coordinator{
 		entries: make(map[string]*entry),
 		opener:  opener,
+		observe: remoteproc.CheckPort,
 	}
 }
 
@@ -82,14 +88,23 @@ func (coordinator *coordinator) acquire(ctx context.Context, path string) (*Leas
 		return nil, ctx.Err()
 	case <-item.gate:
 	}
-	if err := coordinator.ensureKeeper(path, item); err != nil {
+	if err := ctx.Err(); err != nil {
+		item.gate <- struct{}{}
+		return nil, err
+	}
+	observation, err := coordinator.observe(path)
+	if err != nil {
+		item.gate <- struct{}{}
+		return nil, err
+	}
+	if err := coordinator.ensureKeeper(path, item, observation); err != nil {
 		item.gate <- struct{}{}
 		return nil, fmt.Errorf("keep QMI control port %s open: %w", path, err)
 	}
 	return &Lease{entry: item}, nil
 }
 
-func (coordinator *coordinator) ensureKeeper(path string, item *entry) error {
+func (coordinator *coordinator) ensureKeeper(path string, item *entry, observation remoteproc.Observation) error {
 	item.keeperMu.Lock()
 	defer item.keeperMu.Unlock()
 
@@ -99,17 +114,30 @@ func (coordinator *coordinator) ensureKeeper(path string, item *entry) error {
 	}
 	if item.keeper != nil {
 		keeperInfo, statErr := item.keeper.Stat()
-		if statErr == nil && os.SameFile(currentInfo, keeperInfo) {
+		sameGeneration := observation.Path == "" ||
+			item.keeperOwner == "" ||
+			(item.keeperOwner == observation.Path && item.keeperGeneration == observation.Generation)
+		if statErr == nil && os.SameFile(currentInfo, keeperInfo) && sameGeneration {
+			if observation.Path != "" {
+				item.keeperOwner = observation.Path
+				item.keeperGeneration = observation.Generation
+			}
 			return nil
 		}
-		_ = item.keeper.Close()
-		item.keeper = nil
 	}
 	keeper, err := coordinator.opener(path)
 	if err != nil {
 		return err
 	}
+	// Open the replacement before closing the old descriptor. On downstream
+	// 410 drivers even a brief final-close can remove the live QMI port.
+	previous := item.keeper
 	item.keeper = keeper
+	item.keeperOwner = observation.Path
+	item.keeperGeneration = observation.Generation
+	if previous != nil {
+		_ = previous.Close()
+	}
 	return nil
 }
 
