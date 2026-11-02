@@ -98,12 +98,22 @@ exit 0
 		done:             make(chan struct{}),
 	}
 
+	fail := func(cause error) (atHostDataSession, error) {
+		if cleanupErr := session.Close(context.Background()); cleanupErr != nil {
+			// Keep an owner for a failed cleanup so the manager can retry it
+			// before another data backend takes over this interface.
+			return session, errors.Join(cause, cleanupErr)
+		}
+		return nil, cause
+	}
+
 	// A daemon or modem restart can leave the previous generation on the
 	// interface; the lease must always start from a clean host state.
-	session.cleanupHost(ctx)
+	if err := session.cleanupHost(ctx); err != nil {
+		return fail(fmt.Errorf("prepare AT host interface: %w", err))
+	}
 	if result, linkErr := hostCommandOutput(ctx, ipCommand, "link", "set", "dev", networkInterface, "up"); linkErr != nil {
-		_ = session.Close(ctx)
-		return nil, fmt.Errorf("set %s up: %w: %s", networkInterface, linkErr, strings.TrimSpace(string(result)))
+		return fail(fmt.Errorf("set %s up: %w: %s", networkInterface, linkErr, strings.TrimSpace(string(result))))
 	}
 
 	// The FIFO reader must exist before udhcpc starts writing events.
@@ -112,14 +122,19 @@ exit 0
 
 	process, err := startForegroundUDHCPC(sessionCtx, busybox, scriptPath, dir, networkInterface)
 	if err != nil {
-		_ = session.Close(ctx)
-		return nil, err
+		return fail(err)
 	}
 	session.process = process
 	session.wg.Add(1)
 	go session.watchProcess()
 
 	if err := session.awaitFirstLease(ctx); err != nil {
+		session.mu.Lock()
+		clean := session.cleanupComplete
+		session.mu.Unlock()
+		if !clean {
+			return session, err
+		}
 		return nil, err
 	}
 	return session, nil
@@ -133,14 +148,17 @@ exit 0
 // operation lock. The bound therefore lives here rather than in the
 // caller's context, which may carry no deadline at all.
 func (session *linuxATHostDataSession) awaitFirstLease(ctx context.Context) error {
-	leaseContext, cancelLease := context.WithTimeout(ctx, atHostFirstLeaseTimeout)
+	timeout := session.firstLeaseTimeout
+	if timeout <= 0 {
+		timeout = atHostFirstLeaseTimeout
+	}
+	leaseContext, cancelLease := context.WithTimeout(ctx, timeout)
 	defer cancelLease()
 	if err := session.waitFirstLease(leaseContext); err != nil {
 		// Close on every failure path, not only the cancellation branch: a
 		// lost lease or an exited DHCP process must not leave the process
 		// and its temp directory behind.
-		_ = session.Close(context.Background())
-		return err
+		return errors.Join(err, session.Close(context.Background()))
 	}
 	return nil
 }
@@ -215,15 +233,16 @@ type atDHCPLease struct {
 }
 
 type linuxATHostDataSession struct {
-	networkInterface string
-	ipCommand        string
-	runner           func(context.Context, string, ...string) ([]byte, error)
-	process          atHostProcess
-	dir              string
-	scriptPath       string
-	eventPath        string
-	background       context.Context
-	cancel           context.CancelFunc
+	networkInterface  string
+	ipCommand         string
+	runner            func(context.Context, string, ...string) ([]byte, error)
+	process           atHostProcess
+	dir               string
+	scriptPath        string
+	eventPath         string
+	background        context.Context
+	cancel            context.CancelFunc
+	firstLeaseTimeout time.Duration
 
 	// eventMu serializes lease-event application against the process-exit
 	// cleanup. Without it, a delayed bound event could finish after
@@ -231,15 +250,21 @@ type linuxATHostDataSession struct {
 	// whose DHCP process has already exited.
 	eventMu       sync.Mutex
 	eventsStopped bool
+	// ownedAddresses includes an address as soon as configuration is attempted,
+	// including failures after addr replace. Only these addresses are removed.
+	ownedAddresses map[string]struct{}
 
-	mu         sync.Mutex
-	lease      *atDHCPLease
-	lastErr    error
-	closed     bool
-	firstLease chan struct{}
-	firstOnce  sync.Once
-	done       chan struct{}
-	wg         sync.WaitGroup
+	mu              sync.Mutex
+	lease           *atDHCPLease
+	lastErr         error
+	closed          bool
+	closing         bool
+	cleanupComplete bool
+	closeAttempt    *atHostCloseAttempt
+	firstLease      chan struct{}
+	firstOnce       sync.Once
+	done            chan struct{}
+	wg              sync.WaitGroup
 }
 
 // Status reports whether the protected host lease is currently established.
@@ -261,54 +286,105 @@ func (session *linuxATHostDataSession) Status(context.Context) (bool, string, er
 	), nil
 }
 
-// Close stops the DHCP process, waits for it to exit, and removes every host
-// path this session created (protected routes, addresses, DNS file).
-func (session *linuxATHostDataSession) Close(ctx context.Context) error {
+type atHostCloseAttempt struct {
+	done chan struct{}
+	err  error
+}
+
+// Close stops DHCP and removes owned host resources with a bounded independent
+// context. Concurrent callers share one attempt; cleanup failures can be retried.
+func (session *linuxATHostDataSession) Close(context.Context) error {
 	session.mu.Lock()
-	if session.closed {
+	if session.cleanupComplete {
 		session.mu.Unlock()
 		return nil
 	}
-	session.closed = true
+	if session.closing {
+		attempt := session.closeAttempt
+		session.mu.Unlock()
+		<-attempt.done
+		return attempt.err
+	}
+	stopProcess := !session.closed
+	session.closed, session.closing = true, true
+	attempt := &atHostCloseAttempt{done: make(chan struct{})}
+	session.closeAttempt = attempt
 	session.mu.Unlock()
 
-	// Stop accepting lease events before tearing anything down, so an event
-	// that is already buffered cannot reinstall the routes Close removes.
-	session.stopLeaseEvents()
+	// Cancel in-flight host commands before waiting for eventMu. Cleanup uses
+	// its own bounded context even when the caller's deadline has expired.
 	if session.cancel != nil {
 		session.cancel()
 	}
-	if session.process != nil {
+	session.stopLeaseEvents()
+	var closeErr error
+	if stopProcess && session.process != nil {
 		stopCtx, cancelStop := context.WithTimeout(context.Background(), atHostStopTimeout)
-		_ = session.process.Stop(stopCtx)
+		closeErr = session.process.Stop(stopCtx)
 		cancelStop()
 	}
-	// The reader opens the FIFO read-write and non-blocking, so it is never
-	// parked in open(2); the cancelled context ends its poll loop.
 	session.wg.Wait()
-
-	cleanupContext := ctx
-	var cancelCleanup context.CancelFunc
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		cleanupContext, cancelCleanup = context.WithTimeout(context.Background(), atHostStopTimeout)
-		defer cancelCleanup()
-	}
-	session.cleanupHost(cleanupContext)
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), atHostStopTimeout)
+	session.eventMu.Lock()
+	closeErr = errors.Join(closeErr, session.cleanupHost(cleanupContext))
+	session.eventMu.Unlock()
+	cancelCleanup()
 	if session.dir != "" {
-		_ = os.RemoveAll(session.dir)
+		closeErr = errors.Join(closeErr, os.RemoveAll(session.dir))
 	}
-	return nil
+
+	session.mu.Lock()
+	session.closing = false
+	session.cleanupComplete = closeErr == nil
+	attempt.err = closeErr
+	close(attempt.done)
+	session.mu.Unlock()
+	return closeErr
 }
 
-// cleanupHost removes the protected routing generation and the interface
-// address. It never touches the main routing table.
-func (session *linuxATHostDataSession) cleanupHost(ctx context.Context) {
-	clearExportProxyRoute(ctx, session.networkInterface)
-	if session.runner == nil || session.ipCommand == "" {
-		return
+// cleanupHost only removes addresses installed by this session. The interface
+// can contain addresses supplied by its host administrator or another service.
+// The caller holds eventMu once event processing has started.
+func (session *linuxATHostDataSession) cleanupHost(ctx context.Context) error {
+	cleanupErr := session.clearLeaseHost(ctx)
+	if session.runner != nil && session.ipCommand != "" {
+		result, err := session.runner(ctx, session.ipCommand, "link", "set", "dev", session.networkInterface, "down")
+		if err != nil && !missingATHostInterface(ctx, result, err) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("disable AT host interface: %w: %s", err, strings.TrimSpace(string(result))))
+		}
 	}
-	_, _ = session.runner(ctx, session.ipCommand, "-4", "addr", "flush", "dev", session.networkInterface, "scope", "global")
-	_, _ = session.runner(ctx, session.ipCommand, "link", "set", "dev", session.networkInterface, "down")
+	return cleanupErr
+}
+
+func (session *linuxATHostDataSession) clearLeaseHost(ctx context.Context) error {
+	cleanupErr := clearExportProxyRouteWithError(ctx, session.networkInterface)
+	for address := range session.ownedAddresses {
+		cleanupErr = errors.Join(cleanupErr, session.removeOwnedAddress(ctx, address))
+	}
+	return cleanupErr
+}
+
+func missingATHostInterface(ctx context.Context, output []byte, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(output)), "cannot find device")
+}
+
+func (session *linuxATHostDataSession) removeOwnedAddress(ctx context.Context, address string) error {
+	if session.runner == nil || session.ipCommand == "" {
+		return nil
+	}
+	result, err := session.runner(ctx, session.ipCommand, "-4", "addr", "del", address, "dev", session.networkInterface)
+	if err != nil {
+		message := strings.ToLower(string(result))
+		alreadyAbsent := strings.Contains(message, "cannot assign requested address") || missingATHostInterface(ctx, result, err)
+		if ctx.Err() != nil || !alreadyAbsent {
+			return fmt.Errorf("remove AT host address: %w: %s", err, strings.TrimSpace(string(result)))
+		}
+	}
+	delete(session.ownedAddresses, address)
+	return nil
 }
 
 // readEvents drains the DHCP hook records from the event FIFO.
@@ -324,7 +400,7 @@ func (session *linuxATHostDataSession) readEvents() {
 	if background == nil {
 		background = context.Background()
 	}
-	fd, err := syscall.Open(session.eventPath, syscall.O_RDWR|syscall.O_NONBLOCK, 0)
+	fd, err := syscall.Open(session.eventPath, syscall.O_RDWR|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return
 	}
@@ -359,6 +435,9 @@ func (session *linuxATHostDataSession) readEvents() {
 					values[strings.TrimSpace(key)] = strings.TrimSpace(value)
 				}
 			}
+			continue
+		}
+		if readErr == syscall.EINTR {
 			continue
 		}
 		if readErr != nil && readErr != syscall.EAGAIN && readErr != syscall.EWOULDBLOCK {
@@ -472,11 +551,29 @@ func (session *linuxATHostDataSession) applyEvent(values map[string]string) {
 			gateway = routers[0]
 		}
 		dns := strings.Fields(values["dns"])
+		ownedAddress := fmt.Sprintf("%s/%d", address.String(), ones)
+		if session.ownedAddresses == nil {
+			session.ownedAddresses = make(map[string]struct{})
+		}
 		configureContext, cancel := context.WithTimeout(base, atHostConfigureTimeout)
-		detail, err := configureExportProxyIPv4(
-			configureContext, session.ipCommand, session.networkInterface,
-			address.String(), ones, gateway, dns,
-		)
+		var err error
+		// Delete the old address before adding its replacement: on Linux,
+		// removing an IPv4 primary can also delete same-subnet secondaries.
+		// Installing the replacement first could therefore delete the new lease.
+		for previous := range session.ownedAddresses {
+			if previous != ownedAddress {
+				err = errors.Join(err, session.removeOwnedAddress(configureContext, previous))
+			}
+		}
+		if err == nil {
+			// The helper can fail after addr replace. Track the attempted address
+			// so deconfig/Close can still undo a partially applied configuration.
+			session.ownedAddresses[ownedAddress] = struct{}{}
+			_, err = configureExportProxyIPv4(
+				configureContext, session.ipCommand, session.networkInterface,
+				address.String(), ones, gateway, dns,
+			)
+		}
 		cancel()
 		if err != nil {
 			// The failed configure already tore down the protected routes
@@ -499,16 +596,15 @@ func (session *linuxATHostDataSession) applyEvent(values map[string]string) {
 		session.lastErr = nil
 		session.mu.Unlock()
 		session.firstOnce.Do(func() { close(session.firstLease) })
-		_ = detail
 	case "deconfig":
-		cleanupContext, cancel := context.WithTimeout(base, atHostConfigureTimeout)
-		clearExportProxyRoute(cleanupContext, session.networkInterface)
-		if session.runner != nil && session.ipCommand != "" {
-			_, _ = session.runner(cleanupContext, session.ipCommand, "-4", "addr", "flush", "dev", session.networkInterface, "scope", "global")
-		}
+		// This also runs after Close has canceled background. A deconfiguration
+		// must still attempt bounded host cleanup and report any failure.
+		cleanupContext, cancel := context.WithTimeout(context.Background(), atHostConfigureTimeout)
+		err := session.clearLeaseHost(cleanupContext)
 		cancel()
 		session.mu.Lock()
 		session.lease = nil
+		session.lastErr = err
 		session.mu.Unlock()
 	}
 }
@@ -534,7 +630,9 @@ func (session *linuxATHostDataSession) waitFirstLease(ctx context.Context) error
 	case <-session.done:
 		return errors.New("AT host data DHCP process exited before providing a lease")
 	case <-ctx.Done():
-		_ = session.Close(context.Background())
-		return fmt.Errorf("wait for AT host data lease on %s: %w", session.networkInterface, ctx.Err())
+		session.mu.Lock()
+		leaseErr := session.lastErr
+		session.mu.Unlock()
+		return fmt.Errorf("wait for AT host data lease on %s: %w", session.networkInterface, errors.Join(ctx.Err(), leaseErr))
 	}
 }

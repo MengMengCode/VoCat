@@ -137,7 +137,7 @@ type managedDevice struct {
 	dataSessionHandle    uint32
 	dataSessionControl   string
 	atHostSession        atHostDataSession
-	dataBackend          string
+	dataBackend          string // selected backend, retained while its session is disconnected
 	dataEventCancel      context.CancelFunc
 	candidate            modem.Candidate
 	atProfile            modem.ATProfile
@@ -256,7 +256,9 @@ func (manager *Manager) Stop(ctx context.Context) error {
 		}
 		state.opMu.Unlock()
 		state.dataMu.Lock()
-		invalidateNetworkSessions(state, manager.candidateFor(state))
+		if err := invalidateNetworkSessions(state, manager.candidateFor(state)); err != nil {
+			closeErrors = append(closeErrors, err)
+		}
 		state.dataMu.Unlock()
 	}
 	return errors.Join(closeErrors...)
@@ -1147,8 +1149,12 @@ func (manager *Manager) Reboot(ctx context.Context, id string) error {
 		return err
 	}
 	state.dataMu.Lock()
-	invalidateNetworkSessions(state, manager.candidateFor(state))
+	cleanupErr := invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
+	if cleanupErr != nil {
+		manager.setResult(id, state, nil, cleanupErr)
+		return cleanupErr
+	}
 	commandCtx, cancel := manager.withTimeout(ctx, manager.longTimeout)
 	defer cancel()
 	_, err = client.Execute(commandCtx, "AT+CFUN=1,1")
@@ -1197,8 +1203,12 @@ func (manager *Manager) softResetForProfileSwitch(ctx context.Context, id string
 // softResetSIMLocked 要求持有 opMu，使模式验证与 SIM 重置不能被其他模组操作插入。
 func (manager *Manager) softResetSIMLocked(ctx context.Context, id string, state *managedDevice, client modem.Client) error {
 	state.dataMu.Lock()
-	invalidateNetworkSessions(state, manager.candidateFor(state))
+	cleanupErr := invalidateNetworkSessions(state, manager.candidateFor(state))
 	state.dataMu.Unlock()
+	if cleanupErr != nil {
+		manager.setResult(id, state, nil, cleanupErr)
+		return cleanupErr
+	}
 	commandCtx, cancel := context.WithTimeout(ctx, manager.commandTimeout)
 	defer cancel()
 

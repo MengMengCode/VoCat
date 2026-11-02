@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"vocat/internal/modem"
@@ -48,6 +49,16 @@ func (runner *fakeHostRunner) run(_ context.Context, name string, args ...string
 		return nil, errors.New("fake host command failed")
 	}
 	joined := strings.Join(append([]string{name}, args...), " ")
+	if len(args) >= 2 && args[0] == "rule" && args[1] == "add" {
+		fields := make(map[string]string)
+		for i := 2; i+1 < len(args); i += 2 {
+			fields[args[i]] = args[i+1]
+		}
+		if runner.outputs == nil {
+			runner.outputs = make(map[string]string)
+		}
+		runner.outputs[name+" -N rule show"] += fmt.Sprintf("%s: from all fwmark %s lookup %s\n", fields["priority"], fields["fwmark"], fields["lookup"])
+	}
 	for prefix, output := range runner.outputs {
 		if strings.HasPrefix(joined, prefix) {
 			return []byte(output), nil
@@ -184,6 +195,12 @@ func TestATHostDataSessionRenewsLeaseAndUpdatesProtectedRoute(t *testing.T) {
 	if !strings.Contains(renewJoined, "/sbin/ip -4 route replace table "+strconv.Itoa(table)+" default via 192.0.2.1 dev enx-test onlink") {
 		t.Fatalf("renew did not refresh the protected default route:\n%s", renewJoined)
 	}
+	if !strings.Contains(renewJoined, "/sbin/ip -4 addr del 192.0.2.10/24 dev enx-test") {
+		t.Fatalf("renew retained the previous owned address:\n%s", renewJoined)
+	}
+	if strings.Contains(renewJoined, "addr flush") {
+		t.Fatal("renew flushed unrelated addresses")
+	}
 	assertNoMainTableRoutes(t, renewLines)
 }
 
@@ -194,7 +211,7 @@ func TestATHostDataSessionRenewsLeaseAndUpdatesProtectedRoute(t *testing.T) {
 func TestATHostDataSessionRenewKeepsPolicyRuleInPlace(t *testing.T) {
 	session, runner, _ := newTestATHostSession(t, "enx-test")
 	mark, table, priority := exportProxyRouteIdentity("enx-test")
-	runner.setOutput("/sbin/ip rule show", fmt.Sprintf(
+	runner.setOutput("/sbin/ip -N rule show", fmt.Sprintf(
 		"0:\tfrom all lookup local\n%d:\tfrom all fwmark 0x%x lookup %d\n",
 		priority, mark, table,
 	))
@@ -222,7 +239,7 @@ func TestATHostDataSessionRenewKeepsPolicyRuleInPlace(t *testing.T) {
 func TestATHostDataSessionRenewDropsStaleConnectedRoute(t *testing.T) {
 	session, runner, _ := newTestATHostSession(t, "enx-test")
 	mark, table, priority := exportProxyRouteIdentity("enx-test")
-	runner.setOutput("/sbin/ip rule show", fmt.Sprintf(
+	runner.setOutput("/sbin/ip -N rule show", fmt.Sprintf(
 		"0:\tfrom all lookup local\n%d:\tfrom all fwmark 0x%x lookup %d\n",
 		priority, mark, table,
 	))
@@ -245,26 +262,19 @@ func TestATHostDataSessionRenewDropsStaleConnectedRoute(t *testing.T) {
 	}
 }
 
-// A rule that owns the priority but carries a stale mark or table has to be
-// replaced, because ip rule add refuses a duplicate priority.
-func TestATHostDataSessionRenewReplacesStalePolicyRule(t *testing.T) {
+// Policy priorities are not exclusive ownership: another rule at the same
+// priority must be preserved while VoCat installs its complete selector.
+func TestATHostDataSessionRenewPreservesForeignPolicyRule(t *testing.T) {
 	session, runner, _ := newTestATHostSession(t, "enx-test")
 	mark, table, priority := exportProxyRouteIdentity("enx-test")
-	runner.setOutput("/sbin/ip rule show", fmt.Sprintf(
-		"0:\tfrom all lookup local\n%d:\tfrom all fwmark 0x1 lookup %d\n",
-		priority, table+1,
-	))
-
-	session.handleEventLines(strings.NewReader(
-		"event=bound\nip=192.0.2.10\nsubnet=255.255.255.0\nrouter=192.0.2.1\ndns=192.0.2.53\n\n",
-	))
-
+	runner.setOutput("/sbin/ip -N rule show", fmt.Sprintf("%d: from all fwmark 0x1 lookup %d\n", priority, table+1))
+	session.handleEventLines(strings.NewReader("event=bound\nip=192.0.2.10\nsubnet=255.255.255.0\nrouter=192.0.2.1\ndns=192.0.2.53\n\n"))
 	joined := strings.Join(runner.commandLines(), "\n")
-	if !strings.Contains(joined, "/sbin/ip rule del priority "+strconv.Itoa(priority)) {
-		t.Fatalf("the stale rule was not removed:\n%s", joined)
+	if strings.Contains(joined, "/sbin/ip rule del priority "+strconv.Itoa(priority)) {
+		t.Fatalf("the foreign policy rule was removed:\n%s", joined)
 	}
 	if !strings.Contains(joined, "/sbin/ip rule add priority "+strconv.Itoa(priority)+" fwmark 0x"+fmt.Sprintf("%x", mark)+" lookup "+strconv.Itoa(table)) {
-		t.Fatalf("the expected rule was not installed:\n%s", joined)
+		t.Fatalf("the owned rule was not installed:\n%s", joined)
 	}
 }
 
@@ -286,7 +296,7 @@ func TestATHostDataSessionCloseRemovesOnlyVocatRoutes(t *testing.T) {
 	for _, want := range []string{
 		"/sbin/ip rule del priority " + strconv.Itoa(priority),
 		"/sbin/ip -4 route flush table " + strconv.Itoa(table),
-		"/sbin/ip -4 addr flush dev enx-test scope global",
+		"/sbin/ip -4 addr del 192.0.2.10/24 dev enx-test",
 		"/sbin/ip link set dev enx-test down",
 	} {
 		if !strings.Contains(joined, want) {
@@ -403,19 +413,18 @@ func TestATHostDataSessionFailedRenewDropsStaleLease(t *testing.T) {
 // must be bounded even when the caller's context has no deadline. The bound
 // lives in awaitFirstLease, not in the caller.
 func TestATHostDataSessionFirstLeaseWaitIsBounded(t *testing.T) {
-	session, _, _ := newTestATHostSession(t, "enx-test")
-	// A caller context without a deadline would block forever on its own;
-	// the lease timeout inside awaitFirstLease is what bounds the wait, so
-	// the wait must end with a deadline rather than running forever.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
-	err := session.awaitFirstLease(ctx)
-	if err == nil {
-		t.Fatal("awaitFirstLease returned no error for a missing lease")
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("awaitFirstLease error = %v, want a deadline", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		session, _, _ := newTestATHostSession(t, "enx-test")
+		session.firstLeaseTimeout = 20 * time.Millisecond
+		started := time.Now()
+		err := session.awaitFirstLease(context.Background())
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("awaitFirstLease error = %v, want internal deadline", err)
+		}
+		if elapsed := time.Since(started); elapsed != session.firstLeaseTimeout {
+			t.Fatalf("first lease wait = %s, want %s", elapsed, session.firstLeaseTimeout)
+		}
+	})
 }
 
 // Every failure path of the first-lease wait must close the session: a lost

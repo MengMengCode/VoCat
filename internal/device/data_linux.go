@@ -841,16 +841,19 @@ func configureExportProxyIPv4(ctx context.Context, ipCommand, networkInterface, 
 	if gatewayText != "" && gateway == nil {
 		return "", errors.New("an invalid IPv4 gateway was provided")
 	}
-	if result, addrErr := hostCommandOutput(ctx, ipCommand, "-4", "addr", "replace", fmt.Sprintf("%s/%d", address.String(), prefix), "dev", networkInterface); addrErr != nil {
+	mark, table, priority := exportProxyRouteIdentity(networkInterface)
+	previousCIDRs, err := exportProxyTableCIDRs(ctx, ipCommand, table, networkInterface)
+	if err != nil {
+		return "", err
+	}
+	if result, addrErr := hostCommandOutput(ctx, ipCommand, "-4", "addr", "replace", fmt.Sprintf("%s/%d", address.String(), prefix), "dev", networkInterface, "noprefixroute"); addrErr != nil {
 		return "", fmt.Errorf("configure cellular address: %w: %s", addrErr, strings.TrimSpace(string(result)))
 	}
-	mark, table, priority := exportProxyRouteIdentity(networkInterface)
 	connectedCIDR := fmt.Sprintf("%s/%d", network.String(), prefix)
 	// The protected table is refreshed before the policy rule is touched, so
 	// the rule keeps matching a populated table for the whole renewal. The
 	// previous generation is read first: a lease that changed its prefix
 	// leaves its connected route behind otherwise.
-	previousCIDRs := exportProxyTableCIDRs(ctx, ipCommand, table)
 	if result, routeErr := hostCommandOutput(ctx, ipCommand, "-4", "route", "replace", "table", strconv.Itoa(table), connectedCIDR, "dev", networkInterface, "scope", "link", "src", address.String()); routeErr != nil {
 		clearExportProxyRoute(ctx, networkInterface)
 		return "", fmt.Errorf("install protected connected route: %w: %s", routeErr, strings.TrimSpace(string(result)))
@@ -884,10 +887,13 @@ func configureExportProxyIPv4(ctx context.Context, ipCommand, networkInterface, 
 // exportProxyTableCIDRs lists the connected networks in the protected
 // routing table. It is used to drop the previous generation's connected
 // route when a renewal changed the prefix.
-func exportProxyTableCIDRs(ctx context.Context, ipCommand string, table int) []string {
+func exportProxyTableCIDRs(ctx context.Context, ipCommand string, table int, networkInterface string) ([]string, error) {
 	output, err := hostCommandOutput(ctx, ipCommand, "-4", "route", "show", "table", strconv.Itoa(table))
 	if err != nil {
-		return nil
+		if missingHostRouteTable(ctx, output, err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("inspect protected routing table: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	var cidrs []string
 	for _, line := range strings.Split(string(output), "\n") {
@@ -895,16 +901,22 @@ func exportProxyTableCIDRs(ctx context.Context, ipCommand string, table int) []s
 		if len(fields) == 0 {
 			continue
 		}
+		device := ""
+		for index := 0; index+1 < len(fields); index++ {
+			if fields[index] == "dev" {
+				device = fields[index+1]
+				break
+			}
+		}
+		if device != networkInterface {
+			return nil, errors.New("protected routing table contains routes not owned by the cellular interface")
+		}
 		candidate := fields[0]
-		if !strings.Contains(candidate, "/") {
-			continue
+		if _, _, parseErr := net.ParseCIDR(candidate); parseErr == nil {
+			cidrs = append(cidrs, candidate)
 		}
-		if _, _, parseErr := net.ParseCIDR(candidate); parseErr != nil {
-			continue
-		}
-		cidrs = append(cidrs, candidate)
 	}
-	return cidrs
+	return cidrs, nil
 }
 
 // exportProxyDNSDir is the directory holding per-interface protected DNS
@@ -958,78 +970,214 @@ func writeExportProxyDNS(networkInterface string, servers []string) error {
 }
 
 func clearExportProxyRoute(ctx context.Context, networkInterface string) {
-	_ = os.Remove(exportProxyDNSPath(networkInterface))
-	ipCommand, err := lookPathIP("ip")
-	if err != nil {
-		return
-	}
-	mark, table, priority := exportProxyRouteIdentity(networkInterface)
-	_, _ = hostCommandOutput(ctx, ipCommand, "rule", "del", "priority", strconv.Itoa(priority), "fwmark", fmt.Sprintf("0x%x", mark), "lookup", strconv.Itoa(table))
-	_, _ = hostCommandOutput(ctx, ipCommand, "-4", "route", "flush", "table", strconv.Itoa(table))
+	_ = clearExportProxyRouteWithError(ctx, networkInterface)
 }
 
-// ensureExportProxyRule installs the fwmark policy rule unless an identical
-// rule is already in place. The mark, table and priority are derived from
-// the interface name and stay stable, so a renewal must not delete and
-// re-add the rule: the gap in between would drop the marked traffic out of
-// the protected table.
-func ensureExportProxyRule(ctx context.Context, ipCommand string, priority int, mark uint32, table int) error {
-	markText := fmt.Sprintf("0x%x", mark)
-	rules, err := hostCommandOutput(ctx, ipCommand, "rule", "show")
-	if err == nil {
-		listed := string(rules)
-		if exportProxyRuleMatches(listed, priority, markText, table) {
-			return nil
-		}
-		if exportProxyRulePriorityUsed(listed, priority) {
-			// A rule with the same priority carries a stale mark or table.
-			// The protected table is already populated at this point, so
-			// replacing the rule keeps the marked traffic inside it.
-			_, _ = hostCommandOutput(ctx, ipCommand, "rule", "del", "priority", strconv.Itoa(priority))
+// clearExportProxyRouteWithError only removes the rule and interface routes
+// owned by this cellular path. Other rules may legitimately share its priority.
+// Callers that must finish teardown before transferring ownership use the error.
+func clearExportProxyRouteWithError(ctx context.Context, networkInterface string) error {
+	var cleanupErrors []error
+	if err := os.Remove(exportProxyDNSPath(networkInterface)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("remove protected DNS configuration: %w", err))
+	}
+	ipCommand, err := lookPathIP("ip")
+	if err != nil {
+		return errors.Join(append(cleanupErrors, fmt.Errorf("find iproute2 for protected route cleanup: %w", err))...)
+	}
+	mark, table, priority := exportProxyRouteIdentity(networkInterface)
+	rules, err := listExportProxyRules(ctx, ipCommand)
+	if err != nil {
+		cleanupErrors = append(cleanupErrors, err)
+	} else {
+		owned, conflict := matchingExportProxyRules(rules, priority, mark, table)
+		if conflict {
+			cleanupErrors = append(cleanupErrors, errors.New("protected routing rule conflicts with an existing rule; refusing to remove it"))
+		} else {
+			for _, rule := range owned {
+				args := []string{"rule", "del", "priority", strconv.Itoa(priority), "from", "all", "fwmark", fmt.Sprintf("0x%x/0xffffffff", mark), "lookup", strconv.Itoa(table)}
+				if rule.protocol != "" {
+					args = append(args, "protocol", rule.protocol)
+				}
+				output, deleteErr := hostCommandOutput(ctx, ipCommand, args...)
+				if deleteErr != nil && !missingHostRule(ctx, output, deleteErr) {
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("remove protected routing rule: %w: %s", deleteErr, strings.TrimSpace(string(output))))
+				}
+			}
 		}
 	}
-	result, err := hostCommandOutput(ctx, ipCommand, "rule", "add", "priority", strconv.Itoa(priority), "fwmark", markText, "lookup", strconv.Itoa(table))
+	// A shared table number must never let one interface flush another's routes.
+	output, flushErr := hostCommandOutput(ctx, ipCommand, "-4", "route", "flush", "table", strconv.Itoa(table), "dev", networkInterface)
+	if flushErr != nil && !missingHostRouteTable(ctx, output, flushErr) {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("flush protected interface routes: %w: %s", flushErr, strings.TrimSpace(string(output))))
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func missingHostRule(ctx context.Context, output []byte, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	text := strings.ToLower(string(output))
+	return strings.Contains(text, "no such file or directory") || strings.Contains(text, "no such process")
+}
+
+func missingHostRouteTable(ctx context.Context, output []byte, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	text := strings.ToLower(string(output))
+	return strings.Contains(text, "fib table does not exist") || strings.Contains(text, "cannot find device")
+}
+
+// Numeric output avoids table aliases in /etc/iproute2/rt_tables changing rule
+// identity. A failed inspection is an error, rather than permission to replace a
+// rule whose ownership is unknown.
+func listExportProxyRules(ctx context.Context, ipCommand string) (string, error) {
+	output, err := hostCommandOutput(ctx, ipCommand, "-N", "rule", "show")
+	if err != nil {
+		return "", fmt.Errorf("inspect protected routing rules: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return string(output), nil
+}
+
+// ensureExportProxyRule keeps an identical rule during renewal and installs a
+// missing rule without deleting unrelated rules at the same priority. Linux
+// permits those rules to coexist; priority is not an ownership identifier.
+func ensureExportProxyRule(ctx context.Context, ipCommand string, priority int, mark uint32, table int) error {
+	rules, err := listExportProxyRules(ctx, ipCommand)
+	if err != nil {
+		return err
+	}
+	owned, conflict := matchingExportProxyRules(rules, priority, mark, table)
+	if conflict {
+		return errors.New("protected routing rule conflicts with an existing selector")
+	}
+	if len(owned) != 0 {
+		return nil
+	}
+	result, err := hostCommandOutput(ctx, ipCommand, "rule", "add", "priority", strconv.Itoa(priority), "fwmark", fmt.Sprintf("0x%x", mark), "lookup", strconv.Itoa(table))
 	if err != nil {
 		return fmt.Errorf("install protected routing rule: %w: %s", err, strings.TrimSpace(string(result)))
 	}
 	return nil
 }
 
-// exportProxyRuleMatches reports whether the listed ip rules already carry
-// the expected fwmark rule for the given priority.
-func exportProxyRuleMatches(listed string, priority int, markText string, table int) bool {
-	for _, line := range strings.Split(listed, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || !strings.HasSuffix(fields[0], ":") {
-			continue
-		}
-		rulePriority, err := strconv.Atoi(strings.TrimSuffix(fields[0], ":"))
-		if err != nil || rulePriority != priority {
-			continue
-		}
-		joined := strings.Join(fields, " ")
-		if strings.Contains(joined, "fwmark "+markText) &&
-			strings.Contains(joined, "lookup "+strconv.Itoa(table)) {
-			return true
-		}
-	}
-	return false
+type exportProxyRule struct {
+	priority          uint32
+	mark, mask, table uint32
+	hasMark, hasTable bool
+	exact             bool
+	protocol          string
 }
 
-// exportProxyRulePriorityUsed reports whether any rule already owns the
-// priority, which would make ip rule add fail.
-func exportProxyRulePriorityUsed(listed string, priority int) bool {
+func matchingExportProxyRules(listed string, priority int, mark uint32, table int) ([]exportProxyRule, bool) {
+	var owned []exportProxyRule
+	conflict := false
 	for _, line := range strings.Split(listed, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || !strings.HasSuffix(fields[0], ":") {
+		rule, valid := parseExportProxyRule(line)
+		if !valid || rule.priority != uint32(priority) || !rule.hasMark || !rule.hasTable ||
+			rule.mark != mark || rule.table != uint32(table) {
 			continue
 		}
-		rulePriority, err := strconv.Atoi(strings.TrimSuffix(fields[0], ":"))
-		if err == nil && rulePriority == priority {
-			return true
+		if rule.exact && rule.mask == ^uint32(0) {
+			owned = append(owned, rule)
+		} else if rule.mask == ^uint32(0) {
+			// Kernel rule deletion treats omitted selectors as wildcards. Do
+			// not risk selecting a foreign rule with the same base identity.
+			conflict = true
 		}
 	}
-	return false
+	return owned, conflict
+}
+
+// parseExportProxyRule accepts only the complete selector installed above.
+// Substring matches are unsafe: lookup 245670 is not table 24567, and a `not`,
+// source prefix, interface or suppressor changes which packets match the rule.
+func parseExportProxyRule(line string) (exportProxyRule, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 || !strings.HasSuffix(fields[0], ":") {
+		return exportProxyRule{}, false
+	}
+	priority, err := strconv.ParseUint(strings.TrimSuffix(fields[0], ":"), 10, 32)
+	if err != nil {
+		return exportProxyRule{}, false
+	}
+	rule := exportProxyRule{priority: uint32(priority), mask: ^uint32(0), exact: true}
+	hasFrom := false
+	for index := 1; index < len(fields); index++ {
+		if index+1 == len(fields) {
+			rule.exact = false
+			break
+		}
+		value := fields[index+1]
+		switch fields[index] {
+		case "from":
+			if hasFrom || value != "all" && value != "0.0.0.0/0" {
+				rule.exact = false
+			}
+			hasFrom = true
+			index++
+		case "to":
+			if value != "all" && value != "0.0.0.0/0" {
+				rule.exact = false
+			}
+			index++
+		case "fwmark":
+			parts := strings.Split(value, "/")
+			mark, markErr := parseRuleNumber(parts[0])
+			if rule.hasMark || markErr != nil || len(parts) > 2 {
+				rule.exact = false
+			}
+			rule.mark, rule.hasMark = mark, markErr == nil
+			if len(parts) == 2 {
+				mask, maskErr := parseRuleNumber(parts[1])
+				if maskErr != nil {
+					rule.exact = false
+				}
+				rule.mask = mask
+			}
+			index++
+		case "lookup", "table":
+			table, tableErr := parseRuleNumber(value)
+			if rule.hasTable || tableErr != nil {
+				rule.exact = false
+			}
+			rule.table, rule.hasTable = table, tableErr == nil
+			index++
+		case "protocol", "proto":
+			protocol, protocolErr := strconv.ParseUint(value, 10, 8)
+			if protocolErr != nil || rule.protocol != "" {
+				rule.exact = false
+			} else {
+				rule.protocol = strconv.FormatUint(protocol, 10)
+			}
+			index++
+		default:
+			rule.exact = false
+		}
+	}
+	rule.exact = rule.exact && hasFrom && rule.hasMark && rule.hasTable
+	return rule, true
+}
+
+func parseRuleNumber(value string) (uint32, error) {
+	base := 10
+	if strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X") {
+		base = 0
+	}
+	number, err := strconv.ParseUint(value, base, 32)
+	return uint32(number), err
+}
+
+// exportProxyRuleMatches is also used by the route identity regression tests.
+func exportProxyRuleMatches(listed string, priority int, markText string, table int) bool {
+	mark, err := parseRuleNumber(markText)
+	if err != nil {
+		return false
+	}
+	owned, conflict := matchingExportProxyRules(listed, priority, mark, table)
+	return len(owned) != 0 && !conflict
 }
 
 const managerCommandCleanupTimeout = 15 * time.Second

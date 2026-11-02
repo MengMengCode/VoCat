@@ -38,7 +38,9 @@ type atHostDataSession interface {
 
 // atHostDataLink starts a host-side lease on a cellular network interface.
 // Linux runs a foreground busybox udhcpc with protected routing; other
-// platforms return ErrDataBackendUnavailable.
+// platforms return ErrDataBackendUnavailable. If startup cleanup fails, Start
+// returns the remaining session with its error so the caller retains ownership
+// and can retry cleanup before allowing another backend to use the interface.
 type atHostDataLink interface {
 	Start(ctx context.Context, networkInterface string) (atHostDataSession, error)
 }
@@ -53,6 +55,7 @@ const atDataPDPContextID = 1
 const (
 	atDataAttachTimeout   = 90 * time.Second
 	atDataActivateTimeout = 150 * time.Second
+	atDataCleanupTimeout  = 20 * time.Second
 )
 
 // qmiDataEventSource is an optional capability implemented by native QMI
@@ -273,8 +276,13 @@ func (manager *Manager) SetNetwork(
 		// not hold opMu while an external QMI transaction is in flight: a stale
 		// WDS client may take seconds to time out, and blocking opMu here also
 		// blocks SMS synchronization, IMS status and ordinary health probes.
-		state.dataMu.Lock()
+		if err := lockMutexContext(ctx, &state.dataMu); err != nil {
+			return NetworkResult{}, err
+		}
 		defer state.dataMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return NetworkResult{}, err
+		}
 		if err := manager.validateActive(id, state); err != nil {
 			return NetworkResult{}, err
 		}
@@ -291,10 +299,12 @@ func (manager *Manager) SetNetwork(
 		// first. Both backends own the same host interface: a surviving
 		// udhcpc would keep reapplying its lease, and its later deconfig
 		// would flush the address and routes the QMI session just
-		// installed. The session is closed under dataMu so a concurrent AT
-		// path cannot install a new one afterwards; closeATHostSession
-		// cannot be used here because it takes the same lock.
-		manager.closeATHostSessionLocked(state)
+		// installed. Both backends hold dataMu until the previous owner has
+		// finished cleanup and the replacement setup has completed.
+		state.dataBackend = "qmi"
+		if err := manager.closeATHostSessionLocked(state); err != nil {
+			return NetworkResult{}, err
+		}
 		// OpenStick's native WWAN path must drive registration through QMI NAS.
 		// AT+COPS only updates the legacy AT facade on this firmware and can leave
 		// NAS in not-registered-searching, which then makes WDS dialing report a
@@ -333,8 +343,21 @@ func (manager *Manager) SetNetwork(
 		return result, err
 	}
 
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return NetworkResult{}, err
+	}
 	defer state.opMu.Unlock()
+	// AT commands need the serial actor as well as exclusive ownership of the
+	// host data path. Always acquire opMu before dataMu; the QMI branch never
+	// takes opMu while holding dataMu. Keep dataMu until teardown and startup
+	// have finished so a competing backend cannot replace a half-built lease.
+	if err := lockMutexContext(ctx, &state.dataMu); err != nil {
+		return NetworkResult{}, err
+	}
+	defer state.dataMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return NetworkResult{}, err
+	}
 	if err := manager.validateActive(id, state); err != nil {
 		return NetworkResult{}, err
 	}
@@ -345,6 +368,7 @@ func (manager *Manager) SetNetwork(
 		}
 	}
 	candidate = manager.candidateFor(state)
+	state.dataBackend = "at"
 
 	result, err := manager.setATNetwork(
 		ctx, state, candidate, request.Enabled,
@@ -375,7 +399,12 @@ func (manager *Manager) setATNetwork(
 	if !enabled {
 		// Fail closed on the host path first: even a wedged modem must not
 		// leave an application routing through the cellular interface.
-		manager.closeATHostSession(ctx, state)
+		if err := manager.closeATHostSessionLocked(state); err != nil {
+			return NetworkResult{}, err
+		}
+		if err := stopOwnedQMIDataSessionLocked(state, networkInterface); err != nil {
+			return NetworkResult{}, err
+		}
 		client, err := manager.clientLocked(ctx, state, candidate)
 		if err != nil {
 			return NetworkResult{}, err
@@ -402,15 +431,20 @@ func (manager *Manager) setATNetwork(
 		return NetworkResult{}, ErrDataBackendUnavailable
 	}
 
-	client, err := manager.clientLocked(ctx, state, candidate)
-	if err != nil {
-		return NetworkResult{}, err
-	}
 	// A recovery re-enable must not leave the previous DHCP process and its
 	// protected routes alive alongside the new lease: the old session would
 	// keep its udhcpc running, and its later deconfig would flush the
 	// per-interface table the new lease shares.
-	manager.closeATHostSession(ctx, state)
+	if err := manager.closeATHostSessionLocked(state); err != nil {
+		return NetworkResult{}, err
+	}
+	if err := stopOwnedQMIDataSessionLocked(state, networkInterface); err != nil {
+		return NetworkResult{}, err
+	}
+	client, err := manager.clientLocked(ctx, state, candidate)
+	if err != nil {
+		return NetworkResult{}, err
+	}
 
 	// 3GPP forbids reconfiguring an active context, and modems such as the
 	// ZXIC platform auto-activates a default PDN on context 1. Probe the state and
@@ -456,16 +490,20 @@ func (manager *Manager) setATNetwork(
 	if err != nil {
 		// The host path must be gone before the modem rollback: a half-lazy
 		// lease with an active PDP would keep an unreachable route around.
-		manager.closeATHostSession(ctx, state)
-		if _, rollbackErr := manager.command(ctx, client, profile.ActivateCommand(atDataPDPContextID, false)); rollbackErr != nil {
+		if session != nil {
+			state.atHostSession = session
+			if cleanupErr := manager.closeATHostSessionLocked(state); cleanupErr != nil {
+				return NetworkResult{}, errors.Join(fmt.Errorf("start AT host data session: %w", err), cleanupErr)
+			}
+		}
+		rollbackContext, cancelRollback := context.WithTimeout(context.Background(), atDataCleanupTimeout)
+		defer cancelRollback()
+		if _, rollbackErr := manager.command(rollbackContext, client, profile.ActivateCommand(atDataPDPContextID, false)); rollbackErr != nil {
 			return NetworkResult{}, fmt.Errorf("start AT host data session: %w (PDP rollback failed: %v)", err, rollbackErr)
 		}
 		return NetworkResult{}, fmt.Errorf("start AT host data session: %w", err)
 	}
-	state.dataMu.Lock()
 	state.atHostSession = session
-	state.dataBackend = "at"
-	state.dataMu.Unlock()
 	return NetworkResult{
 		Enabled:   true,
 		Backend:   "at",
@@ -476,33 +514,22 @@ func (manager *Manager) setATNetwork(
 	}, nil
 }
 
-// closeATHostSession drops the AT host session reference under dataMu and
-// then closes the session (route/lease teardown) outside the lock.
-func (manager *Manager) closeATHostSession(ctx context.Context, state *managedDevice) {
-	state.dataMu.Lock()
-	session := state.atHostSession
-	state.atHostSession = nil
-	if state.dataBackend == "at" {
-		state.dataBackend = ""
-	}
-	state.dataMu.Unlock()
-	if session != nil {
-		_ = session.Close(ctx)
-	}
-}
-
 // closeATHostSessionLocked closes the AT host session while the caller holds
-// state.dataMu. The reference and the backend marker are cleared first, so
-// the session is torn down even when its Close blocks on the host cleanup.
-func (manager *Manager) closeATHostSessionLocked(state *managedDevice) {
+// state.dataMu. Keep the reference until cleanup succeeds so a failed cleanup
+// can be retried and cannot be followed by a new owner of the same host paths.
+// dataBackend records the selected backend even when no live session remains.
+func (manager *Manager) closeATHostSessionLocked(state *managedDevice) error {
 	session := state.atHostSession
+	if session == nil {
+		return nil
+	}
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), atDataCleanupTimeout)
+	defer cancelCleanup()
+	if err := session.Close(cleanupContext); err != nil {
+		return fmt.Errorf("close AT host data session: %w", err)
+	}
 	state.atHostSession = nil
-	if state.dataBackend == "at" {
-		state.dataBackend = ""
-	}
-	if session != nil {
-		_ = session.Close(context.Background())
-	}
+	return nil
 }
 
 // invalidateNetworkSessions drops both the QMI and the AT host data session
@@ -510,15 +537,18 @@ func (manager *Manager) closeATHostSessionLocked(state *managedDevice) {
 // hold state.dataMu; the AT session close runs under the same lock so a reset
 // cannot race a live lease teardown. Session.Close never takes dataMu, so
 // holding it here cannot deadlock (the process stop is bounded internally).
-func invalidateNetworkSessions(state *managedDevice, candidate modem.Candidate) {
+func invalidateNetworkSessions(state *managedDevice, candidate modem.Candidate) error {
 	invalidateQMINetworkSession(state, candidate)
 	if state.atHostSession != nil {
-		_ = state.atHostSession.Close(context.Background())
+		cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), atDataCleanupTimeout)
+		err := state.atHostSession.Close(cleanupContext)
+		cancelCleanup()
+		if err != nil {
+			return fmt.Errorf("close AT host data session before reset: %w", err)
+		}
 		state.atHostSession = nil
 	}
-	if state.dataBackend == "at" {
-		state.dataBackend = ""
-	}
+	return nil
 }
 
 // parsePDPContextActive reports whether a +CGACT? response marks cid active.

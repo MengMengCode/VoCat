@@ -245,6 +245,14 @@ Debian/Ubuntu uses `apt install libqmi-utils`; Arch Linux uses
 driver binding or asserting DTR. If the utility is unavailable, the command
 stops with an installation hint and leaves the current device state untouched.
 
+### AT cellular host data
+
+AT-backed ECM/RNDIS data requires Linux, iproute2 and BusyBox with `udhcpc`.
+VoCat must exclusively manage the modem network interface; disable competing
+DHCP clients or network-manager profiles for that interface. VoCat maintains
+an IPv4 lease and marked policy routes without changing the system default
+route or resolver. This path currently requires IPv4-capable service.
+
 ## Configuration
 
 Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applies `VOCAT_*` environment variables. Environment variables take precedence.
