@@ -82,11 +82,12 @@ func TestSetNetworkBlockedForRestrictedRegionSIM(t *testing.T) {
 
 func TestSetNetworkAllowedForServedRegionSIM(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CGACT?", response: okResponse("+CGACT: 1,0")},
 		{command: `AT+CGDCONT=1,"IPV4V6","internet"`, response: okResponse()},
 		{command: "AT+CGATT=1", response: okResponse()},
 		{command: "AT+CGACT=1,1", response: okResponse()},
 	}}
-	manager, id := newStartedTestManager(t, client)
+	manager, id := newStartedATDataTestManager(t, client, &fakeATHostLink{})
 	injectSnapshot(t, manager, id, &Snapshot{DeviceID: id, IMSI: "310260123456789"})
 	result, err := manager.SetNetwork(context.Background(), id, NetworkRequest{
 		Enabled: true, APN: "internet", IPVersion: "IPV4V6",
@@ -104,11 +105,12 @@ func TestSetNetworkAllowedForServedRegionSIM(t *testing.T) {
 // only a confirmed blocked MCC blocks service (fail-open).
 func TestSetNetworkAllowedWhenSIMRegionUnknown(t *testing.T) {
 	client := &transcriptClient{steps: []clientStep{
+		{command: "AT+CGACT?", response: okResponse("+CGACT: 1,0")},
 		{command: `AT+CGDCONT=1,"IPV4V6","internet"`, response: okResponse()},
 		{command: "AT+CGATT=1", response: okResponse()},
 		{command: "AT+CGACT=1,1", response: okResponse()},
 	}}
-	manager, id := newStartedTestManager(t, client)
+	manager, id := newStartedATDataTestManager(t, client, &fakeATHostLink{})
 	if _, err := manager.SetNetwork(context.Background(), id, NetworkRequest{
 		Enabled: true, APN: "internet", IPVersion: "IPV4V6",
 	}); err != nil {

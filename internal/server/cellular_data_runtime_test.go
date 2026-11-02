@@ -252,7 +252,7 @@ func TestCellularDataMonitorReconnectsAfterTwoControlPlaneFailures(t *testing.T)
 	}
 }
 
-func TestCellularDataMonitorDoesNotReclaimATBackend(t *testing.T) {
+func TestCellularDataMonitorRecoversATBackendAfterRepeatedFailures(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, ":memory:")
 	if err != nil {
@@ -260,8 +260,8 @@ func TestCellularDataMonitorDoesNotReclaimATBackend(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	if err := database.UpsertDevice(ctx, store.Device{
-		ID: "physical-1", Name: "EC20", DeviceType: store.DeviceTypePCIeEC20EC25,
-		Interface: "wwan0", DeviceBackend: "at", NetworkEnabled: true,
+		ID: "physical-1", Name: "ZXIC", DeviceType: store.DeviceTypePCIeEC20EC25,
+		Interface: "enx344b50000000", DeviceBackend: "at", NetworkEnabled: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,10 @@ func TestCellularDataMonitorDoesNotReclaimATBackend(t *testing.T) {
 			ID: "physical-1", Discovered: true,
 			Snapshot: &device.Snapshot{ICCID: "89441000000000000001", SIMReady: true, PSAttached: true},
 		}},
-		status: device.NetworkStatus{Backend: "qmi", Interface: "wwan0"},
+		status: device.NetworkStatus{
+			Backend: "at", Interface: "enx344b50000000",
+			Detail: "AT host data lease is not established",
+		},
 	}
 	server := &Server{store: database, devices: controller, logger: regionTestLogger()}
 	runtime := server.cellularDataRuntime()
@@ -283,9 +286,36 @@ func TestCellularDataMonitorDoesNotReclaimATBackend(t *testing.T) {
 	}
 	cancel()
 
+	// The monitor probes the AT backend through NetworkStatus and reopens the
+	// session after the control-plane failure threshold, just like QMI.
 	server.monitorCellularDataOnce(ctx)
 	if calls := controller.recordedSetCalls(); len(calls) != 1 {
-		t.Fatalf("AT backend was reclaimed by QMI monitor: calls = %d, want 1", len(calls))
+		t.Fatalf("reconnected after first failed AT probe: calls = %d, want 1", len(calls))
+	}
+	server.monitorCellularDataOnce(ctx)
+	waitContext, cancel = context.WithTimeout(ctx, time.Second)
+	status, waitErr := runtime.wait(waitContext, "physical-1", initial.Revision+1)
+	cancel()
+	if waitErr != nil || !status.Connected || status.Phase != "connected" {
+		t.Fatalf("reconnected AT session = %+v, err = %v", status, waitErr)
+	}
+	if calls := controller.recordedSetCalls(); len(calls) != 2 || !calls[1].Enabled {
+		t.Fatalf("set network calls = %+v, want initial enable plus one AT reconnect", calls)
+	}
+
+	// VoWiFi rides the host's existing network, so the monitor must not fight
+	// it by reconnecting cellular data.
+	config, err := database.Device(ctx, "physical-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.VoWiFiEnabled = true
+	if err := database.UpsertDevice(ctx, config); err != nil {
+		t.Fatal(err)
+	}
+	server.monitorCellularDataOnce(ctx)
+	if calls := controller.recordedSetCalls(); len(calls) != 2 {
+		t.Fatalf("SetNetwork calls = %d, want 2 (no reconnect while VoWiFi is enabled)", len(calls))
 	}
 }
 

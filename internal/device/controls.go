@@ -324,8 +324,12 @@ func (manager *Manager) SetFlight(
 			// Entering RF-off tears down the packet service. Forget the previous
 			// WDS generation before issuing CFUN so a later enable starts cleanly.
 			state.dataMu.Lock()
-			invalidateQMINetworkSession(state, manager.candidateFor(state))
+			cleanupErr := invalidateNetworkSessions(state, manager.candidateFor(state))
 			state.dataMu.Unlock()
+			if cleanupErr != nil {
+				manager.setResult(id, state, nil, cleanupErr)
+				return FlightResult{}, cleanupErr
+			}
 		}
 		if _, err := manager.command(
 			ctx,

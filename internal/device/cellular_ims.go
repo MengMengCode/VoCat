@@ -161,6 +161,15 @@ func (manager *Manager) SetCellularIMS(ctx context.Context, id string, mode Cell
 		manager.setResult(id, state, nil, err)
 		return status, err
 	}
+	// Finish host teardown before changing persistent IMS configuration. A
+	// failed teardown must leave a retry able to apply and reboot the setting.
+	state.dataMu.Lock()
+	cleanupErr := invalidateNetworkSessions(state, manager.candidateFor(state))
+	state.dataMu.Unlock()
+	if cleanupErr != nil {
+		manager.setResult(id, state, nil, cleanupErr)
+		return status, cleanupErr
+	}
 	if _, err = manager.command(ctx, client, fmt.Sprintf(`AT+QCFG="ims",%d`, target)); err != nil {
 		manager.setResult(id, state, nil, err)
 		return CellularIMSStatus{}, err
@@ -177,12 +186,6 @@ func (manager *Manager) SetCellularIMS(ctx context.Context, id string, mode Cell
 	}
 	status.Changed = true
 	status.Rebooting = true
-	// A CFUN reset destroys every WDS client and packet-data handle. Discard the
-	// owned session before the reset so the restore path cannot use a handle
-	// from the previous baseband generation.
-	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
-	state.dataMu.Unlock()
 	rebootCtx, cancel := manager.withTimeout(ctx, manager.longTimeout)
 	_, err = client.Execute(rebootCtx, "AT+CFUN=1,1")
 	cancel()

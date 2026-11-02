@@ -416,9 +416,9 @@ func (s *Server) monitorCellularData(ctx context.Context, physicalID string, imm
 			continue
 		}
 		backend := strings.ToLower(strings.TrimSpace(request.Backend))
-		if backend != "" && backend != "qmi" {
-			// NetworkStatus observes the process-owned QMI session. AT-backed
-			// sessions have no equivalent live observer yet.
+		if backend != "" && backend != "qmi" && backend != "at" {
+			// NetworkStatus observes the process-owned session for both QMI
+			// and AT backends; anything else has no live observer.
 			continue
 		}
 		releaseWatchdog, admitted := runtime.acquireWatchdog(config.ID, status.Revision)
@@ -959,6 +959,12 @@ func (runtime *cellularDataRuntime) run(configID string, entry *cellularDataRunt
 		operationTimeout := 75 * time.Second
 		if !request.Enabled {
 			operationTimeout = 30 * time.Second
+		} else if !strings.EqualFold(strings.TrimSpace(request.Backend), "qmi") {
+			// AT attach (90s), activation (150s), and the first DHCP lease
+			// (60s) are sequential. Leave room for configuration and teardown.
+			// Auto selection can choose AT; each QMI stage still has its own
+			// bounded timeout when auto selection chooses QMI instead.
+			operationTimeout = 6 * time.Minute
 		}
 		operationContext, cancel := context.WithTimeout(root, operationTimeout)
 		entry.cancel = cancel

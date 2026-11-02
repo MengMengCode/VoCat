@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"vocat/internal/modem"
 )
@@ -26,6 +27,36 @@ type qmiDataSession interface {
 	RuntimeIPv4(context.Context) (qmiIPv4Settings, error)
 	Close() error
 }
+
+// atHostDataSession is a live host-side lease for the AT data backend. The
+// session owns its DHCP process and the protected policy routing generation;
+// Close must tear down every host path it created.
+type atHostDataSession interface {
+	Status(context.Context) (bool, string, error)
+	Close(context.Context) error
+}
+
+// atHostDataLink starts a host-side lease on a cellular network interface.
+// Linux runs a foreground busybox udhcpc with protected routing; other
+// platforms return ErrDataBackendUnavailable. If startup cleanup fails, Start
+// returns the remaining session with its error so the caller retains ownership
+// and can retry cleanup before allowing another backend to use the interface.
+type atHostDataLink interface {
+	Start(ctx context.Context, networkInterface string) (atHostDataSession, error)
+}
+
+// atDataPDPContextID is the single PDP context the AT data backend manages.
+// Modems such as the ZXIC platform auto-activate their default PDN on context 1,
+// so the enable flow deactivates it before reconfiguring.
+const atDataPDPContextID = 1
+
+// Data-path AT timeouts follow vendor FAQ budgets (observed on the ZXIC
+// ZXIC platform manual): attach may retry for ~75s, activation for ~150s.
+const (
+	atDataAttachTimeout   = 90 * time.Second
+	atDataActivateTimeout = 150 * time.Second
+	atDataCleanupTimeout  = 20 * time.Second
+)
 
 // qmiDataEventSource is an optional capability implemented by native QMI
 // sessions. The event channel only carries a wake-up signal; the caller must
@@ -245,8 +276,13 @@ func (manager *Manager) SetNetwork(
 		// not hold opMu while an external QMI transaction is in flight: a stale
 		// WDS client may take seconds to time out, and blocking opMu here also
 		// blocks SMS synchronization, IMS status and ordinary health probes.
-		state.dataMu.Lock()
+		if err := lockMutexContext(ctx, &state.dataMu); err != nil {
+			return NetworkResult{}, err
+		}
 		defer state.dataMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return NetworkResult{}, err
+		}
 		if err := manager.validateActive(id, state); err != nil {
 			return NetworkResult{}, err
 		}
@@ -258,6 +294,16 @@ func (manager *Manager) SetNetwork(
 		}
 		if candidate.QMIControl == "" || candidate.NetworkInterface == "" {
 			return NetworkResult{}, fmt.Errorf("%w: QMI control device and network interface are required", ErrDataBackendUnavailable)
+		}
+		// Switching to the QMI backend must tear the AT host session down
+		// first. Both backends own the same host interface: a surviving
+		// udhcpc would keep reapplying its lease, and its later deconfig
+		// would flush the address and routes the QMI session just
+		// installed. Both backends hold dataMu until the previous owner has
+		// finished cleanup and the replacement setup has completed.
+		state.dataBackend = "qmi"
+		if err := manager.closeATHostSessionLocked(state); err != nil {
+			return NetworkResult{}, err
 		}
 		// OpenStick's native WWAN path must drive registration through QMI NAS.
 		// AT+COPS only updates the legacy AT facade on this firmware and can leave
@@ -297,8 +343,21 @@ func (manager *Manager) SetNetwork(
 		return result, err
 	}
 
-	state.opMu.Lock()
+	if err := lockMutexContext(ctx, &state.opMu); err != nil {
+		return NetworkResult{}, err
+	}
 	defer state.opMu.Unlock()
+	// AT commands need the serial actor as well as exclusive ownership of the
+	// host data path. Always acquire opMu before dataMu; the QMI branch never
+	// takes opMu while holding dataMu. Keep dataMu until teardown and startup
+	// have finished so a competing backend cannot replace a half-built lease.
+	if err := lockMutexContext(ctx, &state.dataMu); err != nil {
+		return NetworkResult{}, err
+	}
+	defer state.dataMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return NetworkResult{}, err
+	}
 	if err := manager.validateActive(id, state); err != nil {
 		return NetworkResult{}, err
 	}
@@ -309,58 +368,207 @@ func (manager *Manager) SetNetwork(
 		}
 	}
 	candidate = manager.candidateFor(state)
+	state.dataBackend = "at"
 
-	client, err := manager.clientLocked(ctx, state, candidate)
-	if err != nil {
-		manager.setResult(id, state, nil, err)
+	result, err := manager.setATNetwork(
+		ctx, state, candidate, request.Enabled,
+		apn, ipVersion, request.Username, request.Password, authentication,
+	)
+	manager.setResult(id, state, nil, err)
+	return result, err
+}
+
+// setATNetwork drives the AT data backend: PDP commands come from the
+// resolved profile, and a successful activation is followed by a host-side
+// lease on the candidate's network interface. Disable is fail-closed: the
+// host path is removed before the modem is asked to deactivate.
+func (manager *Manager) setATNetwork(
+	ctx context.Context,
+	state *managedDevice,
+	candidate modem.Candidate,
+	enabled bool,
+	apn string,
+	ipVersion string,
+	username string,
+	password string,
+	authentication string,
+) (NetworkResult, error) {
+	networkInterface := strings.TrimSpace(candidate.NetworkInterface)
+	profile := state.atProfile.PDP
+
+	if !enabled {
+		// Fail closed on the host path first: even a wedged modem must not
+		// leave an application routing through the cellular interface.
+		if err := manager.closeATHostSessionLocked(state); err != nil {
+			return NetworkResult{}, err
+		}
+		if err := stopOwnedQMIDataSessionLocked(state, networkInterface); err != nil {
+			return NetworkResult{}, err
+		}
+		client, err := manager.clientLocked(ctx, state, candidate)
+		if err != nil {
+			return NetworkResult{}, err
+		}
+		if _, err := manager.command(ctx, client, profile.ActivateCommand(atDataPDPContextID, false)); err != nil {
+			return NetworkResult{}, err
+		}
+		return NetworkResult{
+			Enabled:   false,
+			Backend:   "at",
+			Interface: networkInterface,
+			APN:       apn,
+			IPVersion: ipVersion,
+			Detail:    "PDP context deactivated",
+		}, nil
+	}
+	// The host interface and the platform link are only required to bring
+	// the data path up. A device that lost its host interface must still be
+	// able to deactivate its PDP context.
+	if networkInterface == "" {
+		return NetworkResult{}, fmt.Errorf("%w: a host network interface is required for the AT data backend", ErrDataBackendUnavailable)
+	}
+	if manager.atHostDataLink == nil {
+		return NetworkResult{}, ErrDataBackendUnavailable
+	}
+
+	// A recovery re-enable must not leave the previous DHCP process and its
+	// protected routes alive alongside the new lease: the old session would
+	// keep its udhcpc running, and its later deconfig would flush the
+	// per-interface table the new lease shares.
+	if err := manager.closeATHostSessionLocked(state); err != nil {
 		return NetworkResult{}, err
 	}
-	if request.Enabled {
-		type networkCommand struct {
-			value     string
-			sensitive bool
-		}
-		commands := []networkCommand{
-			{value: fmt.Sprintf(`AT+CGDCONT=1,"%s","%s"`, ipVersion, apn)},
-		}
-		if authentication != "NONE" {
-			authCode := map[string]int{"PAP": 1, "CHAP": 2, "PAP_OR_CHAP": 3}[authentication]
-			commands = append(commands, networkCommand{
-				value:     fmt.Sprintf(`AT+CGAUTH=1,%d,"%s","%s"`, authCode, request.Username, request.Password),
-				sensitive: true,
-			})
-		}
-		commands = append(commands,
-			networkCommand{value: "AT+CGATT=1"},
-			networkCommand{value: "AT+CGACT=1,1"},
-		)
-		for _, command := range commands {
-			var err error
-			if command.sensitive {
-				_, err = manager.sensitiveCommand(ctx, client, command.value)
-			} else {
-				_, err = manager.command(ctx, client, command.value)
-			}
-			if err != nil {
-				manager.setResult(id, state, nil, err)
-				return NetworkResult{}, err
-			}
-		}
-	} else {
-		if _, err := manager.command(ctx, client, "AT+CGACT=0,1"); err != nil {
-			manager.setResult(id, state, nil, err)
+	if err := stopOwnedQMIDataSessionLocked(state, networkInterface); err != nil {
+		return NetworkResult{}, err
+	}
+	client, err := manager.clientLocked(ctx, state, candidate)
+	if err != nil {
+		return NetworkResult{}, err
+	}
+
+	// 3GPP forbids reconfiguring an active context, and modems such as the
+	// ZXIC platform auto-activates a default PDN on context 1. Probe the state and
+	// deactivate first so CGDCONT always sees an inactive context. A failed
+	// probe is not fatal: the configure step below fails loudly if the modem
+	// really refuses to proceed.
+	if response, queryErr := manager.command(ctx, client, "AT+CGACT?"); queryErr == nil &&
+		parsePDPContextActive(response, atDataPDPContextID) {
+		if _, err := manager.command(ctx, client, profile.ActivateCommand(atDataPDPContextID, false)); err != nil {
 			return NetworkResult{}, err
 		}
 	}
-	manager.setResult(id, state, nil, nil)
+
+	contextCommand, err := profile.ConfigureContextCommand(atDataPDPContextID, ipVersion, apn)
+	if err != nil {
+		return NetworkResult{}, err
+	}
+	if _, err := manager.command(ctx, client, contextCommand); err != nil {
+		return NetworkResult{}, err
+	}
+	if authentication != "NONE" {
+		authCode := map[string]int{"PAP": 1, "CHAP": 2, "PAP_OR_CHAP": 3}[authentication]
+		authCommand, err := profile.ConfigureAuthenticationCommand(atDataPDPContextID, authCode, username, password)
+		if err != nil {
+			return NetworkResult{}, err
+		}
+		if _, err := manager.sensitiveCommand(ctx, client, authCommand); err != nil {
+			return NetworkResult{}, err
+		}
+	}
+
+	// Attach and activate can take minutes when the network is slow (vendor
+	// FAQ budgets: attach up to 75s, activate up to 150s), so they use
+	// dedicated data-path timeouts instead of the short command timeout.
+	if _, err := manager.timedCommand(ctx, client, profile.AttachCommand(true), atDataAttachTimeout); err != nil {
+		return NetworkResult{}, err
+	}
+	if _, err := manager.timedCommand(ctx, client, profile.ActivateCommand(atDataPDPContextID, true), atDataActivateTimeout); err != nil {
+		return NetworkResult{}, err
+	}
+
+	session, err := manager.atHostDataLink.Start(ctx, networkInterface)
+	if err != nil {
+		// The host path must be gone before the modem rollback: a half-lazy
+		// lease with an active PDP would keep an unreachable route around.
+		if session != nil {
+			state.atHostSession = session
+			if cleanupErr := manager.closeATHostSessionLocked(state); cleanupErr != nil {
+				return NetworkResult{}, errors.Join(fmt.Errorf("start AT host data session: %w", err), cleanupErr)
+			}
+		}
+		rollbackContext, cancelRollback := context.WithTimeout(context.Background(), atDataCleanupTimeout)
+		defer cancelRollback()
+		if _, rollbackErr := manager.command(rollbackContext, client, profile.ActivateCommand(atDataPDPContextID, false)); rollbackErr != nil {
+			return NetworkResult{}, fmt.Errorf("start AT host data session: %w (PDP rollback failed: %v)", err, rollbackErr)
+		}
+		return NetworkResult{}, fmt.Errorf("start AT host data session: %w", err)
+	}
+	state.atHostSession = session
 	return NetworkResult{
-		Enabled:   request.Enabled,
+		Enabled:   true,
 		Backend:   "at",
-		Interface: candidate.NetworkInterface,
+		Interface: networkInterface,
 		APN:       apn,
 		IPVersion: ipVersion,
-		Detail:    map[bool]string{true: "PDP context activated", false: "PDP context deactivated"}[request.Enabled],
+		Detail:    "PDP context activated and host lease established",
 	}, nil
+}
+
+// closeATHostSessionLocked closes the AT host session while the caller holds
+// state.dataMu. Keep the reference until cleanup succeeds so a failed cleanup
+// can be retried and cannot be followed by a new owner of the same host paths.
+// dataBackend records the selected backend even when no live session remains.
+func (manager *Manager) closeATHostSessionLocked(state *managedDevice) error {
+	session := state.atHostSession
+	if session == nil {
+		return nil
+	}
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), atDataCleanupTimeout)
+	defer cancelCleanup()
+	if err := session.Close(cleanupContext); err != nil {
+		return fmt.Errorf("close AT host data session: %w", err)
+	}
+	state.atHostSession = nil
+	return nil
+}
+
+// invalidateNetworkSessions drops both the QMI and the AT host data session
+// state on radio-reset, profile-switch and device-disconnect paths. Callers
+// hold state.dataMu; the AT session close runs under the same lock so a reset
+// cannot race a live lease teardown. Session.Close never takes dataMu, so
+// holding it here cannot deadlock (the process stop is bounded internally).
+func invalidateNetworkSessions(state *managedDevice, candidate modem.Candidate) error {
+	invalidateQMINetworkSession(state, candidate)
+	if state.atHostSession != nil {
+		cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), atDataCleanupTimeout)
+		err := state.atHostSession.Close(cleanupContext)
+		cancelCleanup()
+		if err != nil {
+			return fmt.Errorf("close AT host data session before reset: %w", err)
+		}
+		state.atHostSession = nil
+	}
+	return nil
+}
+
+// parsePDPContextActive reports whether a +CGACT? response marks cid active.
+func parsePDPContextActive(response modem.Response, cid int) bool {
+	for _, line := range response.Lines {
+		line = strings.TrimSpace(line)
+		if len(line) < len("+CGACT:") || !strings.EqualFold(line[:len("+CGACT:")], "+CGACT:") {
+			continue
+		}
+		fields := strings.Split(strings.TrimSpace(line[len("+CGACT:"):]), ",")
+		if len(fields) != 2 {
+			continue
+		}
+		contextID, cidErr := strconv.Atoi(strings.TrimSpace(fields[0]))
+		state, stateErr := strconv.Atoi(strings.TrimSpace(fields[1]))
+		if cidErr == nil && stateErr == nil && contextID == cid && state == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeIPVersion(value string) string {
@@ -419,7 +627,12 @@ func (manager *Manager) PrepareRegistration(
 		manager.setResult(id, state, nil, err)
 		return err
 	}
-	_, err = manager.command(ctx, client, fmt.Sprintf(`AT+CGDCONT=1,"%s","%s"`, ipVersion, apn))
+	contextCommand, err := state.atProfile.PDP.ConfigureContextCommand(atDataPDPContextID, ipVersion, apn)
+	if err != nil {
+		manager.setResult(id, state, nil, err)
+		return err
+	}
+	_, err = manager.command(ctx, client, contextCommand)
 	manager.setResult(id, state, nil, err)
 	return err
 }

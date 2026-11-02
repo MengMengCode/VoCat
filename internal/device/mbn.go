@@ -318,6 +318,13 @@ func selectMBNProfile(ctx context.Context, executor mbnExecutor, previous, wante
 // another operator profile back in. Empty override keeps the original
 // ROW_Generic_3GPP heuristic.
 func reconcileMBNSelection(ctx context.Context, executor mbnExecutor, hplmn, override string) (changed bool, previous string, selected string, err error) {
+	return reconcileMBNSelectionBeforeChange(ctx, executor, hplmn, override, nil)
+}
+
+// Cleanup must finish before a selection is persisted. Otherwise a cleanup
+// failure leaves the new MBN selected without the required restart, and a retry
+// mistakes that pending selection for an already-applied configuration.
+func reconcileMBNSelectionBeforeChange(ctx context.Context, executor mbnExecutor, hplmn, override string, beforeChange func() error) (changed bool, previous string, selected string, err error) {
 	response, err := executor.Execute(ctx, `AT+QMBNCFG="List"`)
 	if err != nil {
 		return false, "", "", err
@@ -327,12 +334,20 @@ func reconcileMBNSelection(ctx context.Context, executor mbnExecutor, hplmn, ove
 	if previous == "" {
 		return false, "", "", errors.New("modem returned no selected MBN profile")
 	}
+	selectProfile := func(wanted string, keepAutoSelOff bool) (bool, string, error) {
+		if !strings.EqualFold(previous, wanted) && beforeChange != nil {
+			if err := beforeChange(); err != nil {
+				return false, previous, err
+			}
+		}
+		return selectMBNProfile(ctx, executor, previous, wanted, keepAutoSelOff)
+	}
 	if strings.TrimSpace(override) != "" {
 		wanted, resolveErr := resolveMBNOverride(profiles, override)
 		if resolveErr != nil {
 			return false, previous, previous, resolveErr
 		}
-		changed, selected, err = selectMBNProfile(ctx, executor, previous, wanted, true)
+		changed, selected, err = selectProfile(wanted, true)
 		return changed, previous, selected, err
 	}
 	if strings.EqualFold(previous, rowGeneric3GPPMBN) {
@@ -346,7 +361,7 @@ func reconcileMBNSelection(ctx context.Context, executor mbnExecutor, hplmn, ove
 	if generic == "" {
 		return false, previous, previous, fmt.Errorf("operator MBN %q does not match HPLMN %s, but %s is unavailable", previous, hplmn, rowGeneric3GPPMBN)
 	}
-	changed, selected, err = selectMBNProfile(ctx, executor, previous, generic, false)
+	changed, selected, err = selectProfile(generic, false)
 	return changed, previous, selected, err
 }
 
@@ -413,7 +428,14 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 		return fmt.Errorf("defer MBN selection requiring online restart: %w", err)
 	}
 	commandContext, cancelCommand := context.WithTimeout(ctx, manager.longTimeout)
-	changed, previous, selected, err := reconcileMBNSelection(commandContext, client, hplmn, override)
+	changed, previous, selected, err := reconcileMBNSelectionBeforeChange(commandContext, client, hplmn, override, func() error {
+		state.dataMu.Lock()
+		defer state.dataMu.Unlock()
+		if cleanupErr := invalidateNetworkSessions(state, manager.candidateFor(state)); cleanupErr != nil {
+			return fmt.Errorf("remove host data before MBN selection: %w", cleanupErr)
+		}
+		return nil
+	})
 	cancelCommand()
 	if err != nil || !changed {
 		state.opMu.Unlock()
@@ -423,9 +445,6 @@ func (manager *Manager) ReconcileEC20MBNAfterProfileSwitch(ctx context.Context, 
 		return nil
 	}
 
-	state.dataMu.Lock()
-	invalidateQMINetworkSession(state, manager.candidateFor(state))
-	state.dataMu.Unlock()
 	rebootContext, cancelReboot := context.WithTimeout(ctx, manager.longTimeout)
 	_, rebootErr := client.Execute(rebootContext, "AT+CFUN=1,1")
 	cancelReboot()
