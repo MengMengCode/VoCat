@@ -440,7 +440,13 @@ export default function DevicesPage() {
       return;
     }
     if (d.discoveryIssue === "at_port_missing") {
-      message.warning(t("已发现该模组，但未找到 AT 串口：通常是 option 驱动未认该 PID 或模组处于 MBIM/RNDIS 组态。可 `echo 2c7c <pid> | sudo tee /sys/bus/usb-serial/drivers/option1/new_id` 后重扫，或用 AT+QCFG 切到 QMI+AT 组态。"));
+      message.warning(
+        t(
+          d.vendorId === 0x19d2
+            ? "已发现该模组，但未找到 AT 串口：通常是 usbserial 通用驱动未绑定该 PID。可执行 `echo 19d2 <pid> | sudo tee /sys/bus/usb-serial/drivers/generic/new_id` 后重新扫描。"
+            : "已发现该模组，但未找到 AT 串口：通常是 option 驱动未认该 PID 或模组处于 MBIM/RNDIS 组态。可 `echo 2c7c <pid> | sudo tee /sys/bus/usb-serial/drivers/option1/new_id` 后重扫，或用 AT+QCFG 切到 QMI+AT 组态。",
+        ),
+      );
       return;
     }
     if (d.degraded) {

@@ -9,7 +9,7 @@ func TestChipsetForUSBRequiresVerifiedIdentity(t *testing.T) {
 		product  string
 		want     Chipset
 	}{
-		{"UZ901 lab unit", "19d2", "0536", ChipsetZXIC},
+		{"19d2:0536 lab unit", "19d2", "0536", ChipsetZXIC},
 		{"uppercase vendor", "19D2", "0536", ChipsetZXIC},
 		{"padded vendor", " 19d2 ", "0536", ChipsetZXIC},
 		{"padded product", "19d2", " 0536 ", ChipsetZXIC},
@@ -42,7 +42,7 @@ func TestChipsetForCandidateAndIsZXICFamily(t *testing.T) {
 	if IsZXICFamily("2c7c", "0125") {
 		t.Fatal("IsZXICFamily(2c7c, 0125) = true, want false")
 	}
-	generic := Candidate{VendorID: "2c7c", ProductID: "0125", Manufacturer: "ZXIC", Product: "UZ901"}
+	generic := Candidate{VendorID: "2c7c", ProductID: "0125", Manufacturer: "ZXIC", Product: "ZX297510"}
 	if ChipsetForCandidate(generic) != ChipsetGeneric {
 		t.Fatal("manufacturer/product text must not influence chipset family detection")
 	}

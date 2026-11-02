@@ -75,7 +75,7 @@ func configureTestOperatorProfile(
 
 func TestScanOperatorsParsesZXICCOPSResponse(t *testing.T) {
 	// This is a representative standard 3GPP COPS transcript, not a captured
-	// UZ901 hardware response; the repository has no sanitized device capture.
+	// ZXIC hardware response; the repository has no sanitized device capture.
 	client := &transcriptClient{steps: []clientStep{{
 		command: "AT+COPS=?",
 		response: okResponse(

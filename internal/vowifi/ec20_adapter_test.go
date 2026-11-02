@@ -367,7 +367,7 @@ func TestEC20AdapterZXICUnquotedCSIMCGLAAndBareCCHO(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		adapter.bindings[identityICCID] = ec20SIMBinding{
+		adapter.bindings[identityICCID] = atSIMBinding{
 			deviceID: "zxic-1", iccid: identityICCID, imsi: identityIMSI,
 			aid: fullISIM, application: "ISIM",
 		}

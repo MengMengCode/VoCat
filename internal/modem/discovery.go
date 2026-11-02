@@ -260,9 +260,9 @@ func IsQuectelUSBModem(vendorID string) bool {
 // model or manufacturer.
 func normalizeUSBIdentity(vendorID, productID, manufacturer, product string) (string, string) {
 	if IsZXICFamily(vendorID, productID) {
-		// ZXIC firmware ships placeholder USB strings; the chipset family is
-		// the only stable identity. The retail model comes from the
-		// platform's +CGMM identity query instead.
+		// ZXIC firmware ships placeholder USB strings; the verified
+		// platform is the only stable identity. The retail model comes from
+		// the platform's +CGMM identity query instead.
 		product = strings.TrimSpace(product)
 		if isUSBIdentityPlaceholder(product) {
 			product = "ZXIC"

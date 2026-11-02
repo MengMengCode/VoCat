@@ -1701,6 +1701,16 @@ func (bot *telegramBot) executeTimedCellularCall(
 	physicalID string,
 ) (string, error) {
 	dialContext, cancelDial := context.WithTimeout(ctx, 20*time.Second)
+	defer cancelDial()
+	// A timed call is confirmed through the call list, so a firmware without
+	// AT+CLCC cannot run one. The check happens before the dial command so
+	// the modem state is left untouched.
+	if !bot.server.supportsCLCC(dialContext, physicalID) {
+		return "", errors.New("该模块固件不支持 AT+CLCC 查询")
+	}
+	if err := dialContext.Err(); err != nil {
+		return "", err
+	}
 	response, err := bot.server.devices.ExecuteAT(dialContext, physicalID, "ATD"+action.Argument+";")
 	cancelDial()
 	if err != nil {
@@ -1710,7 +1720,9 @@ func (bot *telegramBot) executeTimedCellularCall(
 		return "", fmt.Errorf("基站未接受拨号: %s", formatTelegramAT(response))
 	}
 	hangupAt := time.Now().Add(action.Duration)
-	_ = bot.sendText(ctx, config, action.ChatID, fmt.Sprintf(
+	callContext, cancelCall := context.WithDeadline(ctx, hangupAt)
+	defer cancelCall()
+	_ = bot.sendText(callContext, config, action.ChatID, fmt.Sprintf(
 		"📞 已通过基站提交 %s，将在 %d 秒后自动挂断，并持续检查 CLCC 状态。",
 		action.Argument, int(action.Duration/time.Second),
 	), nil)
@@ -1723,9 +1735,26 @@ func (bot *telegramBot) executeTimedCellularCall(
 	seenCall := false
 	confirmed := false
 	lastState := -1
+	finish := func() (string, error) {
+		if err := bot.hangupCellularCall(physicalID); err != nil {
+			return "", fmt.Errorf("基站拨号已执行，但自动挂断失败: %w", err)
+		}
+		if !seenCall {
+			return fmt.Sprintf("基站已接受拨号并在 %d 秒后自动挂断；持续时间过短，未取得 CLCC 状态。", int(action.Duration/time.Second)), nil
+		}
+		return fmt.Sprintf("基站拨号完成：%s；模块确认%s，%d 秒后自动挂断。", action.Argument, telegramCLCCStateLabel(lastState), int(action.Duration/time.Second)), nil
+	}
 	for {
-		calls, queryErr := bot.telegramCellularCalls(ctx, physicalID)
+		if !time.Now().Before(hangupAt) && ctx.Err() == nil {
+			return finish()
+		}
+		calls, queryErr := bot.telegramCellularCalls(callContext, physicalID)
 		if queryErr != nil {
+			// A status query must release the control channel by the requested
+			// hangup time. Its deadline means normal completion, not call failure.
+			if !time.Now().Before(hangupAt) && ctx.Err() == nil {
+				return finish()
+			}
 			if final, ok := telegramCallFinalError(queryErr); ok {
 				if confirmed && final == "NO CARRIER" {
 					return fmt.Sprintf("基站通话 %s 已由网络或对端提前结束。", action.Argument), nil
@@ -1757,13 +1786,7 @@ func (bot *telegramBot) executeTimedCellularCall(
 			bot.bestEffortCellularHangup(physicalID)
 			return "", ctx.Err()
 		case <-timer.C:
-			if err := bot.hangupCellularCall(physicalID); err != nil {
-				return "", fmt.Errorf("基站拨号已执行，但自动挂断失败: %w", err)
-			}
-			if !seenCall {
-				return fmt.Sprintf("基站已接受拨号并在 %d 秒后自动挂断；持续时间过短，未取得 CLCC 状态。", int(action.Duration/time.Second)), nil
-			}
-			return fmt.Sprintf("基站拨号完成：%s；模块确认%s，%d 秒后自动挂断。", action.Argument, telegramCLCCStateLabel(lastState), int(action.Duration/time.Second)), nil
+			return finish()
 		case <-ticker.C:
 		}
 	}
@@ -1772,6 +1795,12 @@ func (bot *telegramBot) executeTimedCellularCall(
 func (bot *telegramBot) telegramCellularCalls(ctx context.Context, physicalID string) ([]map[string]any, error) {
 	queryContext, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
+	if !bot.server.supportsCLCC(queryContext, physicalID) {
+		return nil, errors.New("该模块固件不支持 AT+CLCC 查询")
+	}
+	if err := queryContext.Err(); err != nil {
+		return nil, err
+	}
 	response, err := bot.server.devices.ExecuteAT(queryContext, physicalID, "AT+CLCC")
 	if err != nil {
 		return nil, err
@@ -1938,6 +1967,16 @@ func (bot *telegramBot) executeSimpleCellularCallAction(ctx context.Context, phy
 		return formatTelegramCellularCalls(calls), nil
 	case "answer":
 		operationContext, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		// The answer is confirmed through the call list, so a firmware
+		// without AT+CLCC cannot confirm it. The check happens before the
+		// answer command so the modem state is left untouched.
+		if !bot.server.supportsCLCC(operationContext, physicalID) {
+			return "", errors.New("该模块固件不支持 AT+CLCC 查询")
+		}
+		if err := operationContext.Err(); err != nil {
+			return "", err
+		}
 		response, err := bot.server.devices.ExecuteAT(operationContext, physicalID, "ATA")
 		cancel()
 		if err != nil {
@@ -1947,8 +1986,10 @@ func (bot *telegramBot) executeSimpleCellularCallAction(ctx context.Context, phy
 			return "", fmt.Errorf("模块未确认 ATA: %s", formatTelegramAT(response))
 		}
 		deadline := time.Now().Add(8 * time.Second)
+		confirmContext, cancelConfirm := context.WithDeadline(ctx, deadline)
+		defer cancelConfirm()
 		for time.Now().Before(deadline) {
-			calls, queryErr := bot.telegramCellularCalls(ctx, physicalID)
+			calls, queryErr := bot.telegramCellularCalls(confirmContext, physicalID)
 			if queryErr != nil {
 				return "", queryErr
 			}
@@ -1957,8 +1998,8 @@ func (bot *telegramBot) executeSimpleCellularCallAction(ctx context.Context, phy
 					return "📞 基站来电已接通。", nil
 				}
 			}
-			if !waitTelegram(ctx, 500*time.Millisecond) {
-				return "", ctx.Err()
+			if !waitTelegram(confirmContext, 500*time.Millisecond) {
+				return "", confirmContext.Err()
 			}
 		}
 		return "", errors.New("模块接受了 ATA，但 8 秒内未确认来电已接通")
@@ -1966,9 +2007,20 @@ func (bot *telegramBot) executeSimpleCellularCallAction(ctx context.Context, phy
 		if err := bot.hangupCellularCall(physicalID); err != nil {
 			return "", err
 		}
+		// The hangup itself went through over the air. A firmware without a
+		// call list cannot confirm it, so the confirmation step is skipped
+		// instead of failing the operation that already succeeded.
 		deadline := time.Now().Add(4 * time.Second)
+		confirmContext, cancelConfirm := context.WithDeadline(ctx, deadline)
+		defer cancelConfirm()
+		if !bot.server.supportsCLCC(confirmContext, physicalID) {
+			return "已通过基站发送 ATH；该模块不支持 CLCC 确认。", nil
+		}
+		if err := confirmContext.Err(); err != nil {
+			return "", err
+		}
 		for time.Now().Before(deadline) {
-			calls, queryErr := bot.telegramCellularCalls(ctx, physicalID)
+			calls, queryErr := bot.telegramCellularCalls(confirmContext, physicalID)
 			if queryErr != nil {
 				if final, ok := telegramCallFinalError(queryErr); ok && final == "NO CARRIER" {
 					return "已通过基站发送 ATH，并确认通话结束。", nil
@@ -1978,8 +2030,8 @@ func (bot *telegramBot) executeSimpleCellularCallAction(ctx context.Context, phy
 			if len(calls) == 0 {
 				return "已通过基站发送 ATH，并确认没有活动通话。", nil
 			}
-			if !waitTelegram(ctx, 400*time.Millisecond) {
-				return "", ctx.Err()
+			if !waitTelegram(confirmContext, 400*time.Millisecond) {
+				return "", confirmContext.Err()
 			}
 		}
 		return "", errors.New("模块接受了 ATH，但 4 秒后仍报告活动通话")

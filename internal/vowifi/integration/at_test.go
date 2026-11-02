@@ -110,7 +110,7 @@ func TestATMapperExecuteAPDU(t *testing.T) {
 	database := testStore(t)
 	if err := database.UpsertDevice(context.Background(), store.Device{
 		ID:     "living-room",
-		Name:   "UZ901",
+		Name:   "ZXIC",
 		ATPort: "/dev/serial/by-id/usb-zxic-if02",
 	}); err != nil {
 		t.Fatal(err)

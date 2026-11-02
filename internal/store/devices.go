@@ -19,6 +19,10 @@ const (
 	DeviceTypeML307        = "ml307"
 	DeviceTypePCIeEC20EC25 = "pcie_ec20_ec25"
 	DeviceTypeUSBSIMReader = "usb_sim_reader"
+	// DeviceTypeZXIC marks the verified ZXIC platform (USB 19d2:0536).
+	// Behavioral adaptation keys on the candidate's chipset; the type is
+	// the stable user-facing marker for the adapted platform.
+	DeviceTypeZXIC = "zxic"
 )
 
 // NormalizeDeviceType returns a stable persisted device type identifier.
@@ -31,6 +35,8 @@ func NormalizeDeviceType(value string) string {
 		return DeviceTypeDJI4G
 	case DeviceTypeML307:
 		return DeviceTypeML307
+	case DeviceTypeZXIC:
+		return DeviceTypeZXIC
 	case DeviceTypeUSBSIMReader:
 		return DeviceTypeUSBSIMReader
 	case "", DeviceTypePCIeEC20EC25:

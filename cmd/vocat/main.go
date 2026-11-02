@@ -973,6 +973,18 @@ func configureVoWiFiRuntime(
 	if err != nil {
 		return nil, err
 	}
+	zxicAdapter, err := vowifi.NewZXICAdapter(mapper, vowifi.ATModemAdapterOptions{
+		// ZXIC follows the same fail-closed RF policy as EC20: teardown may
+		// restore CFUN but must never reactivate a PDP context.
+		RestoreCellularData: false,
+		PureAirplanePolicy: func(deviceID string) bool {
+			deviceConfig, configErr := database.Device(context.Background(), deviceID)
+			return configErr == nil && deviceConfig.VoWiFiEnabled
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 	nativeQMIAdapter, err := vowifi.NewNativeQMIAdapter(nativeQMIControllerMapper{Mapper: mapper, Devices: deviceManager}, func(deviceID string) bool {
 		deviceConfig, configErr := database.Device(context.Background(), deviceID)
 		return configErr == nil && deviceConfig.VoWiFiEnabled
@@ -1002,12 +1014,13 @@ func configureVoWiFiRuntime(
 			if err != nil {
 				return nil, fmt.Errorf("load device %q VoWiFi config: %w", deviceID, err)
 			}
-			adapter := vowifiDeviceAdapter(ec20Adapter)
-			if deviceConfig.DeviceType == store.DeviceTypeUSBSIMReader {
-				adapter = pcscAdapter
-			} else if deviceConfig.DeviceType == store.DeviceTypeWiFi410 {
-				adapter = nativeQMIAdapter
-			}
+			adapter := voWiFiAdapterForDevice(deviceConfig.DeviceType, func(lookupContext context.Context) (device.Device, error) {
+				physicalID, err := integration.ResolvePhysicalID(lookupContext, database, deviceManager, deviceConfig.ID)
+				if err != nil {
+					return device.Device{}, err
+				}
+				return deviceManager.Get(physicalID)
+			}, ec20Adapter, zxicAdapter, pcscAdapter, nativeQMIAdapter)
 			return newVoWiFiOrchestrator(factoryContext, deviceConfig, database, adapter, logger, onIncomingCall)
 		},
 	})
@@ -1415,6 +1428,9 @@ func provisionDiscoveredDevices(
 }
 
 func provisionedDeviceType(candidate modem.Candidate) string {
+	if modem.ChipsetForUSB(candidate.VendorID, candidate.ProductID) == modem.ChipsetZXIC {
+		return store.DeviceTypeZXIC
+	}
 	if modem.IsML307(candidate) {
 		return store.DeviceTypeML307
 	}

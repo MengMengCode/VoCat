@@ -104,11 +104,11 @@ func (profile markerPDPProfile) ActivateCommand(cid int, enabled bool) string {
 	return fmt.Sprintf("AT+%s=ACT,%d,%d", profile.marker, cid, state)
 }
 
-// testATDataCandidate mirrors the hardware-gate UZ901 identity: AT-capable
+// testATDataCandidate mirrors the hardware-gate ZXIC identity: AT-capable
 // modem with an ECM host network interface and no QMI control point.
 func testATDataCandidate() modem.Candidate {
 	return modem.Candidate{
-		ID:               "zxic-test-uz901",
+		ID:               "zxic-test",
 		VendorID:         "19d2",
 		ProductID:        "0536",
 		Manufacturer:     "ALK,Incorporated",

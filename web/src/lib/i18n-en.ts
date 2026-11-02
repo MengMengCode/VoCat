@@ -973,6 +973,8 @@ export const EN_DICT: Record<string, string> = {
   "无法读取 IMEI（控制口可能挂死），暂不可添加。": "Cannot read the IMEI (the control port may be stuck); cannot add for now.",
   "已发现该模组，但未找到 AT 串口：通常是 option 驱动未认该 PID 或模组处于 MBIM/RNDIS 组态。可 `echo 2c7c <pid> | sudo tee /sys/bus/usb-serial/drivers/option1/new_id` 后重扫，或用 AT+QCFG 切到 QMI+AT 组态。":
     "The modem was discovered, but no AT serial port was found. This usually means the `option` driver does not recognize this PID, or the module is in an MBIM/RNDIS composition. Run `echo 2c7c <pid> | sudo tee /sys/bus/usb-serial/drivers/option1/new_id` then rescan, or use AT+QCFG to switch to a QMI+AT composition.",
+  "已发现该模组，但未找到 AT 串口：通常是 usbserial 通用驱动未绑定该 PID。可执行 `echo 19d2 <pid> | sudo tee /sys/bus/usb-serial/drivers/generic/new_id` 后重新扫描。":
+    "The modem was discovered, but no AT serial port was found. This usually means the generic usbserial driver did not bind this PID. Run `echo 19d2 <pid> | sudo tee /sys/bus/usb-serial/drivers/generic/new_id` and rescan.",
   "未找到可用的 AT 端口（串口可能仍在枚举），系统会自动重试；也可点击重新扫描。":
     "No usable AT port was found (serial interfaces may still be enumerating). The system retries automatically; you can also rescan now.",
   "无法读取该设备 IMEI（可能控制口挂死），请执行 AT!RESET 或切换组态后重试": "Cannot read the device IMEI (the control port may be stuck); run AT!RESET or switch the USB composition and retry",
@@ -1256,6 +1258,7 @@ export const EN_DICT: Record<string, string> = {
   "大疆 4G 模块（移远芯片）": "DJI 4G Module (Quectel)",
   "ML307（中移物联）": "ML307 (China Mobile IoT)",
   "PCIe EC20/EC25（移远芯片）": "PCIe EC20/EC25 (Quectel)",
+  "ZXIC（已验证平台）": "ZXIC (verified platform)",
 
   // ---- Per-Profile phone display override ----
   "自定义手机号": "Custom Phone Number",
