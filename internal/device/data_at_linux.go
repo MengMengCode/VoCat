@@ -584,6 +584,7 @@ func (session *linuxATHostDataSession) applyEvent(values map[string]string) {
 			session.lease = nil
 			session.lastErr = err
 			session.mu.Unlock()
+			session.firstOnce.Do(func() { close(session.firstLease) })
 			return
 		}
 		session.mu.Lock()
@@ -613,6 +614,7 @@ func (session *linuxATHostDataSession) setLeaseError(err error) {
 	session.mu.Lock()
 	session.lastErr = err
 	session.mu.Unlock()
+	session.firstOnce.Do(func() { close(session.firstLease) })
 }
 
 func (session *linuxATHostDataSession) waitFirstLease(ctx context.Context) error {

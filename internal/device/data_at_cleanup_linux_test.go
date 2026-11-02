@@ -12,6 +12,30 @@ import (
 	"time"
 )
 
+func TestATHostFirstLeaseFailureReturnsWithoutWaitingForTimeout(t *testing.T) {
+	for _, failure := range []string{"invalid lease", "host configuration"} {
+		t.Run(failure, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				session, runner, _ := newTestATHostSession(t, "enx-test")
+				values := map[string]string{"event": "bound", "ip": "192.0.2.10", "subnet": "255.255.255.0"}
+				if failure == "invalid lease" {
+					values["subnet"] = "invalid"
+				} else {
+					runner.failNextCommand()
+				}
+				session.handleLeaseEvent(values)
+				started := time.Now()
+				if err := session.awaitFirstLease(context.Background()); err == nil {
+					t.Fatal("failed first lease was accepted")
+				}
+				if time.Since(started) != 0 {
+					t.Fatalf("first-lease failure waited %s", time.Since(started))
+				}
+			})
+		})
+	}
+}
+
 func TestATHostCloseUsesIndependentCleanupAfterCallerDeadline(t *testing.T) {
 	session, runner, _ := newTestATHostSession(t, "enx-test")
 	session.background, session.cancel = context.WithCancel(context.Background())
