@@ -88,9 +88,8 @@ type ATVendorProfile struct {
 	// the command answer a vendor "not recognized" error, so their profile
 	// goes straight to the standards-based EF_DIR discovery.
 	CUADDiscovery bool
-	// ToleratePDPInventoryRefusal degrades a failed AT+CGACT? inventory to
-	// "no active contexts" instead of failing the radio phase: some firmware
-	// refuses the query while the radio is off.
+	// ToleratePDPInventoryRefusal accepts the ZXIC +CME ERROR: 148 refusal
+	// only when CFUN=4 has been verified. Other failures remain errors.
 	ToleratePDPInventoryRefusal bool
 }
 
@@ -779,20 +778,9 @@ func (adapter *atModemAdapter) Snapshot(
 	if err != nil {
 		return RadioSnapshot{}, err
 	}
-	active, err := adapter.readActiveCIDs(ctx, deviceID)
+	active, err := adapter.readActiveCIDsForMode(ctx, deviceID, mode)
 	if err != nil {
-		if !adapter.vendor.ToleratePDPInventoryRefusal {
-			return RadioSnapshot{}, err
-		}
-		// Some firmware refuses the PDP inventory while the radio is off
-		// (the ZXIC platform answers vendor +CME ERROR: 148), which wedged
-		// the whole VoWiFi enable at access_ready. The inventory only feeds
-		// a checkpoint that never drives restoration (RestoreCellularData
-		// is false by default) and RF-off implies no active PDP, so degrade
-		// to "no active contexts" instead of failing the phase. The
-		// operating-mode read above still proves the control channel is
-		// alive.
-		active = nil
+		return RadioSnapshot{}, err
 	}
 	adapter.mu.Lock()
 	adapter.checkpoints[deviceID] = atRadioCheckpoint{
@@ -815,17 +803,9 @@ func (adapter *atModemAdapter) StopCellularData(
 	ctx context.Context,
 	deviceID string,
 ) error {
-	active, err := adapter.readActiveCIDs(ctx, deviceID)
+	active, err := adapter.readActiveCIDsForMode(ctx, deviceID, -1)
 	if err != nil {
-		if !adapter.vendor.ToleratePDPInventoryRefusal {
-			return err
-		}
-		// With the radio already off the firmware refuses the PDP query,
-		// and without an inventory there is nothing to deactivate — the
-		// modem-side PDN is torn down by the RF-off transition itself.
-		// Vendor profiles that answer the query keep the strict
-		// deactivate-and-verify path below.
-		return nil
+		return err
 	}
 	for _, cid := range active {
 		if _, err := adapter.execute(
@@ -836,7 +816,7 @@ func (adapter *atModemAdapter) StopCellularData(
 			return fmt.Errorf("deactivate PDP context %d: %w", cid, err)
 		}
 	}
-	remaining, err := adapter.readActiveCIDs(ctx, deviceID)
+	remaining, err := adapter.readActiveCIDsForMode(ctx, deviceID, -1)
 	if err != nil {
 		return err
 	}
@@ -929,6 +909,7 @@ func (adapter *atModemAdapter) Restore(
 	if err := adapter.reconcileActiveCIDs(
 		ctx,
 		deviceID,
+		currentMode,
 		desiredCIDs,
 	); err != nil {
 		return err
@@ -942,9 +923,10 @@ func (adapter *atModemAdapter) Restore(
 func (adapter *atModemAdapter) reconcileActiveCIDs(
 	ctx context.Context,
 	deviceID string,
+	mode int,
 	desired []int,
 ) error {
-	current, err := adapter.readActiveCIDs(ctx, deviceID)
+	current, err := adapter.readActiveCIDsForMode(ctx, deviceID, mode)
 	if err != nil {
 		return err
 	}
@@ -974,7 +956,7 @@ func (adapter *atModemAdapter) reconcileActiveCIDs(
 			return fmt.Errorf("restore PDP context %d: %w", cid, err)
 		}
 	}
-	verified, err := adapter.readActiveCIDs(ctx, deviceID)
+	verified, err := adapter.readActiveCIDsForMode(ctx, deviceID, mode)
 	if err != nil {
 		return err
 	}
@@ -1036,6 +1018,33 @@ func (adapter *atModemAdapter) readActiveCIDs(
 	}
 	sort.Ints(active)
 	return uniqueIntegers(active), nil
+}
+
+// A negative mode requires a fresh CFUN query before accepting a refusal.
+// CFUN=4 is the hardware-verified state where ZXIC cannot inventory PDPs;
+// cancellation, transport failures and online/unknown states stay fail-closed.
+func (adapter *atModemAdapter) readActiveCIDsForMode(ctx context.Context, deviceID string, mode int) ([]int, error) {
+	active, err := adapter.readActiveCIDs(ctx, deviceID)
+	if err != nil && ctx.Err() != nil {
+		return nil, errors.Join(err, ctx.Err())
+	}
+	var commandErr *modem.CommandError
+	if !adapter.vendor.ToleratePDPInventoryRefusal ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		!errors.As(err, &commandErr) || commandErr.Command != "AT+CGACT?" || commandErr.Final != "+CME ERROR: 148" {
+		return active, err
+	}
+	if mode < 0 {
+		var modeErr error
+		mode, modeErr = adapter.readOperatingMode(ctx, deviceID)
+		if modeErr != nil {
+			return nil, errors.Join(err, modeErr)
+		}
+	}
+	if mode == 4 {
+		return nil, nil
+	}
+	return nil, err
 }
 
 func (adapter *atModemAdapter) bindingFor(

@@ -361,6 +361,41 @@ func TestZXICVoWiFiFailureDoesNotRestoreRFOrCellularData(t *testing.T) {
 	})
 }
 
+func TestZXICVoWiFiDisableAcceptsVerifiedRFOffInventoryRefusal(t *testing.T) {
+	steps := zxicE2EEnableTranscript(t, false)
+	// Exercise the RF-off refusal in StopCellularData as well as Restore.
+	steps = append(steps[:5], append([]ec20TranscriptStep{
+		{command: "AT+CGACT?", err: zxicVendorBusy("AT+CGACT?")},
+		{command: "AT+CFUN?", lines: []string{"+CFUN: 4"}},
+		{command: "AT+CGACT?", err: zxicVendorBusy("AT+CGACT?")},
+		{command: "AT+CFUN?", lines: []string{"+CFUN: 4"}},
+	}, steps[8:]...)...)
+	steps = append(steps,
+		ec20TranscriptStep{command: "AT+CFUN?", lines: []string{"+CFUN: 4"}},
+		ec20TranscriptStep{command: "AT+CFUN?", lines: []string{"+CFUN: 4"}},
+		ec20TranscriptStep{command: "AT+CGACT?", err: zxicVendorBusy("AT+CGACT?")},
+		ec20TranscriptStep{command: "AT+CGACT?", err: zxicVendorBusy("AT+CGACT?")},
+	)
+	environment := newFakeEnvironment()
+	executor := newZXICE2EExecutor(t, steps)
+	orchestrator, adapter := newZXICVoWiFiTestOrchestrator(t, environment, executor, zxicE2ETunnel{environment: environment})
+	adapter.options.PureAirplanePolicy = func(string) bool { return true }
+	if state, err := orchestrator.Enable(context.Background()); err != nil || state.Phase != PhaseSMSReady {
+		t.Fatalf("Enable = %+v, %v", state, err)
+	}
+	if state, err := orchestrator.Disable(context.Background()); err != nil || state.Phase != PhaseIdle || len(state.CleanupErrors) != 0 {
+		t.Fatalf("Disable = %+v, %v", state, err)
+	}
+	adapter.mu.Lock()
+	_, retained := adapter.checkpoints["zxic-family"]
+	adapter.mu.Unlock()
+	if retained {
+		t.Fatal("radio checkpoint retained after cleanup")
+	}
+	executor.assertDone()
+	executor.assertAbsent(t, "AT+CFUN=1", "AT+CGACT=1,1")
+}
+
 func containsEvent(events []string, needle string) bool {
 	for _, event := range events {
 		if strings.Contains(event, needle) {

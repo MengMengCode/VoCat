@@ -449,7 +449,9 @@ func TestTelegramTimedCellularCallUsesATDCLCCAndATH(t *testing.T) {
 		}
 	}}
 	bot := &telegramBot{server: &Server{devices: devices}}
-	result, err := bot.executeTimedCellularCall(context.Background(), telegramRuntimeConfig{}, telegramPendingAction{
+	// Reject notification delivery locally so network latency cannot consume
+	// the short call duration this AT transcript exercises.
+	result, err := bot.executeTimedCellularCall(context.Background(), telegramRuntimeConfig{BaseURL: "://invalid"}, telegramPendingAction{
 		DeviceID: "EC20", Argument: "+447700900123", Duration: 20 * time.Millisecond,
 	}, "physical")
 	if err != nil || !strings.Contains(result, "正在拨号") {

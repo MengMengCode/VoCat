@@ -1014,14 +1014,13 @@ func configureVoWiFiRuntime(
 			if err != nil {
 				return nil, fmt.Errorf("load device %q VoWiFi config: %w", deviceID, err)
 			}
-			adapter := vowifiDeviceAdapter(ec20Adapter)
-			if deviceConfig.DeviceType == store.DeviceTypeUSBSIMReader {
-				adapter = pcscAdapter
-			} else if deviceConfig.DeviceType == store.DeviceTypeWiFi410 {
-				adapter = nativeQMIAdapter
-			} else if deviceConfig.DeviceType == store.DeviceTypeZXIC {
-				adapter = zxicAdapter
-			}
+			adapter := voWiFiAdapterForDevice(deviceConfig.DeviceType, func(lookupContext context.Context) (device.Device, error) {
+				physicalID, err := integration.ResolvePhysicalID(lookupContext, database, deviceManager, deviceConfig.ID)
+				if err != nil {
+					return device.Device{}, err
+				}
+				return deviceManager.Get(physicalID)
+			}, ec20Adapter, zxicAdapter, pcscAdapter, nativeQMIAdapter)
 			return newVoWiFiOrchestrator(factoryContext, deviceConfig, database, adapter, logger, onIncomingCall)
 		},
 	})
