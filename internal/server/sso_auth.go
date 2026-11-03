@@ -32,10 +32,12 @@ type ssoRateLimiter struct {
 	windows map[string]ssoRateWindow
 }
 
+// newSSORateLimiter creates independent in-memory rate windows for SSO starts and management actions.
 func newSSORateLimiter() *ssoRateLimiter {
 	return &ssoRateLimiter{windows: make(map[string]ssoRateWindow)}
 }
 
+// allow prunes expired windows and admits requests only while the key remains below its per-minute limit.
 func (limiter *ssoRateLimiter) allow(key string, limit int) bool {
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
@@ -99,6 +101,7 @@ func (s *Server) requireBrowserSession(w http.ResponseWriter, r *http.Request) (
 	return session, true
 }
 
+// handleAuthProviders exposes only enabled SSO capability and its display label, without configuration or secrets.
 func (s *Server) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodGet) {
@@ -116,6 +119,7 @@ func (s *Server) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"sso": capability}})
 }
 
+// handleSSOStart rate-limits anonymous login starts and creates a browser-associated authorization redirect.
 func (s *Server) handleSSOStart(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -152,6 +156,7 @@ func (s *Server) handleSSOStart(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, started.AuthorizationURL, http.StatusFound)
 }
 
+// allowSSOManagement independently limits provider checks and binding starts by client IP and browser session.
 func (s *Server) allowSSOManagement(w http.ResponseWriter, r *http.Request, session auth.AuthenticatedSession, operation string) bool {
 	ip := s.currentAccessConfig().clientIP(r).String()
 	if !s.ssoLimiter.allow(operation+":ip:"+ip, ssoManagePerMinute) || !s.ssoLimiter.allow(operation+":session:"+hex.EncodeToString(session.TokenHash()), ssoManagePerMinute) {
@@ -162,6 +167,7 @@ func (s *Server) allowSSOManagement(w http.ResponseWriter, r *http.Request, sess
 	return true
 }
 
+// handleSSOBind requires session-bound CSRF and a saved revision before starting an administrator identity binding.
 func (s *Server) handleSSOBind(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -193,6 +199,7 @@ func (s *Server) handleSSOBind(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"authorization_url": started.AuthorizationURL}})
 }
 
+// handleSSOUnbind removes the binding at the expected revision and clears credentials if the current SSO session was revoked.
 func (s *Server) handleSSOUnbind(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodDelete) {
 		return
@@ -220,6 +227,8 @@ func (s *Server) handleSSOUnbind(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"reauthentication_required": revoked}})
 }
 
+// handleSSOCallback validates browser possession, claims one flow, and verifies the external identity.
+// Binding or login authorization is rechecked atomically before any local session credentials are issued.
 func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -317,6 +326,7 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, sso.SafeRedirect(flow.ReturnPath, ""), http.StatusSeeOther)
 }
 
+// redirectSSOError returns fixed callback categories to the appropriate local page and bounds failure audit events.
 func (s *Server) redirectSSOError(w http.ResponseWriter, r *http.Request, flow *store.SSOFlow, category string) {
 	query := url.Values{"sso_error": {category}}
 	path := "/login"
@@ -334,6 +344,7 @@ func (s *Server) redirectSSOError(w http.ResponseWriter, r *http.Request, flow *
 	http.Redirect(w, r, path+"?"+query.Encode(), http.StatusSeeOther)
 }
 
+// ssoCallbackError maps internal failures to safe callback categories without exposing provider response bodies.
 func ssoCallbackError(err error) string {
 	switch {
 	case errors.Is(err, store.ErrSSOConfigChanged), errors.Is(err, store.ErrSSODisabled):
@@ -353,6 +364,7 @@ func ssoCallbackError(err error) string {
 	}
 }
 
+// setSSOFlowCookie sets or clears a flow-scoped HttpOnly Lax cookie so cross-site callbacks can prove browser possession.
 func (s *Server) setSSOFlowCookie(w http.ResponseWriter, flow store.SSOFlow, token string, clear bool) {
 	maxAge := int(time.Until(flow.ExpiresAt).Seconds())
 	if maxAge < 1 {
@@ -367,10 +379,12 @@ func (s *Server) setSSOFlowCookie(w http.ResponseWriter, flow store.SSOFlow, tok
 	http.SetCookie(w, cookie)
 }
 
+// ssoCookiePolicyAllows requires secure primary cookies when the configured SSO callback uses HTTPS.
 func (s *Server) ssoCookiePolicyAllows(origin string) bool {
 	return !strings.HasPrefix(origin, "https://") || s.secureCookies
 }
 
+// ssoBrowserFlows extracts a bounded set of plausible flow IDs from browser cookies for per-browser quotas.
 func (s *Server) ssoBrowserFlows(r *http.Request) []string {
 	ids := make([]string, 0, store.SSOMaxBrowserFlows)
 	for _, cookie := range r.Cookies() {
@@ -384,6 +398,7 @@ func (s *Server) ssoBrowserFlows(r *http.Request) []string {
 	return ids
 }
 
+// auditSSO records provider kind, revision, actor, and outcome without authorization codes, flow secrets, or provider tokens.
 func (s *Server) auditSSO(r *http.Request, actor, action string, flow store.SSOFlow, outcome string) {
 	kind := "changed"
 	if snapshot, err := s.sso.Snapshot(r.Context()); err == nil && snapshot.Config.ProviderInstanceID == flow.ProviderInstanceID {
@@ -397,4 +412,5 @@ func (s *Server) auditSSO(r *http.Request, actor, action string, flow store.SSOF
 	s.recordAudit(r.Context(), actor, action, "sso", fmt.Sprintf("%s:%d", kind, flow.ConfigRevision), outcome, requestRemoteHost(r))
 }
 
+// StartSSOCleanup runs expired-flow cleanup until the application lifetime context ends.
 func (s *Server) StartSSOCleanup(ctx context.Context) { go s.sso.RunCleanup(ctx) }

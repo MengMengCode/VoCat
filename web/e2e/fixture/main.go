@@ -77,12 +77,15 @@ type fixture struct {
 	sequence  int
 }
 
+// main reports fixture startup or serving failures to the browser-test runner.
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}
 }
 
+// run starts isolated TLS application and identity-provider servers with a fixture-only trusted transport.
+// Temporary databases and listeners are released when the test process terminates.
 func run() error {
 	certificate, roots, err := testCertificate()
 	if err != nil {
@@ -146,6 +149,7 @@ func run() error {
 	return nil
 }
 
+// reset creates a fresh application database and clears provider authorization state and captured statistics.
 func (f *fixture) reset() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -177,6 +181,7 @@ func (f *fixture) reset() error {
 	return nil
 }
 
+// serveApp dispatches real application requests and header-protected fixture controls, capturing callback cookie behavior.
 func (f *fixture) serveApp(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/__e2e/") {
 		if r.URL.Path == "/__e2e/ready" {
@@ -227,6 +232,7 @@ type callbackWriter struct {
 	trace *callbackTrace
 }
 
+// WriteHeader records callback status and deleted cookie names before forwarding the response.
 func (w *callbackWriter) WriteHeader(status int) {
 	w.trace.Status = status
 	response := &http.Response{Header: w.Header()}
@@ -240,6 +246,7 @@ func (w *callbackWriter) WriteHeader(status int) {
 
 var authorizationPage = template.Must(template.New("authorize").Parse(`<!doctype html><html lang="en"><meta name="viewport" content="width=device-width"><title>Test Pocket ID</title><body style="font-family:system-ui;max-width:32rem;margin:3rem auto;padding:1rem"><h1>Test Pocket ID</h1><p>Continue as the test administrator.</p><form method="post" action="/decision"><input type="hidden" name="request" value="{{.}}"><button name="decision" value="allow">Authorize test account</button> <button name="decision" value="cancel">Cancel authorization</button></form></body></html>`))
 
+// serveIDP simulates discovery, signing keys, user authorization, cancellation, and one-use PKCE token exchange.
 func (f *fixture) serveIDP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/.well-known/openid-configuration":
@@ -321,6 +328,7 @@ func (f *fixture) serveIDP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// signedToken creates an RS256 identity token using the fixture signing key and supplied claims.
 func (f *fixture) signedToken(claims map[string]any) (string, error) {
 	header, _ := json.Marshal(map[string]string{"typ": "JWT", "alg": "RS256", "kid": "browser-test-key"})
 	body, err := json.Marshal(claims)
@@ -336,10 +344,13 @@ func (f *fixture) signedToken(claims map[string]any) (string, error) {
 	return input + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
+// jsonResponse serializes fixture responses as JSON.
 func jsonResponse(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
 }
+
+// randomID creates an unpredictable URL-safe identifier for fixture authorization requests and codes.
 func randomID() string {
 	var value [32]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -348,6 +359,7 @@ func randomID() string {
 	return base64.RawURLEncoding.EncodeToString(value[:])
 }
 
+// testCertificate generates a short-lived local CA and server certificate covering only fixture hosts and loopback.
 func testCertificate() (tls.Certificate, *x509.CertPool, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

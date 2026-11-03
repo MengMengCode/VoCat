@@ -54,6 +54,7 @@ function RequireAuth({ children }: { children: ReactElement }) {
   return children;
 }
 
+/** Redirect authenticated visitors only to safe local destinations; otherwise show the login shell. */
 function LoginLayout({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: () => void }) {
   const { ready, isAuthenticated } = useAuth();
   const location = useLocation();

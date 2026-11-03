@@ -109,6 +109,7 @@ type Server struct {
 	cellularData              *cellularDataRuntime
 }
 
+// New validates server dependencies, initializes services and middleware, and registers application routes.
 func New(options Options) (*Server, error) {
 	if options.Store == nil {
 		return nil, errors.New("server: store is required")

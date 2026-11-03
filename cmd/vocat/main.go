@@ -416,6 +416,8 @@ func splitSubcommand(args []string) (string, []string) {
 	return args[0], args[1:]
 }
 
+// run loads application configuration, initializes persistent services, and serves HTTP for the process lifetime.
+// Background workers, including SSO flow cleanup, share the application shutdown context.
 func run(logger *slog.Logger, logs *loghub.Hub) error {
 	cfg, err := config.Load()
 	if err != nil {

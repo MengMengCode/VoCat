@@ -6,10 +6,12 @@ const FIXTURE = "https://127.0.0.1:17475";
 const PASSWORD = "browser-test-local-password";
 const SECRET = "browser-test-client-secret";
 
+/** Accept the first-run disclaimer in each browser context so tests exercise authentication directly. */
 async function prepare(context: BrowserContext) {
   await context.addInitScript(() => localStorage.setItem("vocat_disclaimer_agreed_at", String(Date.now())));
 }
 
+/** Sign in through the real local login form and check the complete return destination. */
 async function passwordLogin(page: Page, target = "/settings") {
   await page.goto(`/login?${new URLSearchParams({ redirect: target })}`);
   await page.locator('input[autocomplete="username"]').fill("admin");
@@ -18,12 +20,15 @@ async function passwordLogin(page: Page, target = "/settings") {
   await expect(page).toHaveURL(APP + target);
 }
 
+/** Locate the accessible SSO settings region independently of surrounding settings cards. */
 function card(page: Page) { return page.getByRole("region", { name: "Single sign-on (SSO)", exact: true }); }
 
+/** Wait for the saved provider settings to finish loading. */
 async function settings(page: Page) {
   await expect(card(page).getByLabel("Identity provider", { exact: true })).toHaveValue("pocketid");
 }
 
+/** Save the SSO form and inspect its response unless revocation immediately replaces the document. */
 async function save(page: Page, navigates = false) {
   const response = page.waitForResponse((response) => response.url() === APP + "/api/settings/sso" && response.request().method() === "PUT");
   await card(page).getByRole("button", { name: "Save SSO settings", exact: true }).click();
@@ -35,11 +40,13 @@ async function save(page: Page, navigates = false) {
   return navigates ? undefined : (await result.json()).data;
 }
 
+/** Complete authorization through the separate fixture identity-provider site. */
 async function approve(page: Page) {
   await expect(page).toHaveURL(new RegExp(`^${IDP.replaceAll(".", "\\.")}/authorize\\?`));
   await page.getByRole("button", { name: "Authorize test account", exact: true }).click();
 }
 
+/** Inspect the current browser session using its real application cookies. */
 async function checkSession(page: Page) {
   return page.evaluate(async () => {
     const response = await fetch("/api/auth/session", { credentials: "include" });

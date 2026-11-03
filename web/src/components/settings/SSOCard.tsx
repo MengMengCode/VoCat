@@ -18,6 +18,7 @@ import { copyText, Field, PasswordInput } from "./controls";
 const SELECT_CLASS = "h-8 w-full rounded-lg border border-[#dcdfe6] bg-white px-3 text-sm text-gray-900 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/25 disabled:opacity-60 dark:border-white/15 dark:bg-gray-900 dark:text-gray-100";
 const EMPTY_BINDING = { bound: false, displayName: "", email: "", createdAt: null, lastLoginAt: null };
 
+/** Manage saved SSO settings, account binding, and readiness checks while keeping unsaved edits local. */
 export function SSOCard() {
   const { t, lang } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -32,6 +33,7 @@ export function SSOCard() {
   const [operationError, setOperationError] = useState<string | null>(null);
   const [callbackNotice, setCallbackNotice] = useState<{ error: boolean; text: string } | null>(null);
 
+  /** Apply authoritative settings and clear transient secret and readiness state. */
   const applySaved = useCallback((data: SSOSettings) => {
     setSaved(data);
     const input = ssoConfigInput({ ...defaultSSOConfig(), ...data.config });
@@ -41,6 +43,7 @@ export function SSOCard() {
     setCheckedRevision(null);
   }, []);
 
+  /** Load saved settings and expose a retryable error without discarding the settings page. */
   const load = useCallback(async () => {
     setLoading(true);
     setLoadFailed(false);
@@ -77,11 +80,13 @@ export function SSOCard() {
   const callbackPreview = ssoCallbackPreview(draft.publicOrigin);
   const originChanged = revision > 0 && callbackPreview !== ssoCallbackPreview(baseline.publicOrigin);
 
+  /** Apply a local form change and clear the previous operation error. */
   function update(patch: Partial<SSOConfigInput>) {
     setOperationError(null);
     setDraft((current) => ({ ...current, ...patch }));
   }
 
+  /** Translate known operation errors without displaying raw server or provider responses. */
   function fail(error: unknown) {
     const code = error instanceof ApiError ? error.code : error instanceof Error ? error.message : "";
     const translated: Record<string, string> = {
@@ -100,6 +105,7 @@ export function SSOCard() {
     setOperationError(Object.hasOwn(translated, code) ? translated[code] : "SSO 操作未完成，请检查配置后重试。");
   }
 
+  /** Reset client authentication and preserve the successful operation notice across document navigation. */
   function reauthenticate(result: "config_saved" | "unbound") {
     notifyUnauthorized();
     // A document navigation also resets pending protected-page requests. A
@@ -107,6 +113,7 @@ export function SSOCard() {
     window.location.replace(`/login?${new URLSearchParams({ sso_result: result, redirect: "/settings" }).toString()}`);
   }
 
+  /** Confirm identity-source resets and submit writable settings against the saved revision. */
   async function save() {
     if (!saved) return;
     setOperationError(null);
@@ -138,6 +145,7 @@ export function SSOCard() {
     }
   }
 
+  /** Check only the unmodified saved revision and clear stale readiness results on failure. */
   async function check() {
     if (!canUseSaved) return;
     setWorking("check");
@@ -154,6 +162,7 @@ export function SSOCard() {
     }
   }
 
+  /** Start binding from saved settings and navigate to the server-generated authorization address. */
   async function bind() {
     if (!canUseSaved || binding.bound) return;
     setWorking("bind");
@@ -169,6 +178,7 @@ export function SSOCard() {
     }
   }
 
+  /** Confirm account removal and refresh settings or reauthenticate after session revocation. */
   async function unbind() {
     if (!saved || !binding.bound || !await confirmDialog(
       t("解绑会立即关闭 SSO 登录，并撤销此外部账号建立的所有 SSO 会话。"),
@@ -189,12 +199,14 @@ export function SSOCard() {
     }
   }
 
+  /** Render a translated provider field that updates the local draft and respects the busy state. */
   function textField(label: string, key: "displayName" | "publicOrigin" | "clientId" | "issuerUrl" | "authUrl" | "tokenUrl" | "userInfoUrl" | "userIdField", placeholder?: string, hint?: string) {
     return <Field label={t(label)} hint={hint}>
       <Input aria-label={t(label)} value={draft[key]} disabled={busy} placeholder={placeholder} autoComplete="off" onChange={(event) => update({ [key]: event.target.value })} />
     </Field>;
   }
 
+  /** Format binding timestamps in the selected locale, including the never-used state. */
   function time(value: string | null) {
     if (!value) return t("从未使用");
     return new Date(value).toLocaleString(lang === "zh" ? "zh-CN" : "en-US");

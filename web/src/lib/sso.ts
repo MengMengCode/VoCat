@@ -1,5 +1,6 @@
 import type { SSOConfigInput, SSOProviderKind, SSOSaveRequest } from "../types";
 
+/** Create a disabled provider draft with Pocket ID defaults and no credentials. */
 export function defaultSSOConfig(origin = ""): SSOConfigInput {
   return {
     enabled: false,
@@ -67,6 +68,7 @@ export function ssoConfigInput(value: SSOConfigInput): SSOConfigInput {
   return common;
 }
 
+/** Reset provider-specific fields and credentials-related choices when the identity provider changes. */
 export function changeSSOProvider(value: SSOConfigInput, kind: SSOProviderKind): SSOConfigInput {
   return {
     ...defaultSSOConfig(value.publicOrigin),
@@ -78,6 +80,7 @@ export function changeSSOProvider(value: SSOConfigInput, kind: SSOProviderKind):
   };
 }
 
+/** Compare fields that define an identity namespace, ignoring display and transport settings. */
 export function ssoIdentitySourceChanged(before: SSOConfigInput, after: SSOConfigInput): boolean {
   if (before.kind !== after.kind || before.clientId !== after.clientId) return true;
   if (after.kind === "pocketid") return before.issuerUrl !== after.issuerUrl;
@@ -88,6 +91,7 @@ export function ssoIdentitySourceChanged(before: SSOConfigInput, after: SSOConfi
   return false;
 }
 
+/** Build a revision-checked save request, omitting an unchanged secret and rejecting mask values. */
 export function buildSSOSaveRequest(
   config: SSOConfigInput,
   expectedRevision: number,
@@ -120,6 +124,7 @@ export const SSO_RESULT_MESSAGES: Record<string, string> = {
   config_saved: "SSO 配置已保存，请重新登录。",
 };
 
+/** Map callback categories through an own-property whitelist to safe display messages. */
 export function ssoErrorMessage(code: string): string {
   return Object.hasOwn(SSO_ERROR_MESSAGES, code) ? SSO_ERROR_MESSAGES[code] : "SSO 操作未完成，请重新发起。";
 }

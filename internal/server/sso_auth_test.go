@@ -31,6 +31,7 @@ import (
 
 type ssoTestTransport func(*http.Request) (*http.Response, error)
 
+// RoundTrip adapts a fixture function to the HTTP transport interface.
 func (transport ssoTestTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return transport(r)
 }
@@ -44,6 +45,7 @@ type ssoHTTPFixture struct {
 	providerClient *http.Client
 }
 
+// newSSOHTTPFixture creates isolated storage, local authentication, and a deterministic generic OAuth2 provider.
 func newSSOHTTPFixture(t *testing.T) *ssoHTTPFixture {
 	t.Helper()
 	database, err := store.Open(context.Background(), ":memory:")
@@ -92,6 +94,7 @@ func newSSOHTTPFixture(t *testing.T) *ssoHTTPFixture {
 	return &ssoHTTPFixture{server: httpServer, store: database, auth: authentication, handler: handler, providerClient: providerClient, client: &http.Client{Jar: jar, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
+// request sends a fixture HTTP request with explicit body, CSRF, and cookies and decodes its JSON response.
 func (fixture *ssoHTTPFixture) request(t *testing.T, client *http.Client, method, path string, payload any, csrf string, cookies ...*http.Cookie) (*http.Response, map[string]any) {
 	t.Helper()
 	var reader io.Reader
@@ -130,6 +133,7 @@ func (fixture *ssoHTTPFixture) request(t *testing.T, client *http.Client, method
 	return response, body
 }
 
+// login establishes a local password session and returns its matching CSRF token.
 func (fixture *ssoHTTPFixture) login(t *testing.T) string {
 	t.Helper()
 	response, body := fixture.request(t, fixture.client, "POST", "/api/auth/login", map[string]any{"username": "admin", "password": "correct-password"}, "")
@@ -139,6 +143,7 @@ func (fixture *ssoHTTPFixture) login(t *testing.T) string {
 	return body["data"].(map[string]any)["csrf_token"].(string)
 }
 
+// config returns a disabled generic provider draft using the fixture origin and endpoints.
 func (fixture *ssoHTTPFixture) config() map[string]any {
 	return map[string]any{"kind": "generic", "display_name": "Fixture", "enabled": false,
 		"public_origin": fixture.server.URL, "client_id": "fixture-client", "auth_url": "https://id.example.test/authorize",
@@ -146,6 +151,7 @@ func (fixture *ssoHTTPFixture) config() map[string]any {
 		"scopes": []string{"profile"}, "token_auth_method": "client_secret_post", "pkce_mode": "s256"}
 }
 
+// ssoFlowCookie locates the callback cookie and checks its path, SameSite, and HttpOnly boundaries.
 func ssoFlowCookie(t *testing.T, response *http.Response) *http.Cookie {
 	t.Helper()
 	for _, cookie := range response.Cookies() {
@@ -160,6 +166,7 @@ func ssoFlowCookie(t *testing.T, response *http.Response) *http.Cookie {
 	return nil
 }
 
+// assertSSOResponseFields checks the public response contract contains exactly the allowed fields.
 func assertSSOResponseFields(t *testing.T, data map[string]any, fields ...string) {
 	t.Helper()
 	if len(data) != len(fields) {
@@ -172,6 +179,7 @@ func assertSSOResponseFields(t *testing.T, data map[string]any, fields ...string
 	}
 }
 
+// TestSSOHTTPBindLoginAndRevocation covers cross-site binding, login, replay, selective revocation, and secure cookie policy.
 func TestSSOHTTPBindLoginAndRevocation(t *testing.T) {
 	f := newSSOHTTPFixture(t)
 	ctx := context.Background()
@@ -389,6 +397,7 @@ func TestSSOMutationsRejectCrossSessionCSRF(t *testing.T) {
 	}
 }
 
+// TestSSOCredentialManagementRejectsBearerAndKeepsSession rejects mixed bearer/browser management without revoking the browser session.
 func TestSSOCredentialManagementRejectsBearerAndKeepsSession(t *testing.T) {
 	f := newSSOHTTPFixture(t)
 	csrf := f.login(t)
@@ -418,6 +427,7 @@ func TestSSOCredentialManagementRejectsBearerAndKeepsSession(t *testing.T) {
 	}
 }
 
+// TestSSORemovedManagementFieldsRejectedWithoutChangingState checks obsolete request fields cannot alter configuration or bindings.
 func TestSSORemovedManagementFieldsRejectedWithoutChangingState(t *testing.T) {
 	f := newSSOHTTPFixture(t)
 	csrf := f.login(t)
@@ -462,6 +472,7 @@ func TestSSORemovedManagementFieldsRejectedWithoutChangingState(t *testing.T) {
 	}
 }
 
+// TestSSOSecretAndRevisionRequestValidation rejects invalid secret updates, read-only fields, stale revisions, and insecure HTTPS activation.
 func TestSSOSecretAndRevisionRequestValidation(t *testing.T) {
 	f := newSSOHTTPFixture(t)
 	csrf := f.login(t)
@@ -494,6 +505,7 @@ func TestSSOSecretAndRevisionRequestValidation(t *testing.T) {
 	}
 }
 
+// TestSSOSettingsSaveExplicitPrivateBackendDraftWithoutConnectionOptions verifies offline draft saves and the supported field whitelist.
 func TestSSOSettingsSaveExplicitPrivateBackendDraftWithoutConnectionOptions(t *testing.T) {
 	f := newSSOHTTPFixture(t)
 	csrf := f.login(t)
@@ -528,6 +540,7 @@ func TestSSOSettingsSaveExplicitPrivateBackendDraftWithoutConnectionOptions(t *t
 	}
 }
 
+// TestSSOCheckFetchesDiscoveryAndJWKSWithoutBindingAnAccount checks readiness fetches metadata and keys without authenticating an identity.
 func TestSSOCheckFetchesDiscoveryAndJWKSWithoutBindingAnAccount(t *testing.T) {
 	f := newSSOHTTPFixture(t)
 	csrf := f.login(t)
@@ -607,6 +620,7 @@ func TestSSOCheckFetchesDiscoveryAndJWKSWithoutBindingAnAccount(t *testing.T) {
 	}
 }
 
+// TestSSOBindCallbackPreservesSameIdentityAndRejectsDifferentIdentity checks safe metadata refresh and account replacement rejection.
 func TestSSOBindCallbackPreservesSameIdentityAndRejectsDifferentIdentity(t *testing.T) {
 	f := newSSOHTTPFixture(t)
 	csrf := f.login(t)
@@ -669,6 +683,7 @@ func TestSSOBindCallbackPreservesSameIdentityAndRejectsDifferentIdentity(t *test
 	}
 }
 
+// TestSSOCallbackRechecksConfigAfterBlockedTokenExchange checks a concurrent settings update invalidates an in-flight callback.
 func TestSSOCallbackRechecksConfigAfterBlockedTokenExchange(t *testing.T) {
 	for _, purpose := range []string{"bind", "login"} {
 		t.Run(purpose, func(t *testing.T) {
@@ -765,6 +780,7 @@ func TestSSOCallbackRechecksConfigAfterBlockedTokenExchange(t *testing.T) {
 	}
 }
 
+// TestSSORoutesKeepNetworkPolicyAndIndependentRateLimits checks SSO routes retain network access policy and independent request quotas.
 func TestSSORoutesKeepNetworkPolicyAndIndependentRateLimits(t *testing.T) {
 	f := newSSOHTTPFixture(t)
 	for _, path := range []string{"/api/auth/providers", "/api/auth/sso/start", "/api/auth/sso/callback", "/api/settings/sso"} {
