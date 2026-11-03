@@ -95,10 +95,12 @@ func (set *callbackKeySet) fetch(ctx context.Context) ([]jose.JSONWebKey, error)
 	keys := make([]jose.JSONWebKey, 0, len(document.Keys))
 	for _, raw := range document.Keys {
 		var metadata struct {
-			Algorithm string `json:"alg"`
-			Use       string `json:"use"`
+			Algorithm     string          `json:"alg"`
+			Use           string          `json:"use"`
+			KeyOperations json.RawMessage `json:"key_ops"`
 		}
-		if json.Unmarshal(raw, &metadata) != nil || (metadata.Use != "" && metadata.Use != "sig") {
+		if json.Unmarshal(raw, &metadata) != nil || (metadata.Use != "" && metadata.Use != "sig") ||
+			!keyOperationsPermitVerify(metadata.KeyOperations, metadata.Use) {
 			continue
 		}
 		if metadata.Algorithm != "" {
@@ -127,6 +129,37 @@ func (set *callbackKeySet) fetch(ctx context.Context) ([]jose.JSONWebKey, error)
 		return nil, ErrProviderUnavailable
 	}
 	return keys, nil
+}
+
+// keyOperationsPermitVerify honors an explicit RFC 7517 key_ops restriction.
+// An omitted member is unrestricted; null, malformed, and non-verifying lists
+// do not authorize signature verification. go-jose does not retain this member.
+func keyOperationsPermitVerify(raw json.RawMessage, use string) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	var operations []string
+	if json.Unmarshal(raw, &operations) != nil {
+		return false
+	}
+	verify := false
+	seen := make(map[string]bool, len(operations))
+	for _, operation := range operations {
+		if operation == "" || seen[operation] {
+			return false
+		}
+		seen[operation] = true
+		if operation == "verify" {
+			verify = true
+		}
+		if use == "sig" {
+			switch operation {
+			case "encrypt", "decrypt", "wrapKey", "unwrapKey", "deriveKey", "deriveBits":
+				return false
+			}
+		}
+	}
+	return verify
 }
 
 // keySupportsAlgorithm requires a compatible public key family, EC curve, and any explicit algorithm tag.
