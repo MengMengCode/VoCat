@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 28
+const schemaVersion = 29
 
 var ErrNotFound = errors.New("store: not found")
 
@@ -39,11 +39,13 @@ type Admin struct {
 }
 
 type Session struct {
-	TokenHash []byte
-	CSRFHash  []byte
-	ExpiresAt time.Time
-	CreatedAt time.Time
-	Admin     Admin
+	TokenHash    []byte
+	CSRFHash     []byte
+	ExpiresAt    time.Time
+	CreatedAt    time.Time
+	LoginMethod  string
+	SSOBindingID string
+	Admin        Admin
 }
 
 // Open creates the parent directory, opens SQLite, applies safety pragmas and
@@ -86,6 +88,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		}
 	}
 	s := &Store{db: db}
+	if err := s.DeleteExpiredSSOFlows(ctx, time.Now()); err != nil {
+		return closeOnError(err)
+	}
 	// Captured before this process can save an SMS; see StartupSMSMessageID.
 	if s.startupSMSID, err = s.LatestSMSMessageID(ctx); err != nil {
 		return closeOnError(err)
@@ -111,6 +116,7 @@ func isFilesystemPath(path string) bool {
 	return path != ":memory:" && !strings.HasPrefix(path, "file:")
 }
 
+// migrate applies supported schema upgrades transactionally and rejects databases created by newer binaries.
 func migrate(ctx context.Context, db *sql.DB) error {
 	var version int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
@@ -140,7 +146,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 					(nextVersion == 19 && strings.Contains(statement, "ADD COLUMN")) ||
 					(nextVersion == 23 && strings.Contains(statement, "ADD COLUMN")) ||
 					(nextVersion == 24 && strings.Contains(statement, "ADD COLUMN mbn_profile")) ||
-					(nextVersion == 26 && strings.Contains(statement, "ADD COLUMN revert_profile"))
+					(nextVersion == 26 && strings.Contains(statement, "ADD COLUMN revert_profile")) ||
+					(nextVersion == 29 && strings.Contains(statement, "ADD COLUMN"))
 				if duplicateAdditiveColumn && strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 					continue
 				}
@@ -249,6 +256,9 @@ func (s *Store) SetAdmin(ctx context.Context, username string, passwordHash []by
 	if _, err := tx.ExecContext(ctx, "DELETE FROM api_tokens"); err != nil {
 		return fmt.Errorf("revoke api tokens after admin update: %w", err)
 	}
+	if err := invalidateSSOAfterAdminUpdate(ctx, tx); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit admin update: %w", err)
 	}
@@ -280,6 +290,7 @@ func (s *Store) CreateSession(
 	return nil
 }
 
+// SessionByTokenHash loads a live session, its login source, and its administrator by credential digest.
 func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Session, error) {
 	var session Session
 	var expiresAt int64
@@ -292,6 +303,8 @@ func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Sessi
 			s.csrf_hash,
 			s.expires_at,
 			s.created_at,
+			s.login_method,
+			COALESCE(s.sso_binding_id, ''),
 			a.id,
 			a.username,
 			a.created_at,
@@ -304,6 +317,8 @@ func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Sessi
 		&session.CSRFHash,
 		&expiresAt,
 		&createdAt,
+		&session.LoginMethod,
+		&session.SSOBindingID,
 		&session.Admin.ID,
 		&session.Admin.Username,
 		&adminCreatedAt,
