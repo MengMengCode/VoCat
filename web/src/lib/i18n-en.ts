@@ -12,6 +12,7 @@ export const EN_DICT: Record<string, string> = {
   "SSO 配置加载失败": "Failed to load SSO settings",
   "身份提供方": "Identity provider",
   "填写 Pocket ID 的实例地址": "Enter the Pocket ID instance URL",
+  "输入 Client ID": "Enter Client ID",
   "填写身份服务中为 VoCat 创建的客户端 ID": "Enter the client ID created for VoCat in your identity service",
   "登录按钮名称": "Sign-in button label",
   "使用当前访问入口完成登录；请在身份服务登记域名和内网地址各自的回调 URL。": "Sign-in uses the current browser entry. Register the callback URL for each domain and local address with your identity service.",
