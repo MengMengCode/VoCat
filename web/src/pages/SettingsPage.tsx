@@ -7,6 +7,7 @@ import { CardDecor, CardIcon, CardTitle, SecurityCard, SystemInfoCard } from "..
 import type { PasswordForm, UpdateInfo } from "../components/settings/Cards";
 import { NetworkAccessCard } from "../components/settings/NetworkAccessCard";
 import { ApiTokensCard } from "../components/settings/ApiTokensCard";
+import { SSOCard } from "../components/settings/SSOCard";
 import type { NetworkAccessForm } from "../components/settings/NetworkAccessCard";
 import { NotificationDeviceScope, SegmentedTabs } from "../components/settings/controls";
 import { tf, useI18n } from "../lib/i18n";
@@ -649,6 +650,7 @@ export default function SettingsPage() {
             </fieldset>
           )}
         </div>
+        <SSOCard />
       </div>
     </div>
   );

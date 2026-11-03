@@ -47,7 +47,7 @@ The backend is written in Go, the interface is built with React and TypeScript, 
 | Proxy routing | Upstream SOCKS routing, device bindings, country rules, TCP reachability checks, and UDP Associate checks for WiFi Calling data paths. |
 | Notifications | New inbound SMS forwarding through Telegram, Bark, email, Pushplus, and signed webhooks. Each SMS is delivered as an individual notification. |
 | Telegram bot | Device status, installed-profile listing and switching, WiFi Calling controls, and SMS sending. Sensitive actions require administrator confirmation. |
-| Operations | Authentication, CSRF protection, access policies, audit events, live logs, log retention, health checks, responsive layout, dark mode, and English/Chinese application UI. |
+| Operations | Password and SSO authentication (Pocket ID, GitHub, Generic OAuth2), CSRF protection, access policies, audit events, live logs, log retention, health checks, responsive layout, dark mode, and English/Chinese application UI. |
 | Distribution | Static Linux binaries, systemd installation script, self-update with SHA-256 verification, Docker image, GHCR publishing, and GitHub Actions release builds. |
 
 ## Supported hardware
@@ -279,6 +279,152 @@ database once with `vocat bootstrap-admin`; environment variables and JSON
 configuration cannot set or overwrite the administrator username or password.
 
 Do not store Telegram tokens, SMTP passwords, webhook secrets, SIM credentials, or other private data in the repository. Configure them through the application settings or protected environment files.
+
+## Single sign-on (SSO)
+
+VoCat supports Pocket ID through OpenID Connect, GitHub.com OAuth Apps, and
+Generic OAuth2 providers. Select one provider in **Settings → Single sign-on
+(SSO)**. SSO starts disabled and password login remains available. Sign in with
+the local administrator first, save a provider, and explicitly bind an external
+account before enabling SSO. Other external accounts cannot register or become
+administrators, including accounts sharing the bound account's email address.
+
+### Pocket ID
+
+1. Use an HTTPS origin for VoCat, such as `https://vocat.example.com`, and set
+   `VOCAT_SECURE_COOKIES=true`. In the SSO settings choose **Pocket ID**. The
+   public origin initially uses the current browser address; edit the visible
+   **VoCat public origin** field if necessary. The compact callback URL and Copy
+   button appear immediately, so the URL can be copied
+   before creating the OIDC client or saving any credentials:
+   `https://vocat.example.com/api/auth/sso/callback`.
+2. In Pocket ID create a separate **Confidential** OIDC client for VoCat. Register
+   the exact callback URL and verify that the intended user or group is allowed
+   to use this client. VoCat and Komari need separate clients and local sessions.
+3. In VoCat enter Pocket ID's exact public `APP_URL` as the Issuer, and enter the
+   Client ID and Client Secret issued for the client created in step 2. The
+   Client ID field includes a reminder of where to find this value.
+   Scopes and PKCE S256 are handled by VoCat.
+   Token authentication is selected from validated Discovery metadata, preferring
+   `client_secret_basic` over `client_secret_post`. Save while SSO remains disabled.
+   Origin edits update the displayed callback immediately; they take effect for
+   authorization after saving.
+4. Check the saved configuration; success displays **Configuration check passed**.
+   Then bind the account. Complete Pocket ID's Passkey login and consent, and
+   confirm the returned binding in VoCat.
+   Configuration checking validates metadata and connectivity; it cannot verify
+   a client secret or user authorization without this login.
+5. Enable SSO and save. Use a private browser window to verify SSO login, return
+   to the requested page, and the first state-changing request.
+
+The settings page shows the bound account and an unbind action. To change the
+external account, unbind it first, then bind the intended account and enable SSO
+again.
+
+The Issuer is matched exactly, including its path and trailing slash. Pocket ID
+login uses the verified ID Token's `issuer + sub`; a UserInfo endpoint or email
+claim is not required. Discovery and its authorization, Token and JWKS endpoints
+must use the configured Issuer's origin. Deployments using `INTERNAL_APP_URL`
+with a different backend origin are not supported in this release. Keep the
+public `APP_URL` as the Issuer. Existing explicitly
+configured authentication methods and scopes are preserved when saving.
+
+### GitHub and Generic OAuth2
+
+For GitHub, create an OAuth App on GitHub.com with the same exact callback URL,
+select **GitHub**, enter its Client ID and Secret, and follow the save, check,
+bind, enable sequence above. Endpoints are fixed to GitHub.com; the default
+scope is `read:user`, and PKCE S256 is required. The binding follows the stable
+GitHub numeric account ID, so changing a login name does not change the account.
+GitHub Enterprise is outside this release's scope.
+
+For Generic OAuth2, supply the authorization, Token, and UserInfo URLs in addition
+to the client credentials. Scopes, the top-level user ID field (default `id`),
+Token authentication and PKCE compatibility options are displayed when Generic
+OAuth2 is selected.
+UserInfo is requested with a Bearer access token. The ID must be a
+nonempty string or an integer; large integer IDs retain their exact value.
+The default Token authentication is `client_secret_post` and PKCE is S256.
+Disable PKCE only for a provider that lacks PKCE support.
+Generic OAuth2 does not perform OIDC ID Token verification.
+
+### Network, credentials and sessions
+
+VoCat's existing source-network policy also applies to SSO routes. Configuring
+SSO does not make an installation publicly accessible. The browser must reach
+VoCat and the authorization endpoint; the VoCat process must reach Discovery,
+Token and JWKS/UserInfo endpoints with trusted TLS certificates. Saving the exact
+Pocket ID HTTPS Issuer or Generic endpoint URLs approves
+those addresses for HTTPS connections, including RFC1918/IPv6 ULA private
+addresses. GitHub's fixed endpoints remain restricted to public addresses.
+
+For a Generic provider's internal HTTP service, explicitly enter its full HTTP URL
+in the Token/UserInfo field.
+Every DNS candidate and actual connection for these HTTP destinations must be a
+permitted private address. Pocket ID's Discovery cannot approve another origin;
+its endpoints must use the configured Issuer's origin. The Issuer, Discovery fetch
+URL and browser authorization endpoint always require HTTPS. Loopback, link-local,
+cloud metadata and other special-use destinations remain blocked for IdP
+connections. Install private CA certificates in the host/container trust store;
+there is no TLS verification bypass option. The browser's localhost or HTTPS
+origin for VoCat is independent of these IdP connection permissions.
+
+The supplied Compose deployment uses host networking. Verify DNS, routing and CA
+trust from the actual container; do not assume bridge-network service names are
+available. Reverse proxies must preserve the configured public origin. VoCat
+does not derive callback URLs from forwarded host headers. Root-path deployment
+is required. For local Vite development, use one consistent loopback origin,
+such as `http://127.0.0.1:5173`, for the public origin and callback registration;
+IdP transport exceptions belong only in test fixtures.
+
+Session and CSRF cookies retain `SameSite=Strict`; short-lived authorization
+cookies use `SameSite=Lax` for top-level GET callbacks. Saving any SSO
+configuration, including disabling it or rotating the secret, revokes all SSO
+sessions. Unbinding an account revokes that binding's SSO sessions.
+Password sessions and API tokens survive those actions. Changing the local
+administrator's password revokes all sessions and API tokens, cancels in-flight
+authorizations, and preserves the external binding. The UI requests sign-in
+again when a successful operation revokes the current SSO session.
+
+Leave the secret input empty to preserve an existing secret, or enter a new
+secret to replace it. The settings page does not offer a secret-clearing control.
+Changing the provider, client
+ID, Issuer, or Generic identity endpoints/ID field requires a new identity
+namespace, new credentials, and a new binding. Existing bindings require explicit
+reset confirmation. To change the bound account, unbind it and then create a new
+binding. Client secrets are held only on the server in the protected SQLite
+database; the sensitive-setting flag redacts responses and does not encrypt the
+database. Third-party tokens are not persisted or returned to the browser.
+
+Signing out ends only the current VoCat session. Disabling an IdP account or
+signing out of Pocket ID does not immediately revoke an existing VoCat session;
+it expires according to `VOCAT_SESSION_TTL`, or can be revoked by disabling SSO
+or unbinding in VoCat. The public capabilities endpoint is
+`GET /api/auth/providers`. SSO settings and binding APIs require a browser
+session and CSRF for writes; Bearer tokens cannot manage them. Configuration
+revision conflicts return `409 sso_config_changed`; changed identity sources
+return `409 sso_rebind_required`.
+
+### Upgrade and rollback
+
+SSO adds SQLite schema version 29. Upgrades preserve the existing administrator,
+sessions, API tokens and device data; SSO remains disabled until configured.
+Before upgrading, record the old binary or image digest and back up configuration,
+CA material and the complete persistent data directory while VoCat is stopped,
+or use SQLite's backup API/`.backup` to obtain a consistent live snapshot. Copying
+only a running WAL-mode database file is not a reliable backup.
+
+Disable SSO in the new version to recover from provider problems while keeping
+password login and current business data. Returning to a schema-28 binary
+requires stopping VoCat and restoring the matching pre-upgrade data and
+configuration snapshot. Merely reverting the container image or lowering
+`PRAGMA user_version` cannot downgrade the database. Restore into a separate
+directory/volume where possible and retain the newer database for investigation.
+Restoring a snapshot loses messages and task changes recorded after that backup.
+For Docker, update by pulling the image and recreating the container.
+
+Before a production release, complete the real Pocket ID Passkey/access-policy
+test and an upgrade/rollback rehearsal for that deployment.
 
 ## API tokens and MCP
 

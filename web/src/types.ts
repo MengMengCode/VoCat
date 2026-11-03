@@ -545,3 +545,63 @@ export type Notice = {
   title: string;
   detail?: string;
 } | null;
+
+export type SSOProviderKind = "pocketid" | "github" | "generic";
+
+export interface SSOConfigInput {
+  enabled: boolean;
+  kind: SSOProviderKind;
+  displayName: string;
+  publicOrigin: string;
+  clientId: string;
+  issuerUrl: string;
+  authUrl: string;
+  tokenUrl: string;
+  userInfoUrl: string;
+  userIdField: string;
+  scopes: string[];
+  tokenAuthMethod: "auto" | "client_secret_basic" | "client_secret_post";
+  pkceMode: "s256" | "disabled";
+}
+
+export interface SSOConfig extends SSOConfigInput {
+  revision: number;
+}
+
+export interface SSOBinding {
+  bound: boolean;
+  displayName: string;
+  email: string;
+  createdAt: string | null;
+  lastLoginAt: string | null;
+}
+
+export interface SSOSettings {
+  config: SSOConfig;
+  binding: SSOBinding;
+  configured: boolean;
+  hasClientSecret: boolean;
+  reauthenticationRequired?: boolean;
+}
+
+export interface SSOSaveRequest {
+  expectedRevision: number;
+  config: SSOConfigInput;
+  clientSecret?: string;
+  resetBinding?: boolean;
+}
+
+export interface SSOProviders {
+  sso: {
+    enabled: boolean;
+    displayName?: string;
+  };
+}
+
+export interface SSOCheckResult {
+  revision: number;
+}
+
+export interface SSOUnbindResult {
+  reauthenticationRequired: boolean;
+}
