@@ -32,6 +32,7 @@ type Options struct {
 	HTTPClient *http.Client
 }
 
+// New creates an SSO service backed by authoritative store snapshots and optional fixture transport.
 func New(database *store.Store, options Options) *Service {
 	s := &Service{store: database}
 	if options.HTTPClient != nil {
@@ -40,10 +41,13 @@ func New(database *store.Store, options Options) *Service {
 	return s
 }
 
+// Snapshot reads configuration, credentials, and binding from one consistent store transaction.
 func (s *Service) Snapshot(ctx context.Context) (store.SSOSnapshot, error) {
 	return s.store.SSOSnapshot(ctx)
 }
 
+// Save validates the expected revision and checks provider readiness before enabling SSO.
+// The store then atomically rechecks authorization, saves the configuration, and revokes affected sessions.
 func (s *Service) Save(ctx context.Context, request store.SSOSaveRequest) (store.SSOSnapshot, bool, error) {
 	current, err := s.Snapshot(ctx)
 	if err != nil {
@@ -75,7 +79,7 @@ func (s *Service) Save(ctx context.Context, request store.SSOSaveRequest) (store
 		}
 		ctx, cancel := context.WithTimeout(ctx, RemoteBudget)
 		defer cancel()
-		if _, err := NewProvider(ctx, request.Config, secret, s.providerOptions...); err != nil {
+		if err := CheckConfiguration(ctx, request.Config, secret, s.providerOptions...); err != nil {
 			if ctx.Err() != nil {
 				return store.SSOSnapshot{}, false, ctx.Err()
 			}
@@ -101,6 +105,8 @@ type StartedFlow struct {
 	AuthorizationURL string
 }
 
+// Start creates a browser-bound, expiring login or binding flow from the current configuration.
+// Binding requires an authenticated administrator session and cannot outlive that session.
 func (s *Service) Start(ctx context.Context, request StartRequest) (StartedFlow, error) {
 	snapshot, err := s.Snapshot(ctx)
 	if err != nil {
@@ -184,6 +190,7 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (StartedFlow,
 	return StartedFlow{Flow: flow, BrowserToken: browserToken, AuthorizationURL: authorizationURL}, nil
 }
 
+// FindFlow looks up an unclaimed flow by state without consuming it or proving browser possession.
 func (s *Service) FindFlow(ctx context.Context, state string) (store.SSOFlow, error) {
 	if len(state) < 32 || len(state) > 256 {
 		return store.SSOFlow{}, store.ErrSSOInvalidFlow
@@ -191,6 +198,7 @@ func (s *Service) FindFlow(ctx context.Context, state string) (store.SSOFlow, er
 	return s.store.SSOFlowByStateHash(ctx, digest(state))
 }
 
+// Claim consumes a flow once after the store validates state, browser possession, and current authorization.
 func (s *Service) Claim(ctx context.Context, state, browserToken string) (store.SSOFlow, error) {
 	if len(state) < 32 || len(state) > 256 || len(browserToken) < 32 || len(browserToken) > 256 {
 		return store.SSOFlow{}, store.ErrSSOInvalidFlow
@@ -198,6 +206,8 @@ func (s *Service) Claim(ctx context.Context, state, browserToken string) (store.
 	return s.store.ClaimSSOFlow(ctx, digest(state), digest(browserToken))
 }
 
+// Verify checks the flow configuration revision and verifies the remote identity within a time budget.
+// The caller must still finalize authorization atomically in the store before granting a session or binding.
 func (s *Service) Verify(ctx context.Context, flow store.SSOFlow, code, responseIssuer string) (store.SSOIdentity, error) {
 	snapshot, err := s.Snapshot(ctx)
 	if err != nil {
@@ -224,6 +234,7 @@ func (s *Service) Verify(ctx context.Context, flow store.SSOFlow, code, response
 	return identity, err
 }
 
+// Check validates provider readiness and rejects results made stale by a concurrent configuration change.
 func (s *Service) Check(ctx context.Context, expectedRevision int64) error {
 	snapshot, err := s.Snapshot(ctx)
 	if err != nil {
@@ -258,6 +269,7 @@ func (s *Service) Cleanup(ctx context.Context) error {
 	return s.store.DeleteExpiredSSOFlows(ctx, time.Now().UTC())
 }
 
+// RunCleanup prunes expired flows immediately and every minute until the application context ends.
 func (s *Service) RunCleanup(ctx context.Context) {
 	_ = s.Cleanup(ctx)
 	ticker := time.NewTicker(time.Minute)
@@ -272,6 +284,7 @@ func (s *Service) RunCleanup(ctx context.Context) {
 	}
 }
 
+// randomValue generates a URL-safe random value without exposing random-source error details.
 func randomValue(size int) (string, error) {
 	buffer := make([]byte, size)
 	if _, err := rand.Read(buffer); err != nil {
@@ -280,6 +293,7 @@ func randomValue(size int) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
+// digest hashes transient flow credentials for storage and lookup.
 func digest(value string) []byte {
 	hash := sha256.Sum256([]byte(value))
 	return hash[:]

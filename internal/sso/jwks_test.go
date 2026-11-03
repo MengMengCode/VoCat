@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// TestJWKSRequestInheritsCallbackCancellation verifies cancellation stops an in-flight trusted-key refresh.
 func TestJWKSRequestInheritsCallbackCancellation(t *testing.T) {
 	started := make(chan struct{})
 	stopped := make(chan struct{})

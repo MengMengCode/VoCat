@@ -39,6 +39,8 @@ type ProviderOptions struct {
 	HTTPClient *http.Client
 }
 
+// NewProvider validates a complete configuration and constructs its constrained protocol adapter.
+// OIDC construction validates discovery; use CheckConfiguration to validate the JWKS as well.
 func NewProvider(ctx context.Context, config Config, secret string, options ...ProviderOptions) (Provider, error) {
 	config, err := NormalizeConfig(config)
 	if err != nil {
@@ -61,6 +63,7 @@ func NewProvider(ctx context.Context, config Config, secret string, options ...P
 	return newOAuthProvider(ctx, config, secret, client, policy)
 }
 
+// CheckConfiguration validates provider setup, including usable OIDC signing keys, without a login.
 func CheckConfiguration(ctx context.Context, config Config, secret string, options ...ProviderOptions) error {
 	provider, err := NewProvider(ctx, config, secret, options...)
 	if err != nil {

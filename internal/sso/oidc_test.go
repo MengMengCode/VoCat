@@ -41,6 +41,7 @@ type oidcFixture struct {
 	config                  Config
 }
 
+// newOIDCFixture creates a TLS identity provider with mutable discovery, claims, and signing keys for protocol tests.
 func newOIDCFixture(t *testing.T) *oidcFixture {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -131,6 +132,7 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 	return f
 }
 
+// provider constructs an OIDC adapter using the fixture's trusted TLS transport.
 func (f *oidcFixture) provider(t *testing.T) Provider {
 	t.Helper()
 	p, err := NewProvider(context.Background(), f.config, "a-test-secret", ProviderOptions{HTTPClient: f.server.Client()})
@@ -140,6 +142,7 @@ func (f *oidcFixture) provider(t *testing.T) Provider {
 	return p
 }
 
+// TestOIDCPKCEBasicAndIDTokenIdentity checks authorization parameters and identity claims from a verified token only.
 func TestOIDCPKCEBasicAndIDTokenIdentity(t *testing.T) {
 	f := newOIDCFixture(t)
 	p := f.provider(t)
@@ -166,6 +169,7 @@ func TestOIDCPKCEBasicAndIDTokenIdentity(t *testing.T) {
 	}
 }
 
+// TestOIDCAutoTokenClientAuthentication verifies discovery selects one supported method before the token exchange.
 func TestOIDCAutoTokenClientAuthentication(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -203,6 +207,7 @@ func TestOIDCAutoTokenClientAuthentication(t *testing.T) {
 	}
 }
 
+// TestOIDCTokenClientAuthenticationRejectsUnsupportedMetadata rejects malformed or incompatible capabilities without sending credentials.
 func TestOIDCTokenClientAuthenticationRejectsUnsupportedMetadata(t *testing.T) {
 	f := newOIDCFixture(t)
 	for _, tc := range []struct {
@@ -240,6 +245,7 @@ func TestOIDCTokenClientAuthenticationRejectsUnsupportedMetadata(t *testing.T) {
 	}
 }
 
+// TestOIDCAutoTokenClientAuthenticationDoesNotRetryCredentials ensures authentication rejection cannot trigger credential probing.
 func TestOIDCAutoTokenClientAuthenticationDoesNotRetryCredentials(t *testing.T) {
 	f := newOIDCFixture(t)
 	f.config.TokenAuthMethod = "auto"
@@ -255,6 +261,7 @@ func TestOIDCAutoTokenClientAuthenticationDoesNotRetryCredentials(t *testing.T) 
 	}
 }
 
+// TestOIDCRejectsInvalidClaimsAndResponseIssuer checks strict token claims and rejects issuer mismatch before exchange.
 func TestOIDCRejectsInvalidClaimsAndResponseIssuer(t *testing.T) {
 	f := newOIDCFixture(t)
 	p := f.provider(t)
@@ -294,6 +301,7 @@ func TestOIDCRejectsInvalidClaimsAndResponseIssuer(t *testing.T) {
 	}
 }
 
+// TestOIDCSigningKeyRotationAndWrongSignature checks trusted-key refresh supports rotation while rejecting unknown or incorrect signatures.
 func TestOIDCSigningKeyRotationAndWrongSignature(t *testing.T) {
 	f := newOIDCFixture(t)
 	p := f.provider(t)
@@ -327,6 +335,7 @@ func TestOIDCSigningKeyRotationAndWrongSignature(t *testing.T) {
 	}
 }
 
+// TestOIDCMetadataStrictness checks discovery issuer, endpoints, and required protocol capabilities.
 func TestOIDCMetadataStrictness(t *testing.T) {
 	f := newOIDCFixture(t)
 	for name, change := range map[string]func(map[string]any){
@@ -360,6 +369,7 @@ func TestOIDCMetadataStrictness(t *testing.T) {
 	}
 }
 
+// TestOIDCRequiresActualIDTokenAndAcceptsBoundedClockSkew rejects invalid ID tokens and permits only the configured time tolerance.
 func TestOIDCRequiresActualIDTokenAndAcceptsBoundedClockSkew(t *testing.T) {
 	f := newOIDCFixture(t)
 	p := f.provider(t)
@@ -394,6 +404,7 @@ func TestOIDCRequiresActualIDTokenAndAcceptsBoundedClockSkew(t *testing.T) {
 	}
 }
 
+// TestOIDCRejectsUntrustedTLS ensures discovery requires a trusted certificate.
 func TestOIDCRejectsUntrustedTLS(t *testing.T) {
 	f := newOIDCFixture(t)
 	client := &http.Client{Transport: &http.Transport{}}
@@ -402,6 +413,7 @@ func TestOIDCRejectsUntrustedTLS(t *testing.T) {
 	}
 }
 
+// TestDiscoveryCannotRedirectToHTTPBackend verifies discovery redirects retain HTTPS and sanitize provider errors.
 func TestDiscoveryCannotRedirectToHTTPBackend(t *testing.T) {
 	var requests atomic.Int64
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1) }))
@@ -425,6 +437,7 @@ func TestDiscoveryCannotRedirectToHTTPBackend(t *testing.T) {
 	}
 }
 
+// TestOIDCRejectsDiscoveryBackendOriginsBeyondConfiguredIssuer checks discovery cannot grant access to unconfigured endpoint origins.
 func TestOIDCRejectsDiscoveryBackendOriginsBeyondConfiguredIssuer(t *testing.T) {
 	f := newOIDCFixture(t)
 	for _, backend := range []string{"https://backend.nas.example", "http://192.168.1.20:1411", strings.Replace(f.server.URL, "https:", "http:", 1)} {

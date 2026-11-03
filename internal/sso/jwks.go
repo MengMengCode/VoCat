@@ -25,6 +25,8 @@ type callbackKeySet struct {
 type keySetResultKey struct{}
 type keySetResult struct{ unavailable bool }
 
+// VerifySignature checks cached keys and refreshes once from the trusted JWKS URI on failure.
+// The refresh inherits callback cancellation and records provider unavailability separately from invalid signatures.
 func (set *callbackKeySet) VerifySignature(ctx context.Context, token string) ([]byte, error) {
 	object, err := jose.ParseSigned(token, set.algorithms)
 	if err != nil || len(object.Signatures) != 1 {
@@ -51,6 +53,7 @@ func (set *callbackKeySet) VerifySignature(ctx context.Context, token string) ([
 	return verifyWithKeys(object, keys)
 }
 
+// verifyWithKeys tries keys matching the token key ID and algorithm, returning only a verified payload.
 func verifyWithKeys(object *jose.JSONWebSignature, keys []jose.JSONWebKey) ([]byte, error) {
 	header := object.Signatures[0].Header
 	for _, key := range keys {
@@ -64,6 +67,7 @@ func verifyWithKeys(object *jose.JSONWebSignature, keys []jose.JSONWebKey) ([]by
 	return nil, ErrInvalidIdentity
 }
 
+// fetch reads a bounded JWKS document and retains valid public signing keys with permitted algorithms.
 func (set *callbackKeySet) fetch(ctx context.Context) ([]jose.JSONWebKey, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, set.url, nil)
 	if err != nil {

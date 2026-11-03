@@ -12,6 +12,7 @@ import (
 	"testing"
 )
 
+// TestNetworkAddressPolicy distinguishes public and ordinary private IPs from prohibited special addresses.
 func TestNetworkAddressPolicy(t *testing.T) {
 	for _, value := range []string{"127.0.0.1", "::1", "169.254.169.254", "168.63.129.16", "fd00:ec2::254", "::10.0.0.1", "fec0::1", "fe80::1", "0.0.0.0", "::", "224.0.0.1", "ff02::1", "100.64.0.1", "64:ff9b::a00:1", "2002:a00:1::1", "::ffff:169.254.169.254", "::ffff:127.0.0.1"} {
 		address := netip.MustParseAddr(value)
@@ -32,6 +33,7 @@ func TestNetworkAddressPolicy(t *testing.T) {
 	}
 }
 
+// TestNetworkExplicitProviderOriginsSupportHTTPSOnPublicAndPrivateAddresses checks exact configured scheme, host, and port boundaries.
 func TestNetworkExplicitProviderOriginsSupportHTTPSOnPublicAndPrivateAddresses(t *testing.T) {
 	for _, publicOrigin := range []string{"http://localhost:5173", "https://vocat.nas.example:8443", "https://vocat.example"} {
 		for _, config := range []Config{
@@ -59,6 +61,7 @@ func TestNetworkExplicitProviderOriginsSupportHTTPSOnPublicAndPrivateAddresses(t
 	}
 }
 
+// TestNetworkGenericHTTPRequiresEveryAddressToRemainPrivate rejects mixed DNS results and unconfigured HTTP origins.
 func TestNetworkGenericHTTPRequiresEveryAddressToRemainPrivate(t *testing.T) {
 	_, policy, err := newHTTPClient(Config{Kind: "generic", AuthURL: "https://id.nas.example/authorize", TokenURL: "http://backend.nas.example:1411/token", UserInfoURL: "http://backend.nas.example:1411/userinfo"}, nil)
 	if err != nil {
@@ -102,6 +105,7 @@ func TestNetworkGenericHTTPRequiresEveryAddressToRemainPrivate(t *testing.T) {
 	}
 }
 
+// TestNetworkExplicitPrivateOriginsCannotReachPrivilegedAddresses ensures explicit origins cannot authorize special networks.
 func TestNetworkExplicitPrivateOriginsCannotReachPrivilegedAddresses(t *testing.T) {
 	_, policy, err := newHTTPClient(Config{Kind: "pocketid", IssuerURL: "https://id.nas.example"}, nil)
 	if err != nil {
@@ -117,6 +121,7 @@ func TestNetworkExplicitPrivateOriginsCannotReachPrivilegedAddresses(t *testing.
 	}
 }
 
+// TestNetworkGitHubKeepsFixedPublicOrigins checks the GitHub preset rejects private addresses and alternate hosts.
 func TestNetworkGitHubKeepsFixedPublicOrigins(t *testing.T) {
 	_, policy, err := newHTTPClient(Config{Kind: "github"}, nil)
 	if err != nil {
@@ -137,6 +142,7 @@ func TestNetworkGitHubKeepsFixedPublicOrigins(t *testing.T) {
 	}
 }
 
+// TestNetworkValidatesEveryDNSAddressAndPrivateHTTP checks all DNS answers and the stricter private HTTP policy.
 func TestNetworkValidatesEveryDNSAddressAndPrivateHTTP(t *testing.T) {
 	p := &destinationPolicy{
 		allowed: map[string]bool{"https://id.example": true, "http://backend.example": true},
@@ -165,6 +171,7 @@ func TestNetworkValidatesEveryDNSAddressAndPrivateHTTP(t *testing.T) {
 	}
 }
 
+// TestNetworkRechecksDNSAtDial verifies an HTTPS DNS rebinding target is rejected before connection.
 func TestNetworkRechecksDNSAtDial(t *testing.T) {
 	client, policy, err := newHTTPClient(Config{Kind: "pocketid", IssuerURL: "https://id.example"}, nil)
 	if err != nil {
@@ -187,6 +194,7 @@ func TestNetworkRechecksDNSAtDial(t *testing.T) {
 	}
 }
 
+// TestNetworkHTTPRechecksPrivateOnlyDNSAtDial checks HTTP dialing rejects a newly introduced public DNS answer.
 func TestNetworkHTTPRechecksPrivateOnlyDNSAtDial(t *testing.T) {
 	client, policy, err := newHTTPClient(Config{Kind: "generic", AuthURL: "https://id.nas.example/authorize", TokenURL: "http://backend.nas.example:1411/token", UserInfoURL: "http://backend.nas.example:1411/userinfo"}, nil)
 	if err != nil {
@@ -209,6 +217,7 @@ func TestNetworkHTTPRechecksPrivateOnlyDNSAtDial(t *testing.T) {
 	}
 }
 
+// TestHTTPClientRefusesCredentialRedirectsAndOversizedBodies checks redirect, response-size, and production loopback restrictions.
 func TestHTTPClientRefusesCredentialRedirectsAndOversizedBodies(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

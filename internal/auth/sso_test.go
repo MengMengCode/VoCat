@@ -9,6 +9,7 @@ import (
 	"vocat/internal/store"
 )
 
+// TestPreparedCredentialsRequireAtomicCommit verifies credential generation is independent and grants no persisted session.
 func TestPreparedCredentialsRequireAtomicCommit(t *testing.T) {
 	service := newTestService(t)
 	principal := Principal{ID: 1, Username: "admin"}
@@ -31,6 +32,7 @@ func TestPreparedCredentialsRequireAtomicCommit(t *testing.T) {
 	}
 }
 
+// TestAuthenticatedSessionDigestAccessorPreservesSessionAndCSRF checks digest copies cannot mutate session or CSRF state.
 func TestAuthenticatedSessionDigestAccessorPreservesSessionAndCSRF(t *testing.T) {
 	service := newTestService(t)
 	ctx := context.Background()

@@ -116,6 +116,7 @@ func isFilesystemPath(path string) bool {
 	return path != ":memory:" && !strings.HasPrefix(path, "file:")
 }
 
+// migrate applies supported schema upgrades transactionally and rejects databases created by newer binaries.
 func migrate(ctx context.Context, db *sql.DB) error {
 	var version int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
@@ -289,6 +290,7 @@ func (s *Store) CreateSession(
 	return nil
 }
 
+// SessionByTokenHash loads a live session, its login source, and its administrator by credential digest.
 func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Session, error) {
 	var session Session
 	var expiresAt int64

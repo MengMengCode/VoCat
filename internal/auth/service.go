@@ -161,6 +161,7 @@ func (s *Service) ResetAdminCredentials(ctx context.Context, username string, pa
 	return nil
 }
 
+// Login verifies the local password and persists fresh session and CSRF credentials before returning them.
 func (s *Service) Login(ctx context.Context, username string, password string) (Credentials, error) {
 	admin, err := s.store.AdminByUsername(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {
@@ -208,6 +209,7 @@ func (s *Service) PrepareCredentials(principal Principal) (Credentials, error) {
 	}, nil
 }
 
+// Authenticate resolves a live session and exposes its principal, expiry, and original login method.
 func (s *Service) Authenticate(ctx context.Context, sessionToken string) (AuthenticatedSession, error) {
 	if sessionToken == "" {
 		return AuthenticatedSession{}, ErrUnauthorized

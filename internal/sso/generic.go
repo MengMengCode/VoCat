@@ -28,6 +28,7 @@ type oauthProvider struct {
 	authority string
 }
 
+// newOAuthProvider validates configured endpoints and builds the GitHub or generic OAuth2 adapter.
 func newOAuthProvider(ctx context.Context, config Config, secret string, client *http.Client, policy *destinationPolicy) (Provider, error) {
 	authorize, token, user := config.AuthURL, config.TokenURL, config.UserInfoURL
 	field, authority := config.UserIDField, config.ProviderInstanceID
@@ -53,6 +54,7 @@ func newOAuthProvider(ctx context.Context, config Config, secret string, client 
 	}, nil
 }
 
+// AuthorizationURL validates the flow and adds an S256 challenge when PKCE is enabled.
 func (p *oauthProvider) AuthorizationURL(flow AuthorizationFlow) (string, error) {
 	if !validAuthorizationFlow(p.config, flow, false) {
 		return "", ErrInvalidIdentity
@@ -64,6 +66,8 @@ func (p *oauthProvider) AuthorizationURL(flow AuthorizationFlow) (string, error)
 	return p.oauth.AuthCodeURL(flow.State, options...), nil
 }
 
+// VerifyCallback exchanges the code and reads a stable identity from the configured user endpoint.
+// Provider tokens are used only for this exchange and are never returned or persisted.
 func (p *oauthProvider) VerifyCallback(ctx context.Context, flow AuthorizationFlow, code, responseIssuer string) (ExternalIdentity, error) {
 	if code == "" || len(code) > 8192 || !validExchangeFlow(p.config, flow) {
 		return ExternalIdentity{}, ErrInvalidIdentity
@@ -123,6 +127,7 @@ func (p *oauthProvider) VerifyCallback(ctx context.Context, flow AuthorizationFl
 	return ExternalIdentity{Protocol: "oauth2", Authority: p.authority, Subject: subject, DisplayName: name, Email: displayClaim(claims["email"])}, nil
 }
 
+// authStyle maps an explicit token authentication method to the OAuth2 client setting.
 func authStyle(method string) oauth2.AuthStyle {
 	if method == "client_secret_post" {
 		return oauth2.AuthStyleInParams
@@ -130,10 +135,12 @@ func authStyle(method string) oauth2.AuthStyle {
 	return oauth2.AuthStyleInHeader
 }
 
+// validAuthorizationFlow requires state, an OIDC nonce when applicable, and a valid exchange flow.
 func validAuthorizationFlow(config Config, flow AuthorizationFlow, oidc bool) bool {
 	return flow.State != "" && (!oidc || flow.Nonce != "") && validExchangeFlow(config, flow)
 }
 
+// validExchangeFlow checks the exact callback URI and the configured PKCE requirements.
 func validExchangeFlow(config Config, flow AuthorizationFlow) bool {
 	if flow.RedirectURI == "" || flow.RedirectURI != CallbackURL(config) {
 		return false
@@ -152,6 +159,7 @@ func validExchangeFlow(config Config, flow AuthorizationFlow) bool {
 	return true
 }
 
+// stableID preserves string identifiers and arbitrary-size integers while rejecting ambiguous JSON values.
 func stableID(value any) (string, error) {
 	switch v := value.(type) {
 	case string:
@@ -174,6 +182,7 @@ func stableID(value any) (string, error) {
 	}
 }
 
+// displayClaim accepts only bounded strings without control characters for display metadata.
 func displayClaim(value any) string {
 	text, ok := value.(string)
 	if !ok || len(text) > 512 || hasControl(text) {

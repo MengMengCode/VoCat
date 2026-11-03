@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,11 +17,13 @@ import (
 
 var ssoTestSequence atomic.Int64
 
+// ssoTestHash produces deterministic credential digests for store fixtures.
 func ssoTestHash(label string) []byte {
 	digest := sha256.Sum256([]byte(label))
 	return digest[:]
 }
 
+// ssoTestDatabase creates an isolated database with a password session and disabled SSO configuration.
 func ssoTestDatabase(t *testing.T) (*Store, SSOSnapshot, []byte) {
 	t.Helper()
 	ctx := context.Background()
@@ -49,6 +52,7 @@ func ssoTestDatabase(t *testing.T) (*Store, SSOSnapshot, []byte) {
 	return database, snapshot, session
 }
 
+// ssoTestFlow persists a uniquely identified flow with optional browser and initiating-session context.
 func ssoTestFlow(t *testing.T, database *Store, snapshot SSOSnapshot, purpose string, session []byte, browserIDs ...string) SSOFlow {
 	t.Helper()
 	id := fmt.Sprintf("flow-%d", ssoTestSequence.Add(1))
@@ -69,6 +73,7 @@ func ssoTestFlow(t *testing.T, database *Store, snapshot SSOSnapshot, purpose st
 	return flow
 }
 
+// ssoTestClaim claims a fixture flow using its matching state and browser digests.
 func ssoTestClaim(t *testing.T, database *Store, flow SSOFlow) SSOFlow {
 	t.Helper()
 	claimed, err := database.ClaimSSOFlow(context.Background(), flow.StateHash, flow.BrowserTokenHash)
@@ -78,10 +83,12 @@ func ssoTestClaim(t *testing.T, database *Store, flow SSOFlow) SSOFlow {
 	return claimed
 }
 
+// ssoTestIdentity returns a stable identity matching the fixture provider.
 func ssoTestIdentity() SSOIdentity {
 	return SSOIdentity{Protocol: "oidc", Authority: "https://id.example.com", Subject: "stable-sub", DisplayName: "Example user", Email: "user@example.com"}
 }
 
+// ssoTestBound binds the fixture identity and enables SSO while retaining the password session.
 func ssoTestBound(t *testing.T) (*Store, SSOSnapshot, []byte) {
 	t.Helper()
 	database, snapshot, session := ssoTestDatabase(t)
@@ -100,11 +107,13 @@ func ssoTestBound(t *testing.T) (*Store, SSOSnapshot, []byte) {
 	return database, snapshot, session
 }
 
+// ssoTestMaterial creates unique session and CSRF digests for finalization tests.
 func ssoTestMaterial() SSOSessionMaterial {
 	id := fmt.Sprintf("session-%d", ssoTestSequence.Add(1))
 	return SSOSessionMaterial{TokenHash: ssoTestHash(id), CSRFHash: ssoTestHash(id + "csrf"), ExpiresAt: time.Now().Add(time.Hour)}
 }
 
+// TestSSOMigration28PreservesExistingData checks upgrade compatibility for sessions, tokens, devices, and disabled SSO defaults.
 func TestSSOMigration28PreservesExistingData(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "upgrade.db")
@@ -154,6 +163,7 @@ func TestSSOMigration28PreservesExistingData(t *testing.T) {
 	}
 }
 
+// TestSSOBrowserPossessionAndSingleClaim checks browser proof, competing claims, and removal of the persisted PKCE verifier.
 func TestSSOBrowserPossessionAndSingleClaim(t *testing.T) {
 	database, snapshot, session := ssoTestDatabase(t)
 	flow := ssoTestFlow(t, database, snapshot, "bind", session)
@@ -187,6 +197,7 @@ func TestSSOBrowserPossessionAndSingleClaim(t *testing.T) {
 	}
 }
 
+// TestSSOConfigAtomicSecretAndNamespace checks atomic secret updates, revision conflicts, and identity namespace changes.
 func TestSSOConfigAtomicSecretAndNamespace(t *testing.T) {
 	database, snapshot, session := ssoTestDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -233,6 +244,7 @@ func TestSSOConfigAtomicSecretAndNamespace(t *testing.T) {
 	}
 }
 
+// TestSSOBoundSourceChangeRequiresConfirmation checks a bound identity cannot silently move to a different provider source.
 func TestSSOBoundSourceChangeRequiresConfirmation(t *testing.T) {
 	database, snapshot, session := ssoTestBound(t)
 	config := snapshot.Config
@@ -250,6 +262,7 @@ func TestSSOBoundSourceChangeRequiresConfirmation(t *testing.T) {
 	}
 }
 
+// TestSSOClaimedFinalizationRevocation verifies finalization rechecks configuration and session authorization after a flow is claimed.
 func TestSSOClaimedFinalizationRevocation(t *testing.T) {
 	operations := []string{"disable", "save", "unbind", "password"}
 	for _, operation := range operations {
@@ -288,6 +301,7 @@ func TestSSOClaimedFinalizationRevocation(t *testing.T) {
 	}
 }
 
+// TestSSOLogoutOnlyCancelsInitiatingBind checks logout invalidates its binding flow without consuming unrelated login flows.
 func TestSSOLogoutOnlyCancelsInitiatingBind(t *testing.T) {
 	database, snapshot, session := ssoTestBound(t)
 	ctx := context.Background()
@@ -308,6 +322,7 @@ func TestSSOLogoutOnlyCancelsInitiatingBind(t *testing.T) {
 	}
 }
 
+// TestSSOIdentityChecksAndSelectiveSessionRevocation checks exact identity matching and SSO-only session invalidation.
 func TestSSOIdentityChecksAndSelectiveSessionRevocation(t *testing.T) {
 	database, snapshot, passwordSession := ssoTestBound(t)
 	ctx := context.Background()
@@ -348,6 +363,7 @@ func TestSSOIdentityChecksAndSelectiveSessionRevocation(t *testing.T) {
 	}
 }
 
+// TestSSOFlowExpiryAndBrowserLimits checks browser quotas, completed-flow release, and original persisted expiry.
 func TestSSOFlowExpiryAndBrowserLimits(t *testing.T) {
 	database, snapshot, _ := ssoTestBound(t)
 	ctx := context.Background()
@@ -387,6 +403,7 @@ func TestSSOFlowExpiryAndBrowserLimits(t *testing.T) {
 	}
 }
 
+// TestSSOIndependentStorePasswordRevision checks credential resets through another store invalidate old authorization immediately.
 func TestSSOIndependentStorePasswordRevision(t *testing.T) {
 	database, snapshot, session := ssoTestBound(t)
 	ctx := context.Background()
@@ -419,18 +436,55 @@ func TestSSOIndependentStorePasswordRevision(t *testing.T) {
 	}
 }
 
+// TestSSOSessionSourceDatabaseConstraints checks insert and update guards enforce login-method and binding ownership consistency.
 func TestSSOSessionSourceDatabaseConstraints(t *testing.T) {
-	database, _, _ := ssoTestDatabase(t)
+	database, snapshot, session := ssoTestDatabase(t)
+	// Seed a second administrator only to isolate the binding-ownership guard.
+	// Restore CHECK enforcement before exercising the triggers; foreign keys stay on.
 	for _, statement := range []string{
-		`INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, login_method) VALUES (X'11', 1, X'22', 4102444800, 1, 'sso')`,
-		`INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, sso_binding_id) VALUES (X'11', 1, X'22', 4102444800, 1, 'missing')`,
+		`PRAGMA ignore_check_constraints = ON`,
+		`INSERT INTO admins (id, username, password_hash, created_at, updated_at) VALUES (2, 'other-admin', X'1234', 1, 1)`,
+		`PRAGMA ignore_check_constraints = OFF`,
+		`INSERT INTO sso_bindings (id, admin_id, provider_instance_id, protocol, authority, subject, created_at, updated_at)
+			VALUES ('other-binding', 2, 'other-instance', 'oidc', 'https://id.example.com', 'other-sub', 1, 1)`,
 	} {
-		if _, err := database.db.Exec(statement); err == nil {
-			t.Fatalf("invalid session source allowed")
+		if _, err := database.db.Exec(statement); err != nil {
+			t.Fatal(err)
 		}
+	}
+	for _, tc := range []struct {
+		name      string
+		statement string
+		args      []any
+	}{
+		{name: "insert sso without binding", statement: `INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, login_method) VALUES (X'11', 1, X'22', 4102444800, 1, 'sso')`},
+		{name: "insert password with binding", statement: `INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, sso_binding_id) VALUES (X'11', 1, X'22', 4102444800, 1, 'missing')`},
+		{name: "insert sso with missing binding", statement: `INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, login_method, sso_binding_id) VALUES (X'11', 1, X'22', 4102444800, 1, 'sso', 'missing')`},
+		{name: "update sso without binding", statement: `UPDATE sessions SET login_method = 'sso' WHERE token_hash = ?`, args: []any{session}},
+		{name: "update sso with missing binding", statement: `UPDATE sessions SET login_method = 'sso', sso_binding_id = 'missing' WHERE token_hash = ?`, args: []any{session}},
+		{name: "update sso with another admin binding", statement: `UPDATE sessions SET login_method = 'sso', sso_binding_id = 'other-binding' WHERE token_hash = ?`, args: []any{session}},
+		{name: "update password with binding", statement: `UPDATE sessions SET sso_binding_id = 'other-binding' WHERE token_hash = ?`, args: []any{session}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := database.db.Exec(tc.statement, tc.args...); err == nil || !strings.Contains(err.Error(), "invalid session login source") {
+				t.Fatalf("expected session source guard rejection, got %v", err)
+			}
+		})
+	}
+	flow := ssoTestClaim(t, database, ssoTestFlow(t, database, snapshot, "bind", session))
+	bound, err := database.FinalizeSSOBinding(context.Background(), flow, ssoTestIdentity())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`UPDATE sessions SET login_method = 'sso', sso_binding_id = ? WHERE token_hash = ?`, bound.Binding.ID, session); err != nil {
+		t.Fatalf("valid session source update rejected: %v", err)
+	}
+	if _, err := database.db.Exec(`UPDATE sessions SET admin_id = 2 WHERE token_hash = ?`, session); err == nil || !strings.Contains(err.Error(), "invalid session login source") {
+		t.Fatalf("expected guard rejection when changing session administrator, got %v", err)
 	}
 }
 
+// TestSSOBindingRejectsOtherIdentityAndPreservesSessionsOnIdempotentUpdate checks identity replacement rejection and safe metadata refresh.
 func TestSSOBindingRejectsOtherIdentityAndPreservesSessionsOnIdempotentUpdate(t *testing.T) {
 	database, snapshot, passwordSession := ssoTestBound(t)
 	ctx := context.Background()
@@ -487,6 +541,7 @@ func TestSSOBindingRejectsOtherIdentityAndPreservesSessionsOnIdempotentUpdate(t 
 	}
 }
 
+// TestSSOBindingInsertFailureRollsBack checks failed persistence retains the binding flow and leaves configuration and sessions unchanged.
 func TestSSOBindingInsertFailureRollsBack(t *testing.T) {
 	database, snapshot, session := ssoTestDatabase(t)
 	ctx := context.Background()
@@ -513,6 +568,7 @@ func TestSSOBindingInsertFailureRollsBack(t *testing.T) {
 	}
 }
 
+// TestSSOGlobalFlowLimitAndFailedFlowRelease checks the global flow cap and release after failed verification.
 func TestSSOGlobalFlowLimitAndFailedFlowRelease(t *testing.T) {
 	database, snapshot, _ := ssoTestBound(t)
 	ctx := context.Background()
@@ -542,6 +598,7 @@ func TestSSOGlobalFlowLimitAndFailedFlowRelease(t *testing.T) {
 	}
 }
 
+// TestSSOBindingConstraintsAndSessionExpiry checks unique administrator bindings and expired initiating-session rejection.
 func TestSSOBindingConstraintsAndSessionExpiry(t *testing.T) {
 	database, snapshot, session := ssoTestBound(t)
 	ctx := context.Background()

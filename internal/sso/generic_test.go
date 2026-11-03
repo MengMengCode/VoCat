@@ -14,6 +14,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// TestGenericStableIDsAndPKCE checks exact stable IDs, PKCE modes, client authentication, and sanitized provider failures.
 func TestGenericStableIDsAndPKCE(t *testing.T) {
 	var server *httptest.Server
 	var userJSON = `{"customUserID":9007199254740993123456789,"name":"First Name"}`
@@ -121,8 +122,10 @@ func TestGenericStableIDsAndPKCE(t *testing.T) {
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
+// RoundTrip adapts a fixture function to the HTTP transport interface.
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// TestGitHubFixedEndpointsNumericIdentityAndUsernameChange checks fixed GitHub endpoints and identity stability across renames.
 func TestGitHubFixedEndpointsNumericIdentityAndUsernameChange(t *testing.T) {
 	flow := AuthorizationFlow{State: "state", PKCEVerifier: oauth2.GenerateVerifier(), RedirectURI: "https://vocat.example/api/auth/sso/callback"}
 	login := "old-login"

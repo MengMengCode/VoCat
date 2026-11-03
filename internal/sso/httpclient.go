@@ -30,6 +30,8 @@ type destinationPolicy struct {
 
 type privateHTTPContextKey struct{}
 
+// newHTTPClient builds an origin-constrained client with DNS checks, timeouts, and response limits.
+// An injected transport is reserved for trusted fixtures and bypasses production address checks.
 func newHTTPClient(c Config, injected *http.Client) (*http.Client, *destinationPolicy, error) {
 	p := &destinationPolicy{
 		allowed:       make(map[string]bool),
@@ -111,6 +113,7 @@ func newHTTPClient(c Config, injected *http.Client) (*http.Client, *destinationP
 	return &client, p, nil
 }
 
+// validate checks an endpoint against configured origins, scheme requirements, and resolved addresses.
 func (p *destinationPolicy) validate(ctx context.Context, raw string, requireHTTPS bool) error {
 	u, err := parseURL(raw)
 	if err != nil {
@@ -128,6 +131,7 @@ func (p *destinationPolicy) validate(ctx context.Context, raw string, requireHTT
 	return err
 }
 
+// resolve rejects a DNS result if any address violates policy; HTTP destinations must all be private.
 func (p *destinationPolicy) resolve(ctx context.Context, host string, requirePrivate bool) ([]netip.Addr, error) {
 	var addresses []netip.Addr
 	if literal, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
@@ -182,6 +186,7 @@ var blockedNetworks = []netip.Prefix{
 	netip.MustParsePrefix("ff00::/8"),
 }
 
+// allowedAddress excludes special and privileged networks, allowing ordinary private IPs only by policy.
 func allowedAddress(address netip.Addr, private bool) bool {
 	address = address.Unmap()
 	if !address.IsValid() || address.Zone() != "" || !address.IsGlobalUnicast() {
@@ -203,6 +208,7 @@ type guardedTransport struct {
 	policy *destinationPolicy
 }
 
+// RoundTrip validates each destination and bounds the response body before returning it to a provider.
 func (t *guardedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if err := t.policy.validate(request.Context(), request.URL.String(), false); err != nil {
 		return nil, err
@@ -227,6 +233,7 @@ type limitedResponseBody struct {
 	remaining int
 }
 
+// Read enforces the response byte budget, probing at the boundary to distinguish EOF from overflow.
 func (r *limitedResponseBody) Read(buffer []byte) (int, error) {
 	if len(buffer) == 0 {
 		return 0, nil
@@ -247,6 +254,7 @@ func (r *limitedResponseBody) Read(buffer []byte) (int, error) {
 	return n, err
 }
 
+// requireEndpoint rejects missing metadata endpoints before applying destination policy.
 func requireEndpoint(ctx context.Context, policy *destinationPolicy, raw string, public bool) error {
 	if raw == "" {
 		return invalidConfig("provider metadata is missing a required endpoint")

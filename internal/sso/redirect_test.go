@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestSharedSafeRedirectVectors checks redirect policy against fixtures shared with browser tests.
 func TestSharedSafeRedirectVectors(t *testing.T) {
 	raw, err := os.ReadFile("../../web/test/fixtures/ssoRedirect.json")
 	if err != nil {

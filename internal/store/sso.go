@@ -52,6 +52,7 @@ func (s *Store) SSOSnapshot(ctx context.Context) (SSOSnapshot, error) {
 	return snapshot, nil
 }
 
+// readSSOSnapshot loads configuration, secret, and a matching binding through one database executor.
 func readSSOSnapshot(ctx context.Context, executor contextQueryExecer) (SSOSnapshot, error) {
 	var result SSOSnapshot
 	setting, err := appSetting(executor.QueryRowContext(ctx, appSettingSelect+` WHERE key = ?`, SSOConfigKey))
@@ -80,6 +81,7 @@ func readSSOSnapshot(ctx context.Context, executor contextQueryExecer) (SSOSnaps
 	return result, nil
 }
 
+// writeSSOConfig serializes non-secret SSO settings through the caller's transaction.
 func writeSSOConfig(ctx context.Context, executor contextQueryExecer, config SSOConfig) error {
 	value, err := json.Marshal(config)
 	if err != nil {
@@ -184,6 +186,7 @@ func (s *Store) SaveSSOConfiguration(ctx context.Context, request SSOSaveRequest
 	return result, reauthenticated, nil
 }
 
+// invalidateSSOAfterAdminUpdate advances the SSO revision and cancels pending flows after a credential reset.
 func invalidateSSOAfterAdminUpdate(ctx context.Context, tx *sql.Tx) error {
 	setting, err := appSetting(tx.QueryRowContext(ctx, appSettingSelect+` WHERE key = ?`, SSOConfigKey))
 	if errors.Is(err, ErrNotFound) {
@@ -206,6 +209,8 @@ func invalidateSSOAfterAdminUpdate(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// CreateSSOFlow checks current authorization and expiry, enforces flow limits, and stores the flow atomically.
+// Binding flows are limited to the lifetime of their initiating session.
 func (s *Store) CreateSSOFlow(ctx context.Context, flow SSOFlow, browserFlowIDs []string) error {
 	if flow.ID == "" || len(flow.StateHash) != 32 || len(flow.BrowserTokenHash) != 32 ||
 		(flow.Purpose != "login" && flow.Purpose != "bind") {
@@ -289,6 +294,7 @@ func (s *Store) CreateSSOFlow(ctx context.Context, flow SSOFlow, browserFlowIDs 
 	return nil
 }
 
+// nilIfEmpty maps an empty digest to SQL NULL for optional flow fields.
 func nilIfEmpty(value []byte) any {
 	if len(value) == 0 {
 		return nil
@@ -301,6 +307,7 @@ const ssoFlowSelect = `SELECT id, state_hash, browser_token_hash, purpose,
 	nonce_hash, pkce_verifier, redirect_uri, return_path,
 	created_at, expires_at FROM sso_flows`
 
+// scanSSOFlow decodes nullable authorization fields and UTC timestamps, mapping absent rows to invalid flows.
 func scanSSOFlow(row rowScanner) (SSOFlow, error) {
 	var flow SSOFlow
 	var adminID sql.NullInt64
@@ -321,6 +328,7 @@ func scanSSOFlow(row rowScanner) (SSOFlow, error) {
 	return flow, nil
 }
 
+// SSOFlowByStateHash returns an unclaimed flow without consuming it or authorizing a callback.
 func (s *Store) SSOFlowByStateHash(ctx context.Context, stateHash []byte) (SSOFlow, error) {
 	if len(stateHash) != 32 {
 		return SSOFlow{}, ErrSSOInvalidFlow
@@ -368,6 +376,7 @@ func (s *Store) ClaimSSOFlow(ctx context.Context, stateHash, browserHash []byte)
 	return flow, nil
 }
 
+// validateSSOFlowAuthorization rechecks revision, provider namespace, expiry, and purpose-specific authorization.
 func validateSSOFlowAuthorization(ctx context.Context, tx *sql.Tx, snapshot SSOSnapshot, flow SSOFlow, now time.Time) error {
 	if snapshot.Config.Revision != flow.ConfigRevision || snapshot.Config.ProviderInstanceID != flow.ProviderInstanceID || !snapshot.HasConfiguration {
 		return ErrSSOConfigChanged
@@ -396,6 +405,7 @@ func validateSSOFlowAuthorization(ctx context.Context, tx *sql.Tx, snapshot SSOS
 	return ssoSessionValid(ctx, tx, flow.InitiatingSessionHash, flow.AdminID, now)
 }
 
+// ssoSessionValid requires a live initiating session belonging to the expected administrator.
 func ssoSessionValid(ctx context.Context, tx *sql.Tx, hash []byte, adminID int64, now time.Time) error {
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions s JOIN admins a ON a.id = s.admin_id
@@ -408,6 +418,7 @@ func ssoSessionValid(ctx context.Context, tx *sql.Tx, hash []byte, adminID int64
 	return nil
 }
 
+// claimedSSOFlow requires a live, claimed row matching the immutable authorization fields supplied by the caller.
 func claimedSSOFlow(ctx context.Context, tx *sql.Tx, flow SSOFlow) error {
 	stored, err := scanSSOFlow(tx.QueryRowContext(ctx, ssoFlowSelect+` WHERE id = ? AND state_hash = ? AND claimed_at > 0`, flow.ID, flow.StateHash))
 	if err != nil {
@@ -424,6 +435,7 @@ func claimedSSOFlow(ctx context.Context, tx *sql.Tx, flow SSOFlow) error {
 	return nil
 }
 
+// validSSOIdentity checks the verified identity protocol and authority against the configured provider.
 func validSSOIdentity(identity SSOIdentity, config SSOConfig) bool {
 	if identity.Subject == "" || identity.Authority == "" {
 		return false
@@ -440,12 +452,14 @@ func validSSOIdentity(identity SSOIdentity, config SSOConfig) bool {
 	}
 }
 
+// ssoBindingMatchesConfig requires both the provider namespace and identity authority to match current settings.
 func ssoBindingMatchesConfig(binding SSOBinding, config SSOConfig) bool {
 	return binding.ProviderInstanceID == config.ProviderInstanceID && validSSOIdentity(SSOIdentity{
 		Protocol: binding.Protocol, Authority: binding.Authority, Subject: binding.Subject,
 	}, config)
 }
 
+// sameSSOIdentity compares the protocol, authority, and stable subject that identify an external account.
 func sameSSOIdentity(binding SSOBinding, identity SSOIdentity) bool {
 	return binding.Protocol == identity.Protocol && binding.Authority == identity.Authority && binding.Subject == identity.Subject
 }
@@ -560,6 +574,8 @@ func (s *Store) FinalizeSSOLogin(ctx context.Context, flow SSOFlow, identity SSO
 	return admin, nil
 }
 
+// UnbindSSO checks the revision and removes the binding, its sessions, and pending flows atomically.
+// It disables SSO and reports whether the caller must authenticate again.
 func (s *Store) UnbindSSO(ctx context.Context, expectedRevision int64, currentSessionHash []byte) (SSOSnapshot, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -603,6 +619,7 @@ func (s *Store) UnbindSSO(ctx context.Context, expectedRevision int64, currentSe
 	return snapshot, reauthentication, nil
 }
 
+// DeleteExpiredSSOFlows removes pending and claimed flows whose original expiration has elapsed.
 func (s *Store) DeleteExpiredSSOFlows(ctx context.Context, now time.Time) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM sso_flows WHERE expires_at <= ?`, now.UTC().Unix()); err != nil {
 		return fmt.Errorf("delete expired sso flows: %w", err)
@@ -620,6 +637,7 @@ func (s *Store) DeleteSSOFlow(ctx context.Context, id string) error {
 	return nil
 }
 
+// ssoSessionIsSSO reports whether a supplied session digest belongs to an SSO session.
 func ssoSessionIsSSO(ctx context.Context, tx *sql.Tx, hash []byte) (bool, error) {
 	if len(hash) == 0 {
 		return false, nil
@@ -635,6 +653,7 @@ func ssoSessionIsSSO(ctx context.Context, tx *sql.Tx, hash []byte) (bool, error)
 	return method == "sso", nil
 }
 
+// ssoAdmin reads the single administrator within the caller's finalization transaction.
 func ssoAdmin(ctx context.Context, tx *sql.Tx) (Admin, error) {
 	return scanAdmin(tx.QueryRowContext(ctx, `SELECT id, username, password_hash, created_at, updated_at FROM admins WHERE id = 1`))
 }
@@ -642,6 +661,7 @@ func ssoAdmin(ctx context.Context, tx *sql.Tx) (Admin, error) {
 const ssoBindingSelect = `SELECT id, admin_id, provider_instance_id, protocol,
 	authority, subject, display_name, email, created_at, updated_at, last_login_at FROM sso_bindings`
 
+// scanSSOBinding decodes a binding and its UTC timestamps, preserving an unset last-login time.
 func scanSSOBinding(row rowScanner) (SSOBinding, error) {
 	var binding SSOBinding
 	var created, updated, lastLogin int64
@@ -662,6 +682,7 @@ func scanSSOBinding(row rowScanner) (SSOBinding, error) {
 	return binding, nil
 }
 
+// newSSOID generates an opaque random identifier for provider namespaces and bindings.
 func newSSOID() (string, error) {
 	var buffer [24]byte
 	if _, err := rand.Read(buffer[:]); err != nil {

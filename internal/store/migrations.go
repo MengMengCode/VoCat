@@ -1,5 +1,6 @@
 package store
 
+// migrationStatements returns the ordered SQL statements for one schema version, or nil if unsupported.
 func migrationStatements(version int) []string {
 	switch version {
 	case 1:

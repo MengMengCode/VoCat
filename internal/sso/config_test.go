@@ -8,6 +8,7 @@ import (
 	"vocat/internal/store"
 )
 
+// TestConfigDraftAndDefaults checks offline draft validation, provider defaults, and URL and scope normalization.
 func TestConfigDraftAndDefaults(t *testing.T) {
 	c, err := NormalizeConfig(Config{})
 	if err != nil {
@@ -28,6 +29,7 @@ func TestConfigDraftAndDefaults(t *testing.T) {
 	}
 }
 
+// TestConfigTokenAuthenticationDefaultsAndCompatibility checks provider defaults and limits auto selection to OIDC.
 func TestConfigTokenAuthenticationDefaultsAndCompatibility(t *testing.T) {
 	for kind, defaultMethod := range map[string]string{"pocketid": "auto", "github": "client_secret_basic", "generic": "client_secret_post"} {
 		t.Run(kind, func(t *testing.T) {
@@ -50,6 +52,7 @@ func TestConfigTokenAuthenticationDefaultsAndCompatibility(t *testing.T) {
 	}
 }
 
+// TestConfigExplicitProviderAddressesDoNotNeedConnectionOptions verifies explicit private endpoints need no network access to save drafts.
 func TestConfigExplicitProviderAddressesDoNotNeedConnectionOptions(t *testing.T) {
 	for _, publicOrigin := range []string{"http://localhost:5173", "https://vocat.nas.example:8443", "https://vocat.example"} {
 		pocket, err := NormalizeConfig(Config{Kind: "pocketid", PublicOrigin: publicOrigin, IssuerURL: "https://id.nas.invalid/path/"})
@@ -63,6 +66,7 @@ func TestConfigExplicitProviderAddressesDoNotNeedConnectionOptions(t *testing.T)
 	}
 }
 
+// TestConfigRejectsUnsafeOrUnsupportedFields covers invalid providers, URLs, scopes, and protocol options.
 func TestConfigRejectsUnsafeOrUnsupportedFields(t *testing.T) {
 	cases := []Config{
 		{Kind: "saml"},

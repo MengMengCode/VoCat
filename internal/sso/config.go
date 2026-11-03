@@ -141,6 +141,7 @@ func NormalizeConfig(c Config) (Config, error) {
 	return c, nil
 }
 
+// ValidateComplete rejects drafts missing the credentials or endpoints needed for a login flow.
 func ValidateComplete(c Config, secret string) error {
 	if c.PublicOrigin == "" || c.ClientID == "" || secret == "" {
 		return store.ErrSSONotConfigured
@@ -161,6 +162,7 @@ func ValidateComplete(c Config, secret string) error {
 	return nil
 }
 
+// CallbackURL derives the fixed callback endpoint from the configured public origin.
 func CallbackURL(c Config) string {
 	if c.PublicOrigin == "" {
 		return ""
@@ -168,10 +170,12 @@ func CallbackURL(c Config) string {
 	return strings.TrimSuffix(c.PublicOrigin, "/") + CallbackPath
 }
 
+// invalidConfig adds a safe diagnostic to the configuration error sentinel.
 func invalidConfig(message string) error {
 	return fmt.Errorf("%w: %s", ErrInvalidConfiguration, message)
 }
 
+// parseURL accepts absolute HTTP URLs without credentials, fragments, or ambiguous ports.
 func parseURL(raw string) (*url.URL, error) {
 	if raw == "" || len(raw) > 4096 || hasControl(raw) || strings.ContainsAny(raw, "\\#") || strings.TrimSpace(raw) != raw {
 		return nil, invalidConfig("invalid URL")
@@ -191,6 +195,7 @@ func parseURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
+// origin canonicalizes a URL origin, removing default ports and preserving IPv6 brackets.
 func origin(u *url.URL) string {
 	port := u.Port()
 	host := strings.ToLower(u.Hostname())
@@ -203,6 +208,7 @@ func origin(u *url.URL) string {
 	return u.Scheme + "://" + host
 }
 
+// isLoopbackHost recognizes localhost and literal loopback addresses for local development.
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -211,6 +217,7 @@ func isLoopbackHost(host string) bool {
 	return err == nil && ip.Unmap().IsLoopback()
 }
 
+// hasControl reports Unicode control characters that are unsafe in configuration or claims.
 func hasControl(value string) bool {
 	return strings.ContainsFunc(value, unicode.IsControl)
 }

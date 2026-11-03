@@ -38,6 +38,8 @@ type oidcProvider struct {
 	keySet   *callbackKeySet
 }
 
+// newOIDCProvider validates HTTPS discovery, endpoint origins, and advertised protocol capabilities.
+// It selects token authentication before exchanging credentials and permits only asymmetric signing algorithms.
 func newOIDCProvider(ctx context.Context, config Config, secret string, client *http.Client, policy *destinationPolicy) (Provider, error) {
 	if err := requireEndpoint(ctx, policy, config.IssuerURL, true); err != nil {
 		return nil, err
@@ -115,6 +117,7 @@ func newOIDCProvider(ctx context.Context, config Config, secret string, client *
 	}, nil
 }
 
+// AuthorizationURL requires a valid OIDC flow and requests query-mode authorization with nonce and PKCE.
 func (p *oidcProvider) AuthorizationURL(flow AuthorizationFlow) (string, error) {
 	if !validAuthorizationFlow(p.config, flow, true) {
 		return "", ErrInvalidIdentity
@@ -124,6 +127,8 @@ func (p *oidcProvider) AuthorizationURL(flow AuthorizationFlow) (string, error) 
 		oauth2.SetAuthURLParam("response_mode", "query")), nil
 }
 
+// VerifyCallback validates the response issuer, exchanges the code, and verifies the signed ID token.
+// The identity must match issuer, audience, time, and nonce constraints; display claims come from that token.
 func (p *oidcProvider) VerifyCallback(ctx context.Context, flow AuthorizationFlow, code, responseIssuer string) (ExternalIdentity, error) {
 	if code == "" || len(code) > 8192 || !validExchangeFlow(p.config, flow) || len(flow.NonceHash) != sha256.Size || (responseIssuer != "" && responseIssuer != p.config.IssuerURL) {
 		return ExternalIdentity{}, ErrInvalidIdentity
@@ -184,11 +189,13 @@ func (p *oidcProvider) VerifyCallback(ctx context.Context, flow AuthorizationFlo
 	return ExternalIdentity{Protocol: "oidc", Authority: idToken.Issuer, Subject: idToken.Subject, DisplayName: claimText("name"), Email: claimText("email")}, nil
 }
 
+// checkMetadata fetches the trusted JWKS and requires at least one usable public signing key.
 func (p *oidcProvider) checkMetadata(ctx context.Context) error {
 	_, err := p.keySet.fetch(ctx)
 	return err
 }
 
+// validNumericDate accepts finite positive JSON timestamps and applies an optional upper bound.
 func validNumericDate(raw json.RawMessage, upper time.Time) bool {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || raw[0] == '"' || string(raw) == "null" {
@@ -205,6 +212,7 @@ func validNumericDate(raw json.RawMessage, upper time.Time) bool {
 	return upper.IsZero() || seconds <= float64(upper.UnixNano())/float64(time.Second)
 }
 
+// contains reports whether a protocol capability list includes the exact requested value.
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
