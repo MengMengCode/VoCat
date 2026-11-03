@@ -542,6 +542,58 @@ func migrationStatements(version int) []string {
 				last_used_at INTEGER NOT NULL DEFAULT 0
 			)`,
 		}
+	case 29:
+		return []string{
+			`CREATE TABLE IF NOT EXISTS sso_bindings (
+				id TEXT PRIMARY KEY,
+				admin_id INTEGER NOT NULL UNIQUE REFERENCES admins(id) ON DELETE CASCADE,
+				provider_instance_id TEXT NOT NULL,
+				protocol TEXT NOT NULL CHECK (protocol IN ('oauth2', 'oidc')),
+				authority TEXT NOT NULL,
+				subject TEXT NOT NULL CHECK (length(subject) > 0),
+				display_name TEXT NOT NULL DEFAULT '',
+				email TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				last_login_at INTEGER NOT NULL DEFAULT 0,
+				UNIQUE(provider_instance_id, authority, subject)
+			)`,
+			`ALTER TABLE sessions ADD COLUMN login_method TEXT NOT NULL DEFAULT 'password'
+				CHECK (login_method IN ('password', 'sso'))`,
+			`ALTER TABLE sessions ADD COLUMN sso_binding_id TEXT REFERENCES sso_bindings(id) ON DELETE CASCADE`,
+			`CREATE INDEX IF NOT EXISTS sessions_sso_binding_idx ON sessions(sso_binding_id)`,
+			`CREATE TRIGGER IF NOT EXISTS sessions_sso_insert_guard BEFORE INSERT ON sessions
+				WHEN (NEW.login_method = 'sso' AND (NEW.sso_binding_id IS NULL OR NOT EXISTS (
+					SELECT 1 FROM sso_bindings WHERE id = NEW.sso_binding_id AND admin_id = NEW.admin_id
+				))) OR (NEW.login_method = 'password' AND NEW.sso_binding_id IS NOT NULL)
+				BEGIN SELECT RAISE(ABORT, 'invalid session login source'); END`,
+			`CREATE TRIGGER IF NOT EXISTS sessions_sso_update_guard BEFORE UPDATE OF login_method, sso_binding_id, admin_id ON sessions
+				WHEN (NEW.login_method = 'sso' AND (NEW.sso_binding_id IS NULL OR NOT EXISTS (
+					SELECT 1 FROM sso_bindings WHERE id = NEW.sso_binding_id AND admin_id = NEW.admin_id
+				))) OR (NEW.login_method = 'password' AND NEW.sso_binding_id IS NOT NULL)
+				BEGIN SELECT RAISE(ABORT, 'invalid session login source'); END`,
+			`CREATE TABLE IF NOT EXISTS sso_flows (
+				id TEXT PRIMARY KEY,
+				state_hash BLOB NOT NULL UNIQUE CHECK (length(state_hash) = 32),
+				browser_token_hash BLOB NOT NULL CHECK (length(browser_token_hash) = 32),
+				purpose TEXT NOT NULL CHECK (purpose IN ('login', 'bind')),
+				provider_instance_id TEXT NOT NULL,
+				config_revision INTEGER NOT NULL,
+				initiating_session_hash BLOB REFERENCES sessions(token_hash) ON DELETE CASCADE,
+				admin_id INTEGER REFERENCES admins(id) ON DELETE CASCADE,
+				nonce_hash BLOB,
+				pkce_verifier TEXT NOT NULL DEFAULT '',
+				redirect_uri TEXT NOT NULL,
+				return_path TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				expires_at INTEGER NOT NULL,
+				claimed_at INTEGER NOT NULL DEFAULT 0,
+				CHECK (expires_at > created_at),
+				CHECK ((purpose = 'login' AND initiating_session_hash IS NULL AND admin_id IS NULL)
+					OR (purpose = 'bind' AND initiating_session_hash IS NOT NULL AND admin_id IS NOT NULL))
+			)`,
+			`CREATE INDEX IF NOT EXISTS sso_flows_expires_idx ON sso_flows(expires_at)`,
+		}
 	default:
 		return nil
 	}
