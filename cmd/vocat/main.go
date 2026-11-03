@@ -665,6 +665,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		return nil
 	}
 	go handler.StartLogRetentionLoop(pollContext, time.Minute)
+	handler.StartSSOCleanup(pollContext)
 	go handler.StartSMSSyncLoop(pollContext, 15*time.Second)
 	handler.StartCellularDataReconciler(pollContext)
 	handler.StartTelegramBot(pollContext)
@@ -678,9 +679,11 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       15 * time.Second,
-			WriteTimeout:      30 * time.Second,
-			IdleTimeout:       90 * time.Second,
-			MaxHeaderBytes:    1 << 20,
+			// Leave time to report a controlled error after the 30s SSO
+			// verification budget expires.
+			WriteTimeout:   40 * time.Second,
+			IdleTimeout:    90 * time.Second,
+			MaxHeaderBytes: 1 << 20,
 		}
 	}
 	plainHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,39 @@
+name: SSO
+
+on:
+  pull_request:
+    paths: ["cmd/vocat/**", "internal/auth/**", "internal/store/**", "internal/server/**", "internal/sso/**", "internal/netguard/**", "web/**", "go.mod", "go.sum", ".github/workflows/sso.yml"]
+  push:
+    branches: [master]
+    paths: ["cmd/vocat/**", "internal/auth/**", "internal/store/**", "internal/server/**", "internal/sso/**", "internal/netguard/**", "web/**", "go.mod", "go.sum", ".github/workflows/sso.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  authentication:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci --no-audit --no-fund
+      - run: npm --prefix web test
+      - run: npm --prefix web run build
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go test -race ./internal/auth ./internal/store ./internal/server ./internal/sso
+      - run: npm --prefix web exec -- playwright install --with-deps chromium
+      - run: npm --prefix web run test:e2e
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: sso-browser-failures
+          path: web/test-results/
+          retention-days: 7

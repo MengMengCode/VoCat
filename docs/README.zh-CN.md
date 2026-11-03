@@ -47,7 +47,7 @@ Vocat 是一款面向 Quectel EC20/EC25 系列蜂窝模组的开源 Web 控制�
 | 代理路由 | 上游 SOCKS 路由、设备绑定、国家规则、TCP 可达性检查以及面向 WiFi Calling 数据路径的 UDP Associate 检查。 |
 | 通知 | 通过 Telegram、Bark、邮件、Pushplus 以及签名 Webhook 转发新入站短信，每条短信单独推送。 |
 | Telegram 机器人 | 设备状态、已安装配置文件列表与切换、WiFi Calling 控制以及短信发送。敏感操作需要管理员确认。 |
-| 运维 | 鉴权、CSRF 防护、访问策略、审计事件、实时日志、日志留存、健康检查、响应式布局、深色模式以及中英文应用界面。 |
+| 运维 | 密码与 SSO 鉴权（Pocket ID、GitHub、Generic OAuth2）、CSRF 防护、访问策略、审计事件、实时日志、日志留存、健康检查、响应式布局、深色模式以及中英文应用界面。 |
 | 分发 | 静态 Linux 二进制、systemd 安装脚本、带 SHA-256 校验的自更新、Docker 镜像、GHCR 发布以及 GitHub Actions 发布构建。 |
 
 ## 支持的硬件
@@ -225,6 +225,108 @@ Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件，再应用 `VOCAT
 管理员凭据仅存储在 SQLite 中。使用 `vocat bootstrap-admin` 对空数据库执行一次初始化；环境变量和 JSON 配置不能设置或覆盖管理员用户名或密码。
 
 请勿将 Telegram token、SMTP 密码、Webhook 密钥、SIM 凭据或其他私密数据存放在仓库中。请通过应用设置或受保护的环境文件来配置它们。
+
+## 单点登录（SSO）
+
+VoCat 支持 Pocket ID（OpenID Connect）、GitHub.com OAuth App 和 Generic OAuth2，
+在**设置 → 单点登录（SSO）**中选择其中一个身份提供方。SSO 默认关闭，密码登录始终可用。
+先使用本地管理员登录、保存配置并主动绑定外部账号，再启用 SSO。
+未绑定的外部用户不能注册或获得管理员权限；相同邮箱也不会自动合并账号。
+
+### 配置 Pocket ID
+
+1. 为 VoCat 配置 HTTPS 根路径入口，例如 `https://vocat.example.com`，并设置
+   `VOCAT_SECURE_COOKIES=true`。在 SSO 设置选择 **Pocket ID**，公开入口初始使用当前
+   浏览器访问地址，需要调整时直接编辑**VoCat 公开地址**。页面立即显示紧凑的回调 URL 和复制按钮，
+   无需先保存或填写客户端凭据：
+   `https://vocat.example.com/api/auth/sso/callback`。
+2. 在 Pocket ID 为 VoCat 单独创建 **Confidential** OIDC Client，登记精确回调地址，
+   并确认目标用户或用户组获准使用该客户端。VoCat 与 Komari 应分别注册客户端，
+   各自签发本地会话。
+3. 在 VoCat 填写 Pocket ID 精确的公开 `APP_URL` 作为 Issuer，并填入新客户端的
+   Client ID 和 Client Secret。Client ID 字段提示为“填写身份服务中为 VoCat 创建的客户端 ID”。
+   Scopes 和 PKCE S256 由程序处理，Token 客户端认证根据
+   已验证的 Discovery 自动选择，优先 Basic，其次 Post。保持 SSO 关闭并保存。
+   修改访问地址会立即更新显示的回调地址，保存后用于实际授权。
+4. 检查已保存的配置，成功时显示“配置检查通过”。然后发起账号绑定，完成 Pocket ID Passkey 登录和授权，
+   返回 VoCat 确认绑定状态。配置检查仅验证元数据、结构和可达性；真实绑定前不能
+   据此认定 Client Secret 正确或用户获准访问。
+5. 启用并保存 SSO，在隐身窗口验证登录、原页面恢复及登录后的第一次写操作。
+
+设置页显示已绑定账号和解绑操作。更换外部账号时，先解绑，再绑定目标账号并重新启用 SSO。
+
+Issuer 按发布值精确匹配，包括路径和尾斜杠。Pocket ID 使用经过验证的 ID Token 的
+`issuer + sub` 关联账号，不依赖 UserInfo 端点或邮箱。Discovery、授权、Token 和 JWKS
+端点必须与配置的 Issuer 同 origin；首期不支持通过 `INTERNAL_APP_URL` 发布不同 origin
+的分离后端。Issuer 仍填写公开 `APP_URL`。已保存的显式客户端认证方式和 Scopes 会继续保留。
+
+### GitHub 和 Generic OAuth2
+
+GitHub：在 GitHub.com 新建 OAuth App，登记相同的精确回调地址；在 VoCat 选择
+**GitHub**，填写 Client ID 和 Secret，依次保存、检查、绑定、启用。
+端点固定为 GitHub.com，默认 scope 为 `read:user`，强制使用 PKCE S256。
+绑定使用稳定数值账号 ID，修改 GitHub 用户名不会更换绑定身份。首期不支持 GitHub Enterprise。
+
+Generic OAuth2：除客户端凭据外，还需填写授权、Token、UserInfo URL。Scopes、顶层
+用户 ID 字段名（默认 `id`）、Token 认证和 PKCE 兼容选项在选择 Generic 时直接显示。
+UserInfo 通过 Bearer access token 请求；用户 ID
+必须为非空字符串或整数，大整数保留精确值。默认 Token 认证为 `client_secret_post`，
+默认 PKCE 为 S256。只有确实不支持 PKCE 的旧服务才使用关闭选项。
+Generic OAuth2 不提供 OIDC ID Token 验证。
+
+### 网络、凭据与会话
+
+SSO 路由继续受现有来源网络策略限制，启用 SSO 不会将内网入口自动开放到公网。
+浏览器须能访问 VoCat 和授权页，VoCat 进程须能访问 Discovery、Token 和 JWKS/UserInfo
+端点并信任其 TLS 证书。管理员保存的 Pocket ID HTTPS Issuer 或 Generic 各端点 URL
+即为精确 origin 许可，可连接 RFC1918/IPv6 ULA 私网 HTTPS 服务；
+GitHub 固定端点仍仅允许公网地址。
+
+Generic 的内部服务需要 HTTP 时，在 Token/UserInfo 字段显式填写完整 HTTP URL。
+每次 DNS 解析的所有候选和实际拨号地址都必须为获许可的私网。
+Pocket ID 的 Discovery 不会自动批准其他 origin，其端点必须与配置的 Issuer 同 origin。
+Issuer、Discovery 获取地址与浏览器授权页始终要求 HTTPS。IdP 连接继续拒绝 loopback、
+link-local、云元数据和其他特殊用途地址。私有 CA 应安装到主机或容器的受控信任库，
+不提供跳过 TLS 验证的开关。VoCat 自身使用 localhost 或 HTTPS 入口，与这些 IdP 出站
+许可相互独立。
+
+当前 Compose 使用 host network，应在实际容器内验证 DNS、路由和 CA，不假定桥接网络
+service name 可用。反代入口必须与已保存的公开 origin 一致；回调地址不从任意转发 Host
+头推导。首期只支持根路径部署。本地 Vite 开发时统一使用一个 loopback origin，例如
+`http://127.0.0.1:5173`，并在身份平台登记同一回调地址；IdP 出站网络例外仅用于测试 fixture。
+
+主 Session 和 CSRF Cookie 保持 `SameSite=Strict`，短期授权 Cookie 使用
+`SameSite=Lax` 以支持顶层 GET 跨站回调。任何成功的 SSO 配置保存，包括停用或轮换密钥，
+都会撤销已有 SSO 会话；解绑会撤销旧绑定的 SSO 会话。这些操作保留密码会话和
+API Token。修改本地管理员密码会撤销全部 Session 和 API Token、取消在途授权，并保留
+外部绑定。当前 SSO 会话被成功操作撤销时，界面会提示重新登录。
+
+密钥输入留空代表保留旧值，输入新密钥可替换原值；设置页不提供清除已保存密钥的控件。
+更换 Provider、Client ID、Issuer，或 Generic 的身份端点/ID 字段时，会切换身份命名空间，
+需要重新填写凭据并绑定；已有绑定时必须明确确认清除。更换绑定账号应先解绑，再重新绑定。
+Client Secret 仅保存在服务器受权限保护的 SQLite 中；Sensitive 标志用于接口脱敏，
+不代表数据库加密。第三方 Token 不持久化，也不返回浏览器。
+
+普通退出仅结束当前 VoCat 会话。在 IdP 停用用户或退出 Pocket ID，不会立即撤销既有
+VoCat 会话；它会按 `VOCAT_SESSION_TTL` 到期，也可在 VoCat 停用 SSO 或解绑以立即撤销。
+公开登录能力接口为 `GET /api/auth/providers`；SSO 设置和绑定管理仅接受浏览器 Session，
+写操作还要求 CSRF，Bearer 不可管理这些凭据。版本冲突返回 `409 sso_config_changed`，
+身份源变更需确认时返回 `409 sso_rebind_required`。
+
+### 升级与回滚
+
+SSO 增加 SQLite schema 29。升级保留原管理员、Session、API Token 和设备业务数据，
+且不会自动启用 SSO。升级前记录旧二进制版本或镜像 digest、配置和 CA，并在停服务后
+备份完整持久化目录；在线备份应使用 SQLite backup API 或 `.backup`。
+WAL 模式下不能只裸拷贝正在运行的 `.db` 文件作为可靠备份。
+
+配置故障时优先在新版中关闭 SSO，继续使用密码登录并保留当前业务数据。
+回退到只支持 schema 28 的旧程序时，必须停服务并恢复匹配的升级前数据与配置快照。
+仅回退镜像或手工降低 `PRAGMA user_version` 无法降级数据库。建议将旧快照恢复到独立
+目录/卷后切换，并保留新库排查；恢复快照会失去备份后收到的短信和任务变更。
+Docker 通过拉取镜像并重建容器升级。
+
+生产发布前，应在实际部署完成 Pocket ID Passkey/访问策略联调和升级、回滚演练。
 
 ## Telegram 机器人
 
