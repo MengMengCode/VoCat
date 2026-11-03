@@ -27,10 +27,22 @@ export default function LoginPage() {
 
   useEffect(() => {
     let cancelled = false;
-    void getSSOProviders().then((data) => {
-      if (!cancelled) setProviders(data);
-    }).catch(() => { /* Password login remains available when metadata cannot load. */ });
-    return () => { cancelled = true; };
+    let timer: number | undefined;
+    /** Retry transient metadata failures at most three times without delaying local sign-in. */
+    const load = (attempt: number) => {
+      void getSSOProviders().then((data) => {
+        if (!cancelled) setProviders(data);
+      }).catch(() => {
+        if (!cancelled && attempt < 3) {
+          timer = window.setTimeout(() => load(attempt + 1), 1000 * 2 ** attempt);
+        }
+      });
+    };
+    load(0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {

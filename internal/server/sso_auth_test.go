@@ -317,6 +317,78 @@ func TestSSOHTTPBindLoginAndRevocation(t *testing.T) {
 	assertSSOResponseFields(t, body["data"].(map[string]any), "reauthentication_required")
 }
 
+// TestSSOMutationsRejectCrossSessionCSRF checks matching cookie/header tokens still belong to the authenticated session.
+func TestSSOMutationsRejectCrossSessionCSRF(t *testing.T) {
+	f := newSSOHTTPFixture(t)
+	ctx := context.Background()
+	csrf := f.login(t)
+	response, body := f.request(t, f.client, "PUT", "/api/settings/sso", map[string]any{"expected_revision": 0, "config": f.config(), "client_secret": "fixture-client-secret"}, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("save = %d: %#v", response.StatusCode, body)
+	}
+	response, body = f.request(t, f.client, "POST", "/api/auth/sso/bind", map[string]any{"expected_revision": 1}, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("bind = %d: %#v", response.StatusCode, body)
+	}
+	flowCookie := ssoFlowCookie(t, response)
+	authorize, err := url.Parse(body["data"].(map[string]any)["authorization_url"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	anonymous := &http.Client{CheckRedirect: f.client.CheckRedirect}
+	response, _ = f.request(t, anonymous, "GET", "/api/auth/sso/callback?code=fixture-code&state="+url.QueryEscape(authorize.Query().Get("state")), nil, "", flowCookie)
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/settings?sso_result=bound" {
+		t.Fatalf("binding callback failed: %d %s", response.StatusCode, response.Header.Get("Location"))
+	}
+	before, err := f.store.SSOSnapshot(ctx)
+	if err != nil || before.Binding == nil {
+		t.Fatalf("bound snapshot unavailable: %v", err)
+	}
+	other, err := f.auth.PrepareCredentials(auth.Principal{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.CreateSession(ctx, 1, auth.TokenHash(other.SessionToken), auth.TokenHash(other.CSRFToken), other.ExpiresAt); err != nil {
+		t.Fatal(err)
+	}
+	serverURL, _ := url.Parse(f.server.URL)
+	var sessionCookie *http.Cookie
+	for _, cookie := range f.client.Jar.Cookies(serverURL) {
+		if cookie.Name == sessionCookieName {
+			sessionCookie = cookie
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("authenticated session cookie missing")
+	}
+	config := f.config()
+	config["display_name"] = "must not be saved"
+	for _, endpoint := range []struct {
+		method, path string
+		payload      map[string]any
+	}{
+		{"PUT", "/api/settings/sso", map[string]any{"expected_revision": before.Config.Revision, "config": config}},
+		{"POST", "/api/auth/sso/bind", map[string]any{"expected_revision": before.Config.Revision}},
+		{"DELETE", "/api/auth/sso/binding", map[string]any{"expected_revision": before.Config.Revision}},
+		{"POST", "/api/settings/sso/check", map[string]any{"expected_revision": before.Config.Revision}},
+	} {
+		t.Run(endpoint.method+" "+endpoint.path, func(t *testing.T) {
+			response, body := f.request(t, anonymous, endpoint.method, endpoint.path, endpoint.payload, other.CSRFToken,
+				sessionCookie, &http.Cookie{Name: csrfCookieName, Value: other.CSRFToken})
+			if response.StatusCode != http.StatusForbidden || body["error"].(map[string]any)["code"] != "invalid_csrf" {
+				t.Fatalf("cross-session CSRF = %d: %#v", response.StatusCode, body)
+			}
+			if len(response.Cookies()) != 0 {
+				t.Fatal("rejected mutation changed browser cookies")
+			}
+			after, err := f.store.SSOSnapshot(ctx)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("rejected mutation changed SSO settings, secret, or binding: %v", err)
+			}
+		})
+	}
+}
+
 func TestSSOCredentialManagementRejectsBearerAndKeepsSession(t *testing.T) {
 	f := newSSOHTTPFixture(t)
 	csrf := f.login(t)

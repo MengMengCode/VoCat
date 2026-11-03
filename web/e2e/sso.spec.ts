@@ -309,8 +309,55 @@ test("expanded settings preserve saved origins and expose protocol choices only 
   await expect(card(page).getByLabel("Identity service connection", { exact: true })).toHaveCount(0);
 });
 
-test("provider metadata failures leave password sign-in usable", async ({ page }) => {
-  await page.route("**/api/auth/providers", (route) => route.abort());
+test("provider metadata recovers after a transient failure and stops retrying after success", async ({ page }) => {
+  let attempts = 0;
+  await page.route("**/api/auth/providers", (route) => {
+    attempts++;
+    return attempts === 1 ? route.abort() : route.fulfill({
+      json: { data: { sso: { enabled: true, display_name: "Recovered provider" } } },
+    });
+  });
+  await page.clock.install();
+  await page.goto("/login");
+  await expect.poll(() => attempts).toBe(1);
+  await page.clock.runFor(1100);
+  await expect(page.getByRole("link", { name: "Continue with Recovered provider", exact: true })).toBeVisible();
+  await page.clock.fastForward(30_000);
+  expect(attempts).toBe(2);
+});
+
+test("provider metadata retries are bounded while password sign-in stays available", async ({ page }) => {
+  let attempts = 0;
+  await page.route("**/api/auth/providers", (route) => {
+    attempts++;
+    return route.abort();
+  });
+  await page.clock.install();
+  await page.goto("/login");
+  await expect.poll(() => attempts).toBe(1);
+  for (const [index, delay] of [1000, 2000, 4000].entries()) {
+    await page.clock.runFor(delay + 100);
+    await expect.poll(() => attempts).toBe(index + 2);
+  }
+  await page.clock.fastForward(30_000);
+  expect(attempts).toBe(4);
+  await expect(page.locator('input[autocomplete="current-password"]')).toBeEnabled();
+  await page.locator('input[autocomplete="username"]').fill("admin");
+  await page.locator('input[autocomplete="current-password"]').fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign In", exact: true }).click();
+  await expect(page).toHaveURL(APP + "/");
+});
+
+test("provider metadata failures leave password sign-in usable and cancel retries after navigation", async ({ page }) => {
+  let attempts = 0;
+  await page.route("**/api/auth/providers", (route) => {
+    attempts++;
+    return route.abort();
+  });
+  await page.clock.install();
   await passwordLogin(page);
   await settings(page);
+  const attemptsAfterLogin = attempts;
+  await page.clock.fastForward(30_000);
+  expect(attempts).toBe(attemptsAfterLogin);
 });
