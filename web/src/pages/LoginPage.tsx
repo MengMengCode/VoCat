@@ -13,6 +13,7 @@ import { ssoErrorMessage, SSO_RESULT_MESSAGES } from "../lib/sso";
 const INPUT_CLASS =
   "w-full rounded-lg border border-gray-200 bg-white/70 py-3 pl-10 pr-4 font-mono text-sm text-gray-900 placeholder-gray-400 outline-none transition-all focus:border-indigo-500/40 focus:ring-2 focus:ring-indigo-500/25 dark:border-white/10 dark:bg-black/20 dark:text-gray-100 dark:placeholder-gray-500";
 
+/** Offer local and enabled SSO sign-in while preserving safe return paths and callback notices. */
 export default function LoginPage() {
   const { login } = useAuth();
   const { t } = useI18n();
@@ -57,6 +58,7 @@ export default function LoginPage() {
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
+  /** Validate local credentials and navigate to the safe return path after a successful password login. */
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!username || !password) {

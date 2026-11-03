@@ -32,6 +32,7 @@ type ssoConfigInput struct {
 	PKCEMode        string   `json:"pkce_mode"`
 }
 
+// config copies writable provider fields into the store model while leaving revision and namespace store-owned.
 func (input ssoConfigInput) config() store.SSOConfig {
 	return store.SSOConfig{
 		Enabled: input.Enabled, Kind: input.Kind, DisplayName: input.DisplayName,
@@ -48,6 +49,7 @@ type ssoConfigView struct {
 	ssoConfigInput
 }
 
+// ssoPublicConfig exposes provider settings and revision without the private identity namespace.
 func ssoPublicConfig(config store.SSOConfig) ssoConfigView {
 	return ssoConfigView{
 		Revision: config.Revision,
@@ -61,6 +63,8 @@ func ssoPublicConfig(config store.SSOConfig) ssoConfigView {
 	}
 }
 
+// handleSSOSettings reads or saves SSO settings through browser-session authorization and revision checks.
+// Writes require session-bound CSRF, reject secret masks, and report whether saving revoked the current session.
 func (s *Server) handleSSOSettings(w http.ResponseWriter, r *http.Request) {
 	session, ok := s.requireBrowserSession(w, r)
 	if !ok {
@@ -125,6 +129,7 @@ func (s *Server) handleSSOSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ssoSettingsDTO returns editable defaults or saved settings, binding metadata, and secret-presence flags.
 func ssoSettingsDTO(snapshot store.SSOSnapshot) map[string]any {
 	config := snapshot.Config
 	if !snapshot.HasConfiguration {
@@ -137,6 +142,7 @@ func ssoSettingsDTO(snapshot store.SSOSnapshot) map[string]any {
 	}
 }
 
+// ssoBindingDTO exposes display metadata and timestamps without external subjects or internal binding identifiers.
 func ssoBindingDTO(binding *store.SSOBinding) map[string]any {
 	value := map[string]any{"bound": false, "display_name": "", "email": "", "created_at": nil, "last_login_at": nil}
 	if binding != nil {
@@ -149,6 +155,7 @@ func ssoBindingDTO(binding *store.SSOBinding) map[string]any {
 	return value
 }
 
+// handleSSOCheck validates saved provider readiness within browser authorization, rate, and revision boundaries.
 func (s *Server) handleSSOCheck(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
