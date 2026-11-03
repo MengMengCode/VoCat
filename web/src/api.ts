@@ -5,6 +5,11 @@ import type {
   LoginResponse,
   SecuritySettings,
   Session,
+  SSOProviders,
+  SSOSettings,
+  SSOSaveRequest,
+  SSOCheckResult,
+  SSOUnbindResult,
 } from "./types";
 import { tl } from "./lib/i18n";
 
@@ -238,6 +243,33 @@ export function updateLoggingSettings(settings: {
   level: LoggingSettings["level"];
 }) {
   return api<LoggingSettings>("/settings/logging", { method: "PUT", body: settings });
+}
+
+export function getSSOProviders() {
+  return api<SSOProviders>("/auth/providers", { cache: "no-store" });
+}
+
+export function getSSOSettings() {
+  return api<SSOSettings>("/settings/sso", { cache: "no-store" });
+}
+
+export function saveSSOSettings(request: SSOSaveRequest) {
+  return api<SSOSettings>("/settings/sso", { method: "PUT", body: request });
+}
+
+export function checkSSOSettings(expectedRevision: number) {
+  return api<SSOCheckResult>("/settings/sso/check", { method: "POST", body: { expectedRevision } });
+}
+
+export function bindSSOAccount(expectedRevision: number) {
+  return api<{ authorizationUrl: string }>("/auth/sso/bind", {
+    method: "POST",
+    body: { expectedRevision },
+  });
+}
+
+export function unbindSSOAccount(expectedRevision: number) {
+  return api<SSOUnbindResult>("/auth/sso/binding", { method: "DELETE", body: { expectedRevision } });
 }
 
 export function apiMessage(error: unknown) {

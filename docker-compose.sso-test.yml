@@ -1,0 +1,40 @@
+# Local web/SSO testing on Docker Desktop or OrbStack, without modem devices.
+# Build: docker compose -f docker-compose.sso-test.yml build
+# Initialize once (reads the admin password from stdin):
+#   docker compose -f docker-compose.sso-test.yml run --rm -T \
+#     --entrypoint /opt/vocat/bin/vocat vocat bootstrap-admin
+# Start: docker compose -f docker-compose.sso-test.yml up -d --wait
+# Visit http://127.0.0.1:7575 and use that same origin in SSO settings.
+name: vocat-sso-test
+
+services:
+  vocat:
+    image: vocat:sso-dev
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: 0.1.0-sso-dev
+    container_name: vocat-sso-test
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7575:7575"
+    environment:
+      VOCAT_CONTAINER: docker
+      VOCAT_ADDR: 0.0.0.0:7575
+      VOCAT_DATABASE_PATH: /opt/vocat/data/vocat.db
+      VOCAT_SECURE_COOKIES: "false"
+      TZ: Asia/Shanghai
+    volumes:
+      - vocat-sso-test-data:/opt/vocat/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7575/readyz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  vocat-sso-test-data:
+    name: vocat-sso-test-data

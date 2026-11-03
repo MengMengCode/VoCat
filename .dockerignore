@@ -10,6 +10,8 @@ data/
 **/node_modules/
 web/dist/
 web/build/
+web/test-results/
+web/playwright-report/
 **/__pycache__/
 *.pyc
 *.pyo
