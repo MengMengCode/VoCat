@@ -1,0 +1,25 @@
+name: Dependency review
+
+on:
+  pull_request:
+    paths:
+      - go.mod
+      - go.sum
+      - web/package.json
+      - web/package-lock.json
+      - .github/workflows/dependency-review.yml
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/dependency-review-action@v5
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: never
+          license-check: false
