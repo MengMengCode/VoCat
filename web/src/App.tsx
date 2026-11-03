@@ -18,6 +18,7 @@ import AutomaticTasksPage from "./pages/AutomaticTasksPage";
 import LogsPage from "./pages/LogsPage";
 import SettingsPage from "./pages/SettingsPage";
 import ExtensionPage from "./pages/ExtensionPage";
+import { safeRedirect } from "./lib/safeRedirect";
 
 const THEME_KEY = "theme";
 const DISCLAIMER_KEY = "vocat_disclaimer_agreed_at";
@@ -53,9 +54,12 @@ function RequireAuth({ children }: { children: ReactElement }) {
   return children;
 }
 
+/** Redirect authenticated visitors only to safe local destinations; otherwise show the login shell. */
 function LoginLayout({ isDark, onToggleTheme }: { isDark: boolean; onToggleTheme: () => void }) {
   const { ready, isAuthenticated } = useAuth();
-  if (ready && isAuthenticated) return <Navigate to="/" replace />;
+  const location = useLocation();
+  const redirect = safeRedirect(new URLSearchParams(location.search).get("redirect"), window.location.origin);
+  if (ready && isAuthenticated) return <Navigate to={redirect} replace />;
   return <UnauthenticatedShell isDark={isDark} onToggleTheme={onToggleTheme} />;
 }
 

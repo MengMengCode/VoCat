@@ -1,23 +1,64 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRightRegular, LockClosedRegular, PersonRegular } from "@fluentui/react-icons";
 import { useAuth } from "../store/auth";
 import { useI18n } from "../lib/i18n";
 import { message } from "../components/ui/message";
 import { BrandLogo } from "../components/shell/BrandLogo";
+import { getSSOProviders } from "../api";
+import type { SSOProviders } from "../types";
+import { safeRedirect } from "../lib/safeRedirect";
+import { ssoErrorMessage, SSO_RESULT_MESSAGES } from "../lib/sso";
 
 const INPUT_CLASS =
   "w-full rounded-lg border border-gray-200 bg-white/70 py-3 pl-10 pr-4 font-mono text-sm text-gray-900 placeholder-gray-400 outline-none transition-all focus:border-indigo-500/40 focus:ring-2 focus:ring-indigo-500/25 dark:border-white/10 dark:bg-black/20 dark:text-gray-100 dark:placeholder-gray-500";
 
+/** Offer local and enabled SSO sign-in while preserving safe return paths and callback notices. */
 export default function LoginPage() {
   const { login } = useAuth();
   const { t } = useI18n();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [working, setWorking] = useState(false);
+  const [providers, setProviders] = useState<SSOProviders | null>(null);
+  const [ssoNotice, setSSONotice] = useState<{ error: boolean; text: string } | null>(null);
+  const redirect = safeRedirect(searchParams.get("redirect"), window.location.origin);
 
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    /** Retry transient metadata failures at most three times without delaying local sign-in. */
+    const load = (attempt: number) => {
+      void getSSOProviders().then((data) => {
+        if (!cancelled) setProviders(data);
+      }).catch(() => {
+        if (!cancelled && attempt < 3) {
+          timer = window.setTimeout(() => load(attempt + 1), 1000 * 2 ** attempt);
+        }
+      });
+    };
+    load(0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    const error = searchParams.get("sso_error");
+    const result = searchParams.get("sso_result");
+    if (!error && !result) return;
+    if (error) setSSONotice({ error: true, text: ssoErrorMessage(error) });
+    else if (result && Object.hasOwn(SSO_RESULT_MESSAGES, result)) setSSONotice({ error: false, text: SSO_RESULT_MESSAGES[result] });
+    const next = new URLSearchParams(searchParams);
+    next.delete("sso_error");
+    next.delete("sso_result");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  /** Validate local credentials and navigate to the safe return path after a successful password login. */
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!username || !password) {
@@ -30,8 +71,7 @@ export default function LoginPage() {
     setWorking(false);
     if (ok) {
       message.success(t("欢迎回来"));
-      const redirect = searchParams.get("redirect");
-      navigate(redirect ? decodeURIComponent(redirect) : "/", { replace: true });
+      navigate(redirect, { replace: true });
     } else {
       message.error(t("登录失败，请检查凭证"));
     }
@@ -53,6 +93,11 @@ export default function LoginPage() {
             </h2>
             <p className="mt-3 text-sm tracking-wide text-gray-500 dark:text-gray-400">{t("高通模块专业测试工具")}</p>
           </div>
+          {ssoNotice ? (
+            <div role={ssoNotice.error ? "alert" : "status"} className={`relative z-10 mb-5 rounded-lg border px-3 py-3 text-sm leading-relaxed ${ssoNotice.error ? "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-200" : "border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-500/25 dark:bg-sky-500/10 dark:text-sky-200"}`}>
+              {t(ssoNotice.text)}
+            </div>
+          ) : null}
           <form onSubmit={submit} className="relative z-10 space-y-6">
             <div className="space-y-2">
               <div className="relative">
@@ -97,6 +142,16 @@ export default function LoginPage() {
               {!working && <ArrowRightRegular className="h-5 w-5" />}
             </button>
           </form>
+          {providers?.sso.enabled ? (
+            <div className="relative z-10 mt-6 border-t border-gray-200 pt-5 dark:border-white/10">
+              <a
+                href={`/api/auth/sso/start?${new URLSearchParams({ redirect }).toString()}`}
+                className="flex w-full items-center justify-center rounded-lg border border-sky-300 bg-sky-50 px-4 py-3 text-sm font-semibold text-sky-700 transition-colors hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300 dark:hover:bg-sky-500/20"
+              >
+                {t("通过 {provider} 登录").replace("{provider}", providers.sso.displayName || "SSO")}
+              </a>
+            </div>
+          ) : null}
         </div>
         <div className="mt-6 text-center">
           <p className="text-xs text-gray-500">vocat © 2026</p>
