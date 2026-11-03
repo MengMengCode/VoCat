@@ -323,6 +323,7 @@ func TestSecureCookieAttributes(t *testing.T) {
 		"session-token",
 		"csrf-token",
 		time.Now().Add(time.Hour),
+		true,
 	)
 
 	var sessionCookie *http.Cookie

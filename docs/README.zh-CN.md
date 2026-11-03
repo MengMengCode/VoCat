@@ -214,7 +214,7 @@ Vocat 先从 `VOCAT_CONFIG` 读取可选的 JSON 配置文件，再应用 `VOCAT
 | `VOCAT_ADDR` | `0.0.0.0:7575` | HTTP 监听地址。 |
 | `VOCAT_DATABASE_PATH` | `./data/vocat.db` | SQLite 数据库路径。 |
 | `VOCAT_SESSION_TTL` | `24h` | 鉴权会话有效期。 |
-| `VOCAT_SECURE_COOKIES` | `false` | 在使用 HTTPS 时将会话 Cookie 标记为安全。 |
+| `VOCAT_SECURE_COOKIES` | `false` | 可选：强制所有入口使用安全 Cookie；默认按 HTTP/HTTPS 入口自动适配。 |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | 优雅关闭超时时间。 |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | API 请求体最大字节数。 |
 | `VOCAT_REPO` | `MengMengCode/VoCat` | 自更新器使用的受信任 GitHub 仓库，格式为 `owner/name`。 |
@@ -236,7 +236,7 @@ VoCat 支持 Pocket ID（OpenID Connect）、GitHub.com OAuth App 和 Generic OA
 ### 配置 Pocket ID
 
 1. 为 VoCat 配置 HTTPS 根路径入口，例如 `https://vocat.example.com`，并设置
-   `VOCAT_SECURE_COOKIES=true`。在 SSO 设置选择 **Pocket ID**，公开入口初始使用当前
+   HTTPS 公开地址。Cookie 会按访问入口自动适配，无需设置 `VOCAT_SECURE_COOKIES`；该环境变量只用于强制所有入口使用安全 Cookie。在 SSO 设置选择 **Pocket ID**，公开入口初始使用当前
    浏览器访问地址，需要调整时直接编辑**VoCat 公开地址**。页面立即显示紧凑的回调 URL 和复制按钮，
    无需先保存或填写客户端凭据：
    `https://vocat.example.com/api/auth/sso/callback`。
@@ -274,6 +274,12 @@ UserInfo 通过 Bearer access token 请求；用户 ID
 默认 PKCE 为 S256。只有确实不支持 PKCE 的旧服务才使用关闭选项。
 Generic OAuth2 不提供 OIDC ID Token 验证。
 
+### 同时使用域名和内网 IP 登录
+
+同一份身份服务配置和账号绑定可用于已配置的 HTTPS 公开入口，以及 localhost、loopback 和明确的私网 IP 入口。请在身份服务登记每个入口的完整回调 URL（路径为 `/api/auth/sso/callback`）。程序按当前入口生成授权回调地址，并在 Token 交换时使用同一个地址；跨入口提交回调会被拒绝。普通公网 HTTP 地址仍不被允许。
+
+直接 TLS、已配置的 HTTPS 反代入口或可信的 `X-Forwarded-Proto` 会自动启用安全 Cookie；未受信任的转发头不会参与判断，反代应保留 Host。密码会话只依据请求传输方式及显式强制设置选择 Cookie 属性；保存或关闭 SSO 不会改变密码客户端的行为。公开地址的推断仅用于 SSO 登录和 SSO 会话的 CSRF 刷新。独立的内网 HTTP 入口无需切换配置或重启。混合使用两种协议时请移除旧的全局 `VOCAT_SECURE_COOKIES=true` 强制设置。HTTP 入口的登录凭据会以明文传输。
+
 ### 网络、凭据与会话
 
 SSO 路由继续受现有来源网络策略限制，启用 SSO 不会将内网入口自动开放到公网。
@@ -291,8 +297,8 @@ link-local、云元数据和其他特殊用途地址。私有 CA 应安装到主
 许可相互独立。
 
 当前 Compose 使用 host network，应在实际容器内验证 DNS、路由和 CA，不假定桥接网络
-service name 可用。反代入口必须与已保存的公开 origin 一致；回调地址不从任意转发 Host
-头推导。首期只支持根路径部署。本地 Vite 开发时统一使用一个 loopback origin，例如
+service name 可用。公开域名反代入口应与已保存的公开 origin 一致；同时允许显式私网 IP 入口，
+不从任意转发 Host 头推导回调地址。首期只支持根路径部署。本地 Vite 开发时统一使用一个 loopback origin，例如
 `http://127.0.0.1:5173`，并在身份平台登记同一回调地址；IdP 出站网络例外仅用于测试 fixture。
 
 主 Session 和 CSRF Cookie 保持 `SameSite=Strict`，短期授权 Cookie 使用

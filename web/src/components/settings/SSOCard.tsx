@@ -249,7 +249,7 @@ export function SSOCard() {
                 <option value="pocketid">Pocket ID</option><option value="github">GitHub</option><option value="generic">Generic OAuth2</option>
               </select>
             </Field>
-            {textField("VoCat 公开地址", "publicOrigin", "https://vocat.example.com")}
+            {textField("VoCat 公开地址", "publicOrigin", "https://vocat.example.com", t("使用当前访问入口完成登录；请在身份服务登记域名和内网地址各自的回调 URL。"))}
             {draft.kind === "pocketid" ? textField("Pocket ID Issuer", "issuerUrl", "https://pocket-id.example.com", t("填写 Pocket ID 的实例地址")) : null}
             {textField("Client ID", "clientId", undefined, t("填写身份服务中为 VoCat 创建的客户端 ID"))}
             <Field label="Client Secret" hint={t(saved?.hasClientSecret && !sourceChanged ? "已保存密钥；留空表示保持不变。" : "填写客户端密钥；仅保存在服务器，不会回显。") }>

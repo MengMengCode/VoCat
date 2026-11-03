@@ -122,15 +122,18 @@ func run() error {
 
 	servers := []*http.Server{
 		{Addr: appAddress, Handler: http.HandlerFunc(f.serveApp), ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0)},
+		{Addr: "127.0.0.1:17477", Handler: http.HandlerFunc(f.serveApp), ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0)},
 		{Addr: idpAddress, Handler: http.HandlerFunc(f.serveIDP), ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0)},
 	}
-	failures := make(chan error, 2)
+	failures := make(chan error, len(servers))
 	for _, srv := range servers {
 		listener, err := net.Listen("tcp", srv.Addr)
 		if err != nil {
 			return err
 		}
-		listener = tls.NewListener(listener, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})
+		if srv.Addr != "127.0.0.1:17477" {
+			listener = tls.NewListener(listener, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})
+		}
 		go func(srv *http.Server, listener net.Listener) { failures <- srv.Serve(listener) }(srv, listener)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -167,7 +170,7 @@ func (f *fixture) reset() error {
 		database.Close()
 		return err
 	}
-	handler, err := server.New(server.Options{Store: database, Auth: authentication, Assets: web.Dist, SecureCookies: true,
+	handler, err := server.New(server.Options{Store: database, Auth: authentication, Assets: web.Dist,
 		SSO: sso.New(database, sso.Options{HTTPClient: f.client})})
 	if err != nil {
 		database.Close()
@@ -257,7 +260,7 @@ func (f *fixture) serveIDP(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, map[string]any{"keys": []any{map[string]any{"kty": "RSA", "kid": "browser-test-key", "alg": "RS256", "use": "sig", "n": base64.RawURLEncoding.EncodeToString(f.key.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(f.key.E)).Bytes())}}})
 	case "/authorize":
 		q := r.URL.Query()
-		if q.Get("client_id") != clientID || q.Get("redirect_uri") != appOrigin+sso.CallbackPath || q.Get("response_type") != "code" || q.Get("response_mode") != "query" || q.Get("code_challenge_method") != "S256" || len(q.Get("nonce")) < 32 || len(q.Get("state")) < 32 || len(q.Get("code_challenge")) < 32 || !strings.Contains(" "+q.Get("scope")+" ", " openid ") {
+		if q.Get("client_id") != clientID || !allowedCallback(q.Get("redirect_uri")) || q.Get("response_type") != "code" || q.Get("response_mode") != "query" || q.Get("code_challenge_method") != "S256" || len(q.Get("nonce")) < 32 || len(q.Get("state")) < 32 || len(q.Get("code_challenge")) < 32 || !strings.Contains(" "+q.Get("scope")+" ", " openid ") {
 			http.Error(w, "invalid authorization request", http.StatusBadRequest)
 			return
 		}
@@ -303,7 +306,7 @@ func (f *fixture) serveIDP(w http.ResponseWriter, r *http.Request) {
 		delete(f.codes, r.Form.Get("code"))
 		digest := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
 		pkce := authorization.Challenge == base64.RawURLEncoding.EncodeToString(digest[:]) && r.Form.Get("code_verifier") != ""
-		redirect := authorization.Redirect == r.Form.Get("redirect_uri") && authorization.Redirect == appOrigin+sso.CallbackPath
+		redirect := authorization.Redirect == r.Form.Get("redirect_uri") && allowedCallback(authorization.Redirect)
 		validBasic := basic && user == clientID && secret == clientSecret
 		if !ok || !validBasic || !pkce || !redirect || r.Form.Get("grant_type") != "authorization_code" || r.URL.RawQuery != "" {
 			f.mu.Unlock()
@@ -382,4 +385,8 @@ func testCertificate() (tls.Certificate, *x509.CertPool, error) {
 	roots := x509.NewCertPool()
 	roots.AppendCertsFromPEM(certPEM)
 	return tlsCertificate, roots, nil
+}
+
+func allowedCallback(uri string) bool {
+	return uri == appOrigin+sso.CallbackPath || uri == "http://127.0.0.1:17477"+sso.CallbackPath || uri == "http://localhost:17477"+sso.CallbackPath
 }

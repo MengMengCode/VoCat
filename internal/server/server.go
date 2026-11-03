@@ -305,7 +305,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	s.loginLimiter.recordSuccess(limiterKey)
 	s.auditAuth(r, credentials.Principal.Username, "success")
-	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt)
+	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt, s.secureCookiesForRequest(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"user":          credentials.Principal,
@@ -347,7 +347,15 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 		return
 	}
-	s.setCSRFCookie(w, csrfToken, session.ExpiresAt)
+	secure := s.secureCookiesForRequest(r)
+	if session.LoginMethod == "sso" {
+		secure, err = s.ssoSessionSecureCookies(r)
+		if err != nil {
+			s.writeSSOError(w, err)
+			return
+		}
+	}
+	s.setCSRFCookie(w, csrfToken, session.ExpiresAt, secure)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"user":          session.Principal,
@@ -388,7 +396,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 		return
 	}
-	s.clearAuthCookies(w)
+	s.clearAuthCookies(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]bool{"logged_out": true},
 	})
@@ -529,7 +537,7 @@ func (s *Server) requireAuthenticated(w http.ResponseWriter, r *http.Request) bo
 // raw {"error":...} document. Frontend fetches explicitly request JSON and
 // are handled by the shared vocat:unauthorized event.
 func (s *Server) authenticationRequired(w http.ResponseWriter, r *http.Request) {
-	s.clearAuthCookies(w)
+	s.clearAuthCookies(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
 		strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") {
@@ -550,7 +558,7 @@ func (s *Server) validateDoubleSubmitCSRF(w http.ResponseWriter, r *http.Request
 	return headerToken, true
 }
 
-func (s *Server) setAuthCookies(w http.ResponseWriter, sessionToken string, csrfToken string, expiresAt time.Time) {
+func (s *Server) setAuthCookies(w http.ResponseWriter, sessionToken string, csrfToken string, expiresAt time.Time, secure bool) {
 	maxAge := int(time.Until(expiresAt).Seconds())
 	if maxAge < 1 {
 		maxAge = 1
@@ -562,13 +570,13 @@ func (s *Server) setAuthCookies(w http.ResponseWriter, sessionToken string, csrf
 		Expires:  expiresAt,
 		MaxAge:   maxAge,
 		HttpOnly: true,
-		Secure:   s.secureCookies,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
-	s.setCSRFCookie(w, csrfToken, expiresAt)
+	s.setCSRFCookie(w, csrfToken, expiresAt, secure)
 }
 
-func (s *Server) setCSRFCookie(w http.ResponseWriter, csrfToken string, expiresAt time.Time) {
+func (s *Server) setCSRFCookie(w http.ResponseWriter, csrfToken string, expiresAt time.Time, secure bool) {
 	maxAge := int(time.Until(expiresAt).Seconds())
 	if maxAge < 1 {
 		maxAge = 1
@@ -580,12 +588,12 @@ func (s *Server) setCSRFCookie(w http.ResponseWriter, csrfToken string, expiresA
 		Expires:  expiresAt,
 		MaxAge:   maxAge,
 		HttpOnly: false,
-		Secure:   s.secureCookies,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
-func (s *Server) clearAuthCookies(w http.ResponseWriter) {
+func (s *Server) clearAuthCookies(w http.ResponseWriter, r *http.Request) {
 	for _, name := range []string{sessionCookieName, csrfCookieName} {
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,
@@ -594,7 +602,7 @@ func (s *Server) clearAuthCookies(w http.ResponseWriter) {
 			Expires:  time.Unix(1, 0),
 			MaxAge:   -1,
 			HttpOnly: name == sessionCookieName,
-			Secure:   s.secureCookies,
+			Secure:   s.secureCookiesForRequest(r),
 			SameSite: http.SameSiteStrictMode,
 		})
 	}

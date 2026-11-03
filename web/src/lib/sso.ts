@@ -34,11 +34,13 @@ export function ssoCallbackPreview(publicOrigin: string): string | null {
     if (!host.startsWith("[") && parsed.hostname !== host) return null;
     if (parsed.protocol === "http:") {
       const octets = host.split(".");
-      const ipv4Loopback = octets.length === 4 && octets[0] === "127"
+      const ipv4Local = octets.length === 4 && (octets[0] === "127" || octets[0] === "10"
+        || (octets[0] === "192" && octets[1] === "168")
+        || (octets[0] === "172" && Number(octets[1]) >= 16 && Number(octets[1]) <= 31))
         && octets.every((part) => /^(0|[1-9][0-9]{0,2})$/.test(part) && Number(part) <= 255);
-      const ipv6Loopback = host.startsWith("[") && (parsed.hostname === "[::1]"
+      const ipv6Local = host.startsWith("[") && (parsed.hostname === "[::1]" || /^\[f[cd][0-9a-f]{2}:/.test(parsed.hostname)
         || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(parsed.hostname));
-      if (host !== "localhost" && !ipv4Loopback && !ipv6Loopback) return null;
+      if (host !== "localhost" && !ipv4Local && !ipv6Local) return null;
     }
     // Match the server's origin spelling, including IPv6 and nonstandard ports.
     const suffix = port && !((parsed.protocol === "https:" && port === "443") || (parsed.protocol === "http:" && port === "80")) ? `:${port}` : "";

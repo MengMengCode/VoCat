@@ -368,3 +368,95 @@ test("provider metadata failures leave password sign-in usable and cancel retrie
   await page.clock.fastForward(30_000);
   expect(attempts).toBe(attemptsAfterLogin);
 });
+
+test("one saved HTTPS provider serves local HTTP and HTTPS browser logins automatically", async ({ page, browser }) => {
+  await passwordLogin(page);
+  await settings(page);
+  await card(page).getByLabel("Pocket ID Issuer", { exact: true }).fill(IDP);
+  await card(page).getByLabel("Client ID", { exact: true }).fill("vocat-browser-test");
+  await card(page).getByPlaceholder("Enter a new secret", { exact: true }).fill(SECRET);
+  await save(page);
+  await card(page).getByRole("button", { name: "Bind external account", exact: true }).click();
+  await approve(page);
+  await expect(page).toHaveURL(APP + "/settings");
+  await expect(card(page).getByText("Browser test administrator", { exact: true })).toBeVisible();
+  await settings(page);
+  await card(page).getByRole("switch", { name: "Enable SSO sign-in", exact: true }).click();
+  await save(page);
+  for (const origin of ["http://127.0.0.1:17477", "http://localhost:17477", APP]) {
+    const context = await browser.newContext({ ignoreHTTPSErrors: true });
+    await prepare(context);
+    const p = await context.newPage();
+    await p.goto(origin + "/login");
+    await p.getByRole("link", { name: "Continue with Pocket ID", exact: true }).click();
+    expect(new URL(p.url()).searchParams.get("redirect_uri")).toBe(origin + "/api/auth/sso/callback");
+    await approve(p);
+    await expect(p).toHaveURL(origin + "/");
+    const session = await checkSession(p);
+    expect(session.status).toBe(200);
+    const cookies = await context.cookies(origin);
+    for (const name of ["vocat_session", "vocat_csrf"]) {
+      const cookie = cookies.find(c => c.name === name);
+      expect(cookie?.secure).toBe(origin.startsWith("https:"));
+      expect(cookie?.sameSite).toBe("Strict");
+    }
+    const result = await p.evaluate(async () => {
+      const session = await (await fetch("/api/auth/session")).json();
+      const response = await fetch("/api/settings/security", { method: "PUT", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.data.csrf_token }, body: JSON.stringify({ mode: "internal" }) });
+      return response.status;
+    });
+    expect(result).toBe(200);
+    const saved = await p.evaluate(async () => (await (await fetch("/api/settings/sso")).json()).data.config);
+    expect(saved.public_origin).toBe(APP);
+    await context.close();
+    const passwordContext = await browser.newContext({ ignoreHTTPSErrors: true });
+    await prepare(passwordContext);
+    const passwordPage = await passwordContext.newPage();
+    await passwordPage.goto(origin + "/login?redirect=%2Fsettings");
+    await passwordPage.locator('input[autocomplete="username"]').fill("admin");
+    await passwordPage.locator('input[autocomplete="current-password"]').fill(PASSWORD);
+    await passwordPage.getByRole("button", { name: "Sign In", exact: true }).click();
+    await expect(passwordPage).toHaveURL(origin + "/settings");
+    expect((await passwordContext.cookies(origin)).find(c => c.name === "vocat_session")?.secure).toBe(origin.startsWith("https:"));
+    expect((await checkSession(passwordPage)).status).toBe(200);
+    await passwordContext.close();
+  }
+});
+
+test("a saved HTTPS SSO draft does not change an existing HTTP password client", async ({ page, browser }) => {
+  await passwordLogin(page);
+  await settings(page);
+  await card(page).getByLabel("VoCat public origin", { exact: true }).fill("https://vocat.test:17477");
+  await card(page).getByLabel("Pocket ID Issuer", { exact: true }).fill(IDP);
+  await card(page).getByLabel("Client ID", { exact: true }).fill("vocat-browser-test");
+  await card(page).getByPlaceholder("Enter a new secret", { exact: true }).fill(SECRET);
+  const saved = await save(page);
+  expect(saved.config.enabled).toBe(false);
+
+  const context = await browser.newContext();
+  await prepare(context);
+  try {
+    const p = await context.newPage();
+    const origin = "http://vocat.test:17477";
+    await p.goto(origin + "/login?redirect=%2Fsettings");
+    await p.locator('input[autocomplete="username"]').fill("admin");
+    await p.locator('input[autocomplete="current-password"]').fill(PASSWORD);
+    await p.getByRole("button", { name: "Sign In", exact: true }).click();
+    await expect(p).toHaveURL(origin + "/settings");
+    expect((await checkSession(p)).status).toBe(200);
+    for (const name of ["vocat_session", "vocat_csrf"]) {
+      expect((await context.cookies(origin)).find(c => c.name === name)?.secure).toBe(false);
+    }
+    const statuses = await p.evaluate(async () => {
+      const session = await (await fetch("/api/auth/session")).json();
+      const headers = { "Content-Type": "application/json", "X-CSRF-Token": session.data.csrf_token };
+      const write = await fetch("/api/settings/security", { method: "PUT", headers, body: JSON.stringify({ mode: "internal" }) });
+      const logout = await fetch("/api/auth/logout", { method: "POST", headers });
+      const afterLogout = await fetch("/api/auth/session");
+      return [write.status, logout.status, afterLogout.status];
+    });
+    expect(statuses).toEqual([200, 200, 401]);
+  } finally {
+    await context.close();
+  }
+});

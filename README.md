@@ -262,7 +262,7 @@ Vocat reads an optional JSON configuration file from `VOCAT_CONFIG`, then applie
 | `VOCAT_ADDR` | `0.0.0.0:7575` | HTTP listen address. |
 | `VOCAT_DATABASE_PATH` | `./data/vocat.db` | SQLite database path. |
 | `VOCAT_SESSION_TTL` | `24h` | Authentication session lifetime. |
-| `VOCAT_SECURE_COOKIES` | `false` | Marks session cookies as secure when HTTPS is used. |
+| `VOCAT_SECURE_COOKIES` | `false` | Optional force-Secure override for all entries; HTTP/HTTPS cookies otherwise adapt automatically. |
 | `VOCAT_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown timeout. |
 | `VOCAT_MAX_REQUEST_BODY_BYTES` | `1048576` | Maximum API request body size. |
 | `VOCAT_MCP_ENABLED` | `true` | Serve the MCP endpoint at `/mcp` for AI agents. Set `false` to disable it. |
@@ -292,7 +292,7 @@ administrators, including accounts sharing the bound account's email address.
 ### Pocket ID
 
 1. Use an HTTPS origin for VoCat, such as `https://vocat.example.com`, and set
-   `VOCAT_SECURE_COOKIES=true`. In the SSO settings choose **Pocket ID**. The
+   the HTTPS entry as the public origin. Cookie security is selected automatically for each browser entry; `VOCAT_SECURE_COOKIES=true` is only an optional global force-Secure override. In the SSO settings choose **Pocket ID**. The
    public origin initially uses the current browser address; edit the visible
    **VoCat public origin** field if necessary. The compact callback URL and Copy
    button appear immediately, so the URL can be copied
@@ -347,6 +347,12 @@ nonempty string or an integer; large integer IDs retain their exact value.
 The default Token authentication is `client_secret_post` and PKCE is S256.
 Disable PKCE only for a provider that lacks PKCE support.
 Generic OAuth2 does not perform OIDC ID Token verification.
+
+### Multiple browser entries for SSO
+
+One saved provider and account binding can serve the configured HTTPS public origin and explicit local/private IP entries over HTTP or HTTPS. Register each complete callback URL (`/api/auth/sso/callback`) with the identity provider. Authorization and token exchange use the same callback frozen at flow creation; callbacks on a different entry are rejected. HTTP is accepted only for localhost, loopback and literal private IP addresses, not arbitrary public HTTP hosts.
+
+Direct TLS, the configured HTTPS public origin behind a proxy, and trusted `X-Forwarded-Proto` select Secure cookies automatically. Untrusted forwarded headers are ignored. Proxies must preserve Host. Password sessions use only their request transport and the explicit override; saving or disabling SSO does not change password-client Cookie behavior. The configured-origin fallback is limited to SSO sign-in and SSO-session CSRF refreshes. Separate LAN HTTP entries remain usable without a process restart or configuration switch; remove a legacy force-Secure override when using both protocols. HTTP credentials travel without transport encryption.
 
 ### Network, credentials and sessions
 

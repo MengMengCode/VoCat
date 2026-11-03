@@ -14,6 +14,7 @@ export const EN_DICT: Record<string, string> = {
   "填写 Pocket ID 的实例地址": "Enter the Pocket ID instance URL",
   "填写身份服务中为 VoCat 创建的客户端 ID": "Enter the client ID created for VoCat in your identity service",
   "登录按钮名称": "Sign-in button label",
+  "使用当前访问入口完成登录；请在身份服务登记域名和内网地址各自的回调 URL。": "Sign-in uses the current browser entry. Register the callback URL for each domain and local address with your identity service.",
   "VoCat 公开地址": "VoCat public origin",
   "填写客户端密钥；仅保存在服务器，不会回显。": "Enter the client secret. It stays on the server and is never returned.",
   "已保存密钥；留空表示保持不变。": "A secret is saved. Leave blank to keep it.",

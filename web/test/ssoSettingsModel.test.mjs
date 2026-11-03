@@ -17,7 +17,7 @@ test("Pocket ID starts as an unsaved disabled draft with PKCE and automatic clie
 });
 
 test("callback URLs are available before saving credentials, including loopback development", () => {
-  for (const origin of ["http://localhost:5173", "http://127.0.0.1:8080", "http://[::1]:8080", "https://vocat.nas.test:8443"]) {
+  for (const origin of ["http://localhost:5173", "http://127.0.0.1:8080", "http://192.168.111.27:7575", "http://10.0.0.2", "http://172.16.0.2", "http://[fd00::1]:7575", "http://[::1]:8080", "https://vocat.nas.test:8443"]) {
     const draft = defaultSSOConfig(origin);
     assert.equal(draft.clientId, "");
     assert.equal(ssoCallbackPreview(draft.publicOrigin), `${origin}/api/auth/sso/callback`);
@@ -51,7 +51,7 @@ test("invalid public origins never produce a copyable callback URL", () => {
     "https://user:secret@vocat.example", "https://@vocat.example", "https://vocat.example\\path",
     " https://vocat.example", "https://vocat.example ", "https://vocat.\nexample", "https://vocat.example\u0085",
     "https://vocat.example:0", "https://vocat.example:", "https://vocat.example:65536", "https://[::1",
-    "http://vocat.example", "http://192.168.1.20:8080", "http://localhost.",
+    "http://vocat.example", "http://localhost.",
     "http://127.1", "http://127.00.0.1", "http://2130706433", "http://0x7f000001", "http://[::2]",
   ]) assert.equal(ssoCallbackPreview(origin), null, origin);
 });
