@@ -2,6 +2,10 @@ package sso
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rsa"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -111,11 +115,36 @@ func (set *callbackKeySet) fetch(ctx context.Context) ([]jose.JSONWebKey, error)
 		}
 		var key jose.JSONWebKey
 		if json.Unmarshal(raw, &key) == nil && key.Valid() && key.IsPublic() {
-			keys = append(keys, key)
+			for _, algorithm := range set.algorithms {
+				if keySupportsAlgorithm(key, algorithm) {
+					keys = append(keys, key)
+					break
+				}
+			}
 		}
 	}
 	if len(keys) == 0 {
 		return nil, ErrProviderUnavailable
 	}
 	return keys, nil
+}
+
+// keySupportsAlgorithm requires a compatible public key family, EC curve, and any explicit algorithm tag.
+func keySupportsAlgorithm(key jose.JSONWebKey, algorithm jose.SignatureAlgorithm) bool {
+	if key.Algorithm != "" && key.Algorithm != string(algorithm) {
+		return false
+	}
+	switch public := key.Key.(type) {
+	case *rsa.PublicKey:
+		return algorithm == jose.RS256 || algorithm == jose.RS384 || algorithm == jose.RS512 ||
+			algorithm == jose.PS256 || algorithm == jose.PS384 || algorithm == jose.PS512
+	case *ecdsa.PublicKey:
+		return algorithm == jose.ES256 && public.Curve == elliptic.P256() ||
+			algorithm == jose.ES384 && public.Curve == elliptic.P384() ||
+			algorithm == jose.ES512 && public.Curve == elliptic.P521()
+	case ed25519.PublicKey:
+		return algorithm == jose.EdDSA
+	default:
+		return false
+	}
 }

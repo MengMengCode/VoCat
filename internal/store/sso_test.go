@@ -460,6 +460,7 @@ func TestSSOSessionSourceDatabaseConstraints(t *testing.T) {
 		{name: "insert sso without binding", statement: `INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, login_method) VALUES (X'11', 1, X'22', 4102444800, 1, 'sso')`},
 		{name: "insert password with binding", statement: `INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, sso_binding_id) VALUES (X'11', 1, X'22', 4102444800, 1, 'missing')`},
 		{name: "insert sso with missing binding", statement: `INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, login_method, sso_binding_id) VALUES (X'11', 1, X'22', 4102444800, 1, 'sso', 'missing')`},
+		{name: "insert sso with another admin binding", statement: `INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, login_method, sso_binding_id) VALUES (X'11', 1, X'22', 4102444800, 1, 'sso', 'other-binding')`},
 		{name: "update sso without binding", statement: `UPDATE sessions SET login_method = 'sso' WHERE token_hash = ?`, args: []any{session}},
 		{name: "update sso with missing binding", statement: `UPDATE sessions SET login_method = 'sso', sso_binding_id = 'missing' WHERE token_hash = ?`, args: []any{session}},
 		{name: "update sso with another admin binding", statement: `UPDATE sessions SET login_method = 'sso', sso_binding_id = 'other-binding' WHERE token_hash = ?`, args: []any{session}},

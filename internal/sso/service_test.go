@@ -16,20 +16,28 @@ import (
 // TestSaveValidatesJWKSBeforeEnablingSSO checks enable validation and persistence for unusable, cancelled, and valid JWKS responses.
 func TestSaveValidatesJWKSBeforeEnablingSSO(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		status  int
-		body    string
-		cancel  bool
-		wantErr error
+		name      string
+		status    int
+		body      string
+		cancel    bool
+		algorithm string
+		wantErr   error
 	}{
 		{name: "unavailable keys", status: http.StatusServiceUnavailable, wantErr: ErrProviderUnavailable},
 		{name: "malformed keys", status: http.StatusOK, body: `{`, wantErr: ErrProviderUnavailable},
 		{name: "empty keys", status: http.StatusOK, body: `{"keys":[]}`, wantErr: ErrProviderUnavailable},
+		{name: "encryption-only keys", status: http.StatusOK, body: `{"keys":[{"kty":"RSA","use":"enc","kid":"enc-only","n":"AQAB","e":"AQAB"}]}`, wantErr: ErrProviderUnavailable},
+		{name: "incompatible key family", status: http.StatusOK, body: `{"keys":[{"kty":"RSA","n":"AQAB","e":"AQAB"}]}`, algorithm: "ES256", wantErr: ErrProviderUnavailable},
 		{name: "cancelled request", cancel: true, wantErr: context.Canceled},
 		{name: "usable keys"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newOIDCFixture(t)
+			if tc.algorithm != "" {
+				f.changeMeta = func(metadata map[string]any) {
+					metadata["id_token_signing_alg_values_supported"] = []string{tc.algorithm}
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			database, err := store.Open(ctx, ":memory:")
