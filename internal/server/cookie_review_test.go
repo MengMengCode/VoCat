@@ -187,7 +187,8 @@ func TestSessionCookiePolicyOnlyUpgrades(t *testing.T) {
 	}
 }
 
-// TestSessionPolicyFailurePreservesCSRF checks that failed policy writes leave existing credentials usable and a retry can recover.
+// TestSessionPolicyFailurePreservesCSRF checks server-side credential retention and retry with the saved session cookie.
+// Browser recovery after a 401, which expires that cookie, is not covered here.
 func TestSessionPolicyFailurePreservesCSRF(t *testing.T) {
 	for _, tc := range []struct {
 		name, failure string
@@ -246,6 +247,17 @@ func TestSessionPolicyFailurePreservesCSRF(t *testing.T) {
 				for _, c := range w.Result().Cookies() {
 					if c.Name == csrfCookieName && c.MaxAge >= 0 {
 						t.Fatal("failed refresh issued a new CSRF cookie")
+					}
+				}
+				if tc.status == http.StatusUnauthorized {
+					expired := false
+					for _, c := range w.Result().Cookies() {
+						if c.Name == sessionCookieName && c.MaxAge < 0 {
+							expired = true
+						}
+					}
+					if !expired {
+						t.Fatal("unauthorized refresh did not expire the session cookie")
 					}
 				}
 				after, err := f.store.SessionByTokenHash(ctx, auth.TokenHash(session.Value))

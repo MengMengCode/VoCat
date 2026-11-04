@@ -8,6 +8,29 @@ import (
 	"vocat/internal/store"
 )
 
+// TestPublicOriginIPv6Normalization matches browser host serialization while preserving allowed ports.
+func TestPublicOriginIPv6Normalization(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"https://[2001:0DB8:0:0:0:0:0:1]:8443", "https://[2001:db8::1]:8443"},
+		{"http://[0:0:0:0:0:0:0:1]:7575", "http://[::1]:7575"},
+		{"http://[::ffff:192.168.1.20]:7575", "http://[::ffff:c0a8:114]:7575"},
+		{"http://[::ffff:10.0.0.2]:80", "http://[::ffff:a00:2]"},
+		{"https://[FD00:0:0:0:0:0:0:1]:443", "https://[fd00::1]"},
+		{"https://Example.COM:8443", "https://example.com:8443"},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			got, err := NormalizePublicOrigin(tc.input)
+			if err != nil || got != tc.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+			config, err := NormalizeConfig(Config{PublicOrigin: tc.input})
+			if err != nil || config.PublicOrigin != tc.want {
+				t.Fatalf("config origin %q, %v; want %q", config.PublicOrigin, err, tc.want)
+			}
+		})
+	}
+}
+
 // TestConfigDraftAndDefaults checks offline draft validation, provider defaults, and URL and scope normalization.
 func TestConfigDraftAndDefaults(t *testing.T) {
 	c, err := NormalizeConfig(Config{})

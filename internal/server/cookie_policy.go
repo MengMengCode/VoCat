@@ -24,14 +24,15 @@ func (s *Server) ssoRequestOrigin(r *http.Request, configured string) (string, e
 	}
 	candidate, err := sso.NormalizePublicOrigin(scheme + "://" + r.Host)
 	saved, savedErr := url.Parse(configured)
-	if savedErr == nil && saved.Host != "" {
+	normalizedSaved, normalizedErr := sso.NormalizePublicOrigin(configured)
+	if savedErr == nil && saved.Host != "" && normalizedErr == nil {
 		// Nginx may terminate TLS without the application trusting all proxy headers.
 		canonical, canonicalErr := sso.NormalizePublicOrigin(saved.Scheme + "://" + r.Host)
-		if canonicalErr == nil && canonical == configured {
+		if canonicalErr == nil && canonical == normalizedSaved {
 			if (r.TLS != nil || s.forwardedHTTPS(r)) && saved.Scheme == "http" {
 				return candidate, err
 			}
-			return configured, nil
+			return normalizedSaved, nil
 		}
 	}
 	if err != nil {

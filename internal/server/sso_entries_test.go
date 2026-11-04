@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"vocat/internal/sso"
+	"vocat/internal/store"
 )
 
 // Exercise the same saved identity over multiple browser entries, including
@@ -76,6 +78,8 @@ func TestSSOAutomaticBrowserEntries(t *testing.T) {
 		{"https://vo.example", true, false},
 		{"http://192.168.111.27:7575", false, false},
 		{"http://127.0.0.1:7575", false, false},
+		{"http://[::1]:7575", false, false},
+		{"http://[::ffff:c0a8:114]:7575", false, false},
 		{"https://192.168.111.27:7575", true, true},
 	} {
 		t.Run(tc.origin, func(t *testing.T) {
@@ -130,5 +134,30 @@ func TestSSOAutomaticBrowserEntries(t *testing.T) {
 				t.Fatalf("first CSRF write: %d %s", w.Code, w.Body)
 			}
 		})
+	}
+	// Simulate a configuration saved by an older version without re-saving it
+	// through the new normalization path; the existing binding remains usable.
+	snapshot, err := f.store.SSOSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Config.PublicOrigin = "https://[2001:0DB8:0:0:0:0:0:1]:8443"
+	legacy, _, err := f.store.SaveSSOConfiguration(context.Background(), store.SSOSaveRequest{ExpectedRevision: snapshot.Config.Revision, Config: snapshot.Config})
+	if err != nil || legacy.Binding == nil {
+		t.Fatalf("prepare legacy configuration: %v", err)
+	}
+	entry := "https://[2001:db8::1]:8443"
+	w = do(entry, "GET", "/api/auth/sso/start", nil, nil, "", false)
+	if w.Code != http.StatusFound {
+		t.Fatalf("legacy IPv6 start: %d %s", w.Code, w.Body)
+	}
+	u, err := url.Parse(w.Header().Get("Location"))
+	if err != nil || u.Query().Get("redirect_uri") != entry+sso.CallbackPath {
+		t.Fatalf("legacy IPv6 callback: %v %v", u, err)
+	}
+	callback = sso.CallbackPath + "?code=fixture-code&state=" + url.QueryEscape(u.Query().Get("state"))
+	w = do(entry, "GET", callback, nil, w.Result().Cookies(), "", false)
+	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
+		t.Fatalf("legacy IPv6 login: %d %s", w.Code, w.Header().Get("Location"))
 	}
 }

@@ -228,6 +228,20 @@ func NormalizePublicOrigin(raw string) (string, error) {
 	if u.Scheme != "https" && !IsLocalHost(u.Hostname()) {
 		return "", invalidConfig("HTTP public origins require localhost or a literal private IP")
 	}
+	// Browsers serialize IPv4-mapped IPv6 as hexadecimal, unlike netip.String.
+	// Limit this normalization to the public entry, not identity-provider URLs.
+	if ip, parseErr := netip.ParseAddr(u.Hostname()); parseErr == nil && ip.Is6() {
+		port := u.Port()
+		host := ip.String()
+		if ip.Is4In6() {
+			b := ip.As16()
+			host = fmt.Sprintf("::ffff:%x:%x", uint16(b[12])<<8|uint16(b[13]), uint16(b[14])<<8|uint16(b[15]))
+		}
+		u.Host = "[" + host + "]"
+		if port != "" {
+			u.Host += ":" + port
+		}
+	}
 	return origin(u), nil
 }
 

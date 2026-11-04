@@ -13,6 +13,10 @@ func TestBrowserEntryOrigin(t *testing.T) {
 		tls, trust, reject                 bool
 	}{
 		{name: "HTTPS reverse proxy", host: "vo.example", saved: "https://vo.example", forwarded: "http", want: "https://vo.example"},
+		{name: "legacy expanded public IPv6 behind proxy", host: "[2001:db8::1]:8443", saved: "https://[2001:0DB8:0:0:0:0:0:1]:8443", want: "https://[2001:db8::1]:8443"},
+		{name: "legacy mapped IPv6 behind proxy", host: "[::ffff:c0a8:114]:7575", saved: "https://[::ffff:192.168.1.20]:7575", want: "https://[::ffff:c0a8:114]:7575"},
+		{name: "different public IPv6 host", host: "[2001:db8::2]:8443", saved: "https://[2001:0DB8:0:0:0:0:0:1]:8443", reject: true},
+		{name: "different public IPv6 port", host: "[2001:db8::1]:8444", saved: "https://[2001:0DB8:0:0:0:0:0:1]:8443", reject: true},
 		{name: "private HTTP", host: "192.168.111.27:7575", saved: "https://vo.example", want: "http://192.168.111.27:7575"},
 		{name: "loopback HTTP", host: "127.0.0.1:7575", saved: "https://vo.example", want: "http://127.0.0.1:7575"},
 		{name: "direct TLS", host: "192.168.111.27:7575", saved: "https://vo.example", tls: true, want: "https://192.168.111.27:7575"},
