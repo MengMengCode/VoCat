@@ -92,6 +92,77 @@ func TestJWKSRequiresCompatibleSigningKey(t *testing.T) {
 	}
 }
 
+// TestJWKSRequiresVerificationKeyOperation covers restrictions not retained by
+// jose.JSONWebKey, including malformed metadata and mixed usable key sets.
+func TestJWKSRequiresVerificationKeyOperation(t *testing.T) {
+	f := newOIDCFixture(t)
+	encoded, err := json.Marshal(jose.JSONWebKey{Key: &f.key.PublicKey, Algorithm: string(jose.RS256)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name         string
+		operations   string
+		use          string
+		includeValid bool
+		wantKeys     int
+	}{
+		{name: "omitted", wantKeys: 1},
+		{name: "verification", operations: `["verify"]`, wantKeys: 1},
+		{name: "sign and verify", operations: `["sign","verify"]`, wantKeys: 1},
+		{name: "consistent signature use", operations: `["verify"]`, use: "sig", wantKeys: 1},
+		{name: "encryption only", operations: `["encrypt"]`},
+		{name: "signing only", operations: `["sign"]`},
+		{name: "case sensitive", operations: `["Verify"]`},
+		{name: "empty", operations: `[]`},
+		{name: "null", operations: `null`},
+		{name: "string", operations: `"verify"`},
+		{name: "object", operations: `{"verify":true}`},
+		{name: "non-string operation", operations: `["verify",1]`},
+		{name: "null operation", operations: `["verify",null]`},
+		{name: "duplicate operation", operations: `["verify","verify"]`},
+		{name: "unrelated operations without use", operations: `["verify","encrypt"]`, wantKeys: 1},
+		{name: "inconsistent signature use", operations: `["verify","encrypt"]`, use: "sig"},
+		{name: "verify cannot override encryption use", operations: `["verify"]`, use: "enc"},
+		{name: "mixed usable and encryption-only keys", operations: `["encrypt"]`, includeValid: true, wantKeys: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var key map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &key); err != nil {
+				t.Fatal(err)
+			}
+			if tc.operations != "" {
+				key["key_ops"] = json.RawMessage(tc.operations)
+			}
+			if tc.use != "" {
+				key["use"], err = json.Marshal(tc.use)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			keys := []any{key}
+			if tc.includeValid {
+				keys = append(keys, json.RawMessage(encoded))
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewEncoder(w).Encode(map[string]any{"keys": keys}); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer server.Close()
+			set := &callbackKeySet{url: server.URL, client: server.Client(), algorithms: []jose.SignatureAlgorithm{jose.RS256}}
+			fetched, err := set.fetch(context.Background())
+			if tc.wantKeys == 0 {
+				if !errors.Is(err, ErrProviderUnavailable) {
+					t.Fatalf("restricted key set accepted: keys=%d error=%v", len(fetched), err)
+				}
+			} else if err != nil || len(fetched) != tc.wantKeys {
+				t.Fatalf("usable key set rejected: keys=%d want=%d error=%v", len(fetched), tc.wantKeys, err)
+			}
+		})
+	}
+}
+
 // TestJWKSRequestInheritsCallbackCancellation verifies cancellation stops an in-flight trusted-key refresh.
 func TestJWKSRequestInheritsCallbackCancellation(t *testing.T) {
 	started := make(chan struct{})

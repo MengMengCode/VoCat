@@ -12,7 +12,10 @@ var ambiguousPathEscape = regexp.MustCompile(`(?i)%(?:2f|5c|2e|25|0[0-9a-f]|1[0-
 // SafeRedirect accepts an already parsed redirect parameter. It never decodes
 // query values a second time and preserves the original query and fragment.
 func SafeRedirect(value, origin string) string {
-	if value == "" || len(value) > 4096 || !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
+	// Keep the authority check explicit: browsers treat both // and /\ as
+	// network-path references, so a leading slash alone is not sufficient.
+	if len(value) == 0 || len(value) > 4096 || value[0] != '/' ||
+		(len(value) > 1 && (value[1] == '/' || value[1] == '\\')) {
 		return "/"
 	}
 	for _, character := range value {

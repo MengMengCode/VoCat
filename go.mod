@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/go-jose/go-jose/v4 v4.1.7
 	github.com/iniwex5/quectel-qmi-go v0.6.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/warthog618/sms v0.3.0
