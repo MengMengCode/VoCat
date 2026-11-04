@@ -49,7 +49,7 @@ func TestSaveValidatesJWKSBeforeEnablingSSO(t *testing.T) {
 				t.Fatal(err)
 			}
 			session, expiresAt := digest("password-session"), time.Now().Add(time.Hour)
-			if err := database.CreateSession(ctx, 1, session, digest("csrf"), expiresAt); err != nil {
+			if err := database.CreateSession(ctx, 1, session, digest("csrf"), expiresAt, false); err != nil {
 				t.Fatal(err)
 			}
 			client := f.server.Client()

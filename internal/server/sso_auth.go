@@ -113,7 +113,7 @@ func (s *Server) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	capability := map[string]any{"enabled": false}
-	if snapshot.Config.Enabled && snapshot.Binding != nil && s.ssoCookiePolicyAllows(snapshot.Config.PublicOrigin) && sso.ValidateComplete(snapshot.Config, snapshot.ClientSecret) == nil {
+	if snapshot.Config.Enabled && snapshot.Binding != nil && sso.ValidateComplete(snapshot.Config, snapshot.ClientSecret) == nil {
 		capability = map[string]any{"enabled": true, "display_name": snapshot.Config.DisplayName}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"sso": capability}})
@@ -142,11 +142,13 @@ func (s *Server) handleSSOStart(w http.ResponseWriter, r *http.Request) {
 		s.writeSSOError(w, err)
 		return
 	}
-	if !s.ssoCookiePolicyAllows(snapshot.Config.PublicOrigin) {
-		writeError(w, http.StatusBadRequest, "invalid_sso_config", "HTTPS SSO requires VOCAT_SECURE_COOKIES=true")
+	origin, err := s.ssoRequestOrigin(r, snapshot.Config.PublicOrigin)
+	if err != nil {
+		s.writeSSOError(w, err)
 		return
 	}
-	started, err := s.sso.Start(r.Context(), sso.StartRequest{Purpose: "login", ExpectedRevision: snapshot.Config.Revision, ReturnPath: query.Get("redirect"), BrowserFlowIDs: s.ssoBrowserFlows(r)})
+
+	started, err := s.sso.Start(r.Context(), sso.StartRequest{PublicOrigin: origin, Purpose: "login", ExpectedRevision: snapshot.Config.Revision, ReturnPath: query.Get("redirect"), BrowserFlowIDs: s.ssoBrowserFlows(r)})
 	if err != nil {
 		s.writeSSOError(w, err)
 		return
@@ -186,8 +188,18 @@ func (s *Server) handleSSOBind(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "a saved configuration revision is required")
 		return
 	}
+	snapshot, err := s.sso.Snapshot(r.Context())
+	if err != nil {
+		s.writeSSOError(w, err)
+		return
+	}
+	origin, err := s.ssoRequestOrigin(r, snapshot.Config.PublicOrigin)
+	if err != nil {
+		s.writeSSOError(w, err)
+		return
+	}
 	started, err := s.sso.Start(r.Context(), sso.StartRequest{
-		Purpose: "bind", ExpectedRevision: *request.ExpectedRevision, ReturnPath: "/settings",
+		PublicOrigin: origin, Purpose: "bind", ExpectedRevision: *request.ExpectedRevision, ReturnPath: "/settings",
 		AdminID: session.Principal.ID, SessionHash: session.TokenHash(), SessionExpiresAt: session.ExpiresAt,
 		BrowserFlowIDs: s.ssoBrowserFlows(r),
 	})
@@ -221,7 +233,7 @@ func (s *Server) handleSSOUnbind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if revoked {
-		s.clearAuthCookies(w)
+		s.clearAuthCookies(w, r)
 	}
 	s.recordAudit(r.Context(), session.Principal.Username, "auth.sso.unbind", "sso", fmt.Sprintf("%s:%d", snapshot.Config.Kind, snapshot.Config.Revision), "success", requestRemoteHost(r))
 	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"reauthentication_required": revoked}})
@@ -248,6 +260,16 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	flow, err := s.sso.FindFlow(r.Context(), query.Get("state"))
 	if err != nil {
+		s.redirectSSOError(w, r, nil, "invalid_flow")
+		return
+	}
+	flowOrigin, ok := strings.CutSuffix(flow.RedirectURI, sso.CallbackPath)
+	if !ok {
+		s.redirectSSOError(w, r, nil, "invalid_flow")
+		return
+	}
+	requestOrigin, originErr := s.ssoRequestOrigin(r, flowOrigin)
+	if originErr != nil || requestOrigin != flowOrigin {
 		s.redirectSSOError(w, r, nil, "invalid_flow")
 		return
 	}
@@ -285,10 +307,7 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 		s.redirectSSOError(w, r, &flow, "invalid_flow")
 		return
 	}
-	if flow.Purpose == "login" && !s.ssoCookiePolicyAllows(flow.RedirectURI) {
-		s.redirectSSOError(w, r, &flow, "config_changed")
-		return
-	}
+
 	identity, err := s.sso.Verify(r.Context(), flow, code, query.Get("iss"))
 	if err != nil {
 		s.redirectSSOError(w, r, &flow, ssoCallbackError(err))
@@ -314,14 +333,16 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 		s.redirectSSOError(w, r, &flow, "provider_unavailable")
 		return
 	}
+	secure := s.secureCookiesForRequest(r) || strings.HasPrefix(flow.RedirectURI, "https://")
 	_, err = s.store.FinalizeSSOLogin(r.Context(), flow, identity, store.SSOSessionMaterial{
-		TokenHash: auth.TokenHash(credentials.SessionToken), CSRFHash: auth.TokenHash(credentials.CSRFToken), ExpiresAt: credentials.ExpiresAt,
+		SecureCookies: secure,
+		TokenHash:     auth.TokenHash(credentials.SessionToken), CSRFHash: auth.TokenHash(credentials.CSRFToken), ExpiresAt: credentials.ExpiresAt,
 	})
 	if err != nil {
 		s.redirectSSOError(w, r, &flow, ssoCallbackError(err))
 		return
 	}
-	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt)
+	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt, secure)
 	s.auditSSO(r, admin.Username, "auth.sso.login", flow, "success")
 	http.Redirect(w, r, sso.SafeRedirect(flow.ReturnPath, ""), http.StatusSeeOther)
 }
@@ -370,18 +391,13 @@ func (s *Server) setSSOFlowCookie(w http.ResponseWriter, flow store.SSOFlow, tok
 	if maxAge < 1 {
 		maxAge = 1
 	}
-	cookie := &http.Cookie{Name: ssoCookiePrefix + flow.ID, Value: token, Path: "/api/auth/sso", HttpOnly: true, Secure: strings.HasPrefix(flow.RedirectURI, "https://"), SameSite: http.SameSiteLaxMode, Expires: flow.ExpiresAt, MaxAge: maxAge}
+	cookie := &http.Cookie{Name: ssoCookiePrefix + flow.ID, Value: token, Path: "/api/auth/sso", HttpOnly: true, Secure: s.secureCookies || strings.HasPrefix(flow.RedirectURI, "https://"), SameSite: http.SameSiteLaxMode, Expires: flow.ExpiresAt, MaxAge: maxAge}
 	if clear {
 		cookie.Value = ""
 		cookie.MaxAge = -1
 		cookie.Expires = time.Unix(1, 0)
 	}
 	http.SetCookie(w, cookie)
-}
-
-// ssoCookiePolicyAllows requires secure primary cookies when the configured SSO callback uses HTTPS.
-func (s *Server) ssoCookiePolicyAllows(origin string) bool {
-	return !strings.HasPrefix(origin, "https://") || s.secureCookies
 }
 
 // ssoBrowserFlows extracts a bounded set of plausible flow IDs from browser cookies for per-browser quotas.

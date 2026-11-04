@@ -595,6 +595,10 @@ func migrationStatements(version int) []string {
 			)`,
 			`CREATE INDEX IF NOT EXISTS sso_flows_expires_idx ON sso_flows(expires_at)`,
 		}
+	case 30:
+		return []string{
+			`ALTER TABLE sessions ADD COLUMN secure_cookies INTEGER NOT NULL DEFAULT 0 CHECK (secure_cookies IN (0, 1))`,
+		}
 	default:
 		return nil
 	}

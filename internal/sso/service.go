@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -90,6 +91,8 @@ func (s *Service) Save(ctx context.Context, request store.SSOSaveRequest) (store
 }
 
 type StartRequest struct {
+	// PublicOrigin is a validated browser entry selected by the HTTP server.
+	PublicOrigin     string
 	Purpose          string
 	ExpectedRevision int64
 	ReturnPath       string
@@ -133,9 +136,16 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (StartedFlow,
 	if err := ValidateComplete(snapshot.Config, snapshot.ClientSecret); err != nil {
 		return StartedFlow{}, store.ErrSSONotConfigured
 	}
+	config := snapshot.Config
+	if request.PublicOrigin != "" {
+		config.PublicOrigin, err = NormalizePublicOrigin(request.PublicOrigin)
+		if err != nil {
+			return StartedFlow{}, err
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, RemoteBudget)
 	defer cancel()
-	provider, err := NewProvider(ctx, snapshot.Config, snapshot.ClientSecret, s.providerOptions...)
+	provider, err := NewProvider(ctx, config, snapshot.ClientSecret, s.providerOptions...)
 	if err != nil {
 		if ctx.Err() != nil {
 			return StartedFlow{}, ctx.Err()
@@ -164,8 +174,8 @@ func (s *Service) Start(ctx context.Context, request StartRequest) (StartedFlow,
 		Purpose: request.Purpose, ProviderInstanceID: snapshot.Config.ProviderInstanceID,
 		ConfigRevision: snapshot.Config.Revision, AdminID: request.AdminID,
 		InitiatingSessionHash: request.SessionHash,
-		NonceHash:             digest(nonce), RedirectURI: CallbackURL(snapshot.Config),
-		ReturnPath: SafeRedirect(request.ReturnPath, snapshot.Config.PublicOrigin),
+		NonceHash:             digest(nonce), RedirectURI: CallbackURL(config),
+		ReturnPath: SafeRedirect(request.ReturnPath, config.PublicOrigin),
 		CreatedAt:  now, ExpiresAt: now.Add(FlowTTL),
 	}
 	if request.Purpose == "bind" {
@@ -215,6 +225,14 @@ func (s *Service) Verify(ctx context.Context, flow store.SSOFlow, code, response
 	}
 	if snapshot.Config.Revision != flow.ConfigRevision || snapshot.Config.ProviderInstanceID != flow.ProviderInstanceID {
 		return store.SSOIdentity{}, store.ErrSSOConfigChanged
+	}
+	callbackOrigin, ok := strings.CutSuffix(flow.RedirectURI, CallbackPath)
+	if !ok {
+		return store.SSOIdentity{}, store.ErrSSOInvalidFlow
+	}
+	snapshot.Config.PublicOrigin, err = NormalizePublicOrigin(callbackOrigin)
+	if err != nil {
+		return store.SSOIdentity{}, store.ErrSSOInvalidFlow
 	}
 	ctx, cancel := context.WithTimeout(ctx, RemoteBudget)
 	defer cancel()

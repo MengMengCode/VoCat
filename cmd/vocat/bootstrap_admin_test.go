@@ -11,6 +11,7 @@ import (
 	"vocat/internal/store"
 )
 
+// TestBootstrapAdminOnlyInitializesAnEmptyDatabase preserves stored administrator credentials across later bootstrap attempts.
 func TestBootstrapAdminOnlyInitializesAnEmptyDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vocat.db")
 	withBootstrapStdin(t, "first-secure-password\n", func() {
@@ -32,7 +33,7 @@ func TestBootstrapAdminOnlyInitializesAnEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Login(context.Background(), "admin", "first-secure-password"); err != nil {
+	if _, err := service.Login(context.Background(), "admin", "first-secure-password", false); err != nil {
 		t.Fatalf("initial password was overwritten: %v", err)
 	}
 }

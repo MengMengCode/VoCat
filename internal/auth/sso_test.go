@@ -36,7 +36,7 @@ func TestPreparedCredentialsRequireAtomicCommit(t *testing.T) {
 func TestAuthenticatedSessionDigestAccessorPreservesSessionAndCSRF(t *testing.T) {
 	service := newTestService(t)
 	ctx := context.Background()
-	credentials, err := service.Login(ctx, "admin", "correct-password")
+	credentials, err := service.Login(ctx, "admin", "correct-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}

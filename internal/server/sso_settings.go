@@ -103,10 +103,7 @@ func (s *Server) handleSSOSettings(w http.ResponseWriter, r *http.Request) {
 			s.writeSSOError(w, err)
 			return
 		}
-		if config.Enabled && strings.HasPrefix(config.PublicOrigin, "https://") && !s.secureCookies {
-			writeError(w, http.StatusBadRequest, "invalid_sso_config", "HTTPS SSO requires VOCAT_SECURE_COOKIES=true")
-			return
-		}
+
 		snapshot, revoked, err := s.sso.Save(r.Context(), store.SSOSaveRequest{
 			ExpectedRevision: *request.ExpectedRevision, Config: config,
 			ClientSecret: secret,
@@ -117,7 +114,7 @@ func (s *Server) handleSSOSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if revoked {
-			s.clearAuthCookies(w)
+			s.clearAuthCookies(w, r)
 		}
 		s.recordAudit(r.Context(), session.Principal.Username, "settings.sso.update", "sso", fmt.Sprintf("%s:%d", snapshot.Config.Kind, snapshot.Config.Revision), "success", requestRemoteHost(r))
 		data := ssoSettingsDTO(snapshot)

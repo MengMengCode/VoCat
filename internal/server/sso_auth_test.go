@@ -48,7 +48,13 @@ type ssoHTTPFixture struct {
 // newSSOHTTPFixture creates isolated storage, local authentication, and a deterministic generic OAuth2 provider.
 func newSSOHTTPFixture(t *testing.T) *ssoHTTPFixture {
 	t.Helper()
-	database, err := store.Open(context.Background(), ":memory:")
+	return newSSOHTTPFixtureWithPath(t, ":memory:")
+}
+
+// newSSOHTTPFixtureWithPath supports persistent databases and failure injection through an independent SQLite connection.
+func newSSOHTTPFixtureWithPath(t *testing.T, path string) *ssoHTTPFixture {
+	t.Helper()
+	database, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,8 +300,7 @@ func TestSSOHTTPBindLoginAndRevocation(t *testing.T) {
 		t.Fatal("password session revoked")
 	}
 	assertSSOResponseFields(t, body["data"].(map[string]any), "config", "binding", "configured", "has_client_secret")
-	// A restart with SecureCookies disabled must not expose a previously saved
-	// HTTPS SSO configuration or deliver fresh insecure primary credentials.
+	// One saved HTTPS configuration also serves the independent local HTTP entry.
 	snapshot, err = f.store.SSOSnapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -305,15 +310,18 @@ func TestSSOHTTPBindLoginAndRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	response, body = f.request(t, anonymous, "GET", "/api/auth/providers", nil, "")
-	if body["data"].(map[string]any)["sso"].(map[string]any)["enabled"] != false {
-		t.Fatal("restart advertised HTTPS SSO with insecure cookies")
+	if body["data"].(map[string]any)["sso"].(map[string]any)["enabled"] != true {
+		t.Fatal("HTTPS SSO requires a manual cookie override")
 	}
-	assertSSOResponseFields(t, body["data"].(map[string]any), "sso")
-	assertSSOResponseFields(t, body["data"].(map[string]any)["sso"].(map[string]any), "enabled")
-	response, body = f.request(t, anonymous, "GET", "/api/auth/sso/start", nil, "")
-	if response.StatusCode != 400 || body["error"].(map[string]any)["code"] != "invalid_sso_config" {
-		t.Fatal("restart accepted HTTPS SSO with insecure cookies")
+	response, _ = f.request(t, anonymous, "GET", "/api/auth/sso/start", nil, "")
+	if response.StatusCode != http.StatusFound {
+		t.Fatal("local HTTP alternative rejected")
 	}
+	target, _ := url.Parse(response.Header.Get("Location"))
+	if target.Query().Get("redirect_uri") != f.server.URL+sso.CallbackPath {
+		t.Fatal("local entry did not select its own callback")
+	}
+
 	snapshot, err = f.store.SSOSnapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -356,7 +364,7 @@ func TestSSOMutationsRejectCrossSessionCSRF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.CreateSession(ctx, 1, auth.TokenHash(other.SessionToken), auth.TokenHash(other.CSRFToken), other.ExpiresAt); err != nil {
+	if err := f.store.CreateSession(ctx, 1, auth.TokenHash(other.SessionToken), auth.TokenHash(other.CSRFToken), other.ExpiresAt, false); err != nil {
 		t.Fatal(err)
 	}
 	serverURL, _ := url.Parse(f.server.URL)
@@ -496,12 +504,12 @@ func TestSSOSecretAndRevisionRequestValidation(t *testing.T) {
 	if response.StatusCode != 409 {
 		t.Fatal("accepted stale revision")
 	}
-	// Scheme normalization must precede the HTTPS/Secure cookie policy check.
+	// HTTPS activation proceeds to the binding check without a manual Cookie flag.
 	config = f.config()
 	config["enabled"], config["public_origin"] = true, "HTTPS://vocat.example.test"
 	response, body := f.request(t, f.client, "PUT", "/api/settings/sso", map[string]any{"expected_revision": 0, "config": config}, csrf)
-	if response.StatusCode != 400 || body["error"].(map[string]any)["code"] != "invalid_sso_config" {
-		t.Fatalf("uppercase HTTPS bypassed secure cookie requirement: %d %#v", response.StatusCode, body)
+	if response.StatusCode != 409 || body["error"].(map[string]any)["code"] != "sso_identity_not_bound" {
+		t.Fatalf("HTTPS did not reach the binding requirement: %d %#v", response.StatusCode, body)
 	}
 }
 
@@ -742,7 +750,7 @@ func TestSSOCallbackRechecksConfigAfterBlockedTokenExchange(t *testing.T) {
 			}()
 			result := make(chan *httptest.ResponseRecorder, 1)
 			go func() {
-				r := httptest.NewRequest("GET", callback, nil)
+				r := httptest.NewRequest("GET", f.server.URL+callback, nil)
 				r.RemoteAddr = "127.0.0.1:12345"
 				r.AddCookie(flowCookie)
 				w := httptest.NewRecorder()

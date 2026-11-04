@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// TestStorePersistsAdminAndSessions verifies that administrator, credential digests, expiry, and cookie policy survive reopening storage.
 func TestStorePersistsAdminAndSessions(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "vocat.db")
@@ -30,7 +31,7 @@ func TestStorePersistsAdminAndSessions(t *testing.T) {
 	tokenHash := bytes.Repeat([]byte{1}, 32)
 	csrfHash := bytes.Repeat([]byte{2}, 32)
 	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
-	if err := database.CreateSession(ctx, admin.ID, tokenHash, csrfHash, expiresAt); err != nil {
+	if err := database.CreateSession(ctx, admin.ID, tokenHash, csrfHash, expiresAt, true); err != nil {
 		t.Fatalf("CreateSession() error = %v", err)
 	}
 	if err := database.Close(); err != nil {
@@ -47,7 +48,7 @@ func TestStorePersistsAdminAndSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SessionByTokenHash() error = %v", err)
 	}
-	if session.Admin.Username != "admin" || !bytes.Equal(session.CSRFHash, csrfHash) {
+	if !session.SecureCookies || session.Admin.Username != "admin" || !bytes.Equal(session.CSRFHash, csrfHash) {
 		t.Fatalf("unexpected session: %+v", session)
 	}
 	if !session.ExpiresAt.Equal(expiresAt) {
@@ -55,6 +56,7 @@ func TestStorePersistsAdminAndSessions(t *testing.T) {
 	}
 }
 
+// TestDeleteExpiredSessions checks that cleanup removes expired session credentials.
 func TestDeleteExpiredSessions(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, ":memory:")
@@ -77,6 +79,7 @@ func TestDeleteExpiredSessions(t *testing.T) {
 		tokenHash,
 		bytes.Repeat([]byte{4}, 32),
 		time.Now().Add(-time.Minute),
+		false,
 	); err != nil {
 		t.Fatal(err)
 	}

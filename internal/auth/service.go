@@ -65,11 +65,12 @@ type Credentials struct {
 }
 
 type AuthenticatedSession struct {
-	Principal   Principal
-	ExpiresAt   time.Time
-	LoginMethod string
-	tokenHash   []byte
-	csrfHash    []byte
+	Principal     Principal
+	ExpiresAt     time.Time
+	LoginMethod   string
+	SecureCookies bool
+	tokenHash     []byte
+	csrfHash      []byte
 }
 
 // TokenHash returns a copy of the session digest for atomic authorization checks.
@@ -162,7 +163,7 @@ func (s *Service) ResetAdminCredentials(ctx context.Context, username string, pa
 }
 
 // Login verifies the local password and persists fresh session and CSRF credentials before returning them.
-func (s *Service) Login(ctx context.Context, username string, password string) (Credentials, error) {
+func (s *Service) Login(ctx context.Context, username string, password string, secureCookies bool) (Credentials, error) {
 	admin, err := s.store.AdminByUsername(ctx, strings.TrimSpace(username))
 	if errors.Is(err, store.ErrNotFound) {
 		_ = comparePassword(s.dummyHash, password)
@@ -182,7 +183,7 @@ func (s *Service) Login(ctx context.Context, username string, password string) (
 	if err != nil {
 		return Credentials{}, err
 	}
-	if err := s.store.CreateSession(ctx, admin.ID, hashToken(credentials.SessionToken), hashToken(credentials.CSRFToken), credentials.ExpiresAt); err != nil {
+	if err := s.store.CreateSession(ctx, admin.ID, hashToken(credentials.SessionToken), hashToken(credentials.CSRFToken), credentials.ExpiresAt, secureCookies); err != nil {
 		return Credentials{}, err
 	}
 	return credentials, nil
@@ -231,10 +232,11 @@ func (s *Service) Authenticate(ctx context.Context, sessionToken string) (Authen
 			ID:       session.Admin.ID,
 			Username: session.Admin.Username,
 		},
-		ExpiresAt:   session.ExpiresAt,
-		LoginMethod: session.LoginMethod,
-		tokenHash:   tokenHash,
-		csrfHash:    session.CSRFHash,
+		ExpiresAt:     session.ExpiresAt,
+		LoginMethod:   session.LoginMethod,
+		SecureCookies: session.SecureCookies,
+		tokenHash:     tokenHash,
+		csrfHash:      session.CSRFHash,
 	}, nil
 }
 

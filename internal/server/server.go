@@ -263,6 +263,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleLogin verifies local credentials, applies rate limits, and issues cookies using the request transport policy.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodPost) {
@@ -285,7 +286,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	credentials, err := s.auth.Login(r.Context(), request.Username, request.Password)
+	secure := s.secureCookiesForRequest(r)
+	credentials, err := s.auth.Login(r.Context(), request.Username, request.Password, secure)
 	if errors.Is(err, auth.ErrInvalidCredentials) {
 		lockout, newlyLocked := s.loginLimiter.recordFailure(limiterKey)
 		s.auditAuth(r, request.Username, "failure")
@@ -305,7 +307,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	s.loginLimiter.recordSuccess(limiterKey)
 	s.auditAuth(r, credentials.Principal.Username, "success")
-	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt)
+	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt, secure)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"user":          credentials.Principal,
@@ -324,6 +326,7 @@ func (s *Server) loginKey(r *http.Request, username string) string {
 	return address.String() + "|" + strings.ToLower(strings.TrimSpace(username))
 }
 
+// handleSession authenticates the session and persists cookie policy upgrades before issuing or rotating CSRF credentials.
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodGet) {
@@ -337,6 +340,37 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if cookie, cookieErr := r.Cookie(csrfCookieName); cookieErr == nil {
 		existingCSRF = cookie.Value
 	}
+	session, err := s.auth.Authenticate(r.Context(), sessionToken)
+	if errors.Is(err, auth.ErrUnauthorized) {
+		s.authenticationRequired(w, r)
+		return
+	}
+	if err != nil {
+		s.logger.Error("load session failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+		return
+	}
+	secure := session.SecureCookies || s.secureCookiesForRequest(r)
+	if !secure && session.LoginMethod == "sso" {
+		secure, err = s.ssoSessionSecureCookies(r)
+		if err != nil {
+			s.writeSSOError(w, err)
+			return
+		}
+	}
+	if secure && !session.SecureCookies {
+		if err := s.store.RequireSessionSecureCookies(r.Context(), session.TokenHash()); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				s.authenticationRequired(w, r)
+				return
+			}
+			s.logger.Error("persist secure cookie policy failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+			return
+		}
+	}
+	// Persist any policy upgrade before CSRFToken can replace the stored hash.
+	// A failed policy write must leave the browser's current CSRF credential valid.
 	session, csrfToken, err := s.auth.CSRFToken(r.Context(), sessionToken, existingCSRF)
 	if errors.Is(err, auth.ErrUnauthorized) {
 		s.authenticationRequired(w, r)
@@ -347,7 +381,14 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 		return
 	}
-	s.setCSRFCookie(w, csrfToken, session.ExpiresAt)
+	// The reauthentication also observes policy upgrades made by another request.
+	secure = secure || session.SecureCookies
+	// A reused valid Cookie already has the correct expiry. When transport
+	// metadata is absent, leave its attributes intact rather than downgrading
+	// an existing Secure Cookie after a privacy-filtered proxy refresh.
+	if secure || existingCSRF != csrfToken {
+		s.setCSRFCookie(w, csrfToken, session.ExpiresAt, secure)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"user":          session.Principal,
@@ -358,6 +399,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleLogout requires session-bound CSRF proof before revoking the session and clearing authentication cookies.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodPost) {
@@ -388,7 +430,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
 		return
 	}
-	s.clearAuthCookies(w)
+	s.clearAuthCookies(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]bool{"logged_out": true},
 	})
@@ -529,7 +571,7 @@ func (s *Server) requireAuthenticated(w http.ResponseWriter, r *http.Request) bo
 // raw {"error":...} document. Frontend fetches explicitly request JSON and
 // are handled by the shared vocat:unauthorized event.
 func (s *Server) authenticationRequired(w http.ResponseWriter, r *http.Request) {
-	s.clearAuthCookies(w)
+	s.clearAuthCookies(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
 		strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") {
@@ -550,7 +592,8 @@ func (s *Server) validateDoubleSubmitCSRF(w http.ResponseWriter, r *http.Request
 	return headerToken, true
 }
 
-func (s *Server) setAuthCookies(w http.ResponseWriter, sessionToken string, csrfToken string, expiresAt time.Time) {
+// setAuthCookies issues Session and CSRF cookies with one consistent transport policy.
+func (s *Server) setAuthCookies(w http.ResponseWriter, sessionToken string, csrfToken string, expiresAt time.Time, secure bool) {
 	maxAge := int(time.Until(expiresAt).Seconds())
 	if maxAge < 1 {
 		maxAge = 1
@@ -562,13 +605,14 @@ func (s *Server) setAuthCookies(w http.ResponseWriter, sessionToken string, csrf
 		Expires:  expiresAt,
 		MaxAge:   maxAge,
 		HttpOnly: true,
-		Secure:   s.secureCookies,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
-	s.setCSRFCookie(w, csrfToken, expiresAt)
+	s.setCSRFCookie(w, csrfToken, expiresAt, secure)
 }
 
-func (s *Server) setCSRFCookie(w http.ResponseWriter, csrfToken string, expiresAt time.Time) {
+// setCSRFCookie sets the readable session-bound CSRF cookie with the selected transport policy.
+func (s *Server) setCSRFCookie(w http.ResponseWriter, csrfToken string, expiresAt time.Time, secure bool) {
 	maxAge := int(time.Until(expiresAt).Seconds())
 	if maxAge < 1 {
 		maxAge = 1
@@ -580,12 +624,13 @@ func (s *Server) setCSRFCookie(w http.ResponseWriter, csrfToken string, expiresA
 		Expires:  expiresAt,
 		MaxAge:   maxAge,
 		HttpOnly: false,
-		Secure:   s.secureCookies,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
-func (s *Server) clearAuthCookies(w http.ResponseWriter) {
+// clearAuthCookies expires authentication cookies using the current request cookie policy.
+func (s *Server) clearAuthCookies(w http.ResponseWriter, r *http.Request) {
 	for _, name := range []string{sessionCookieName, csrfCookieName} {
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,
@@ -594,7 +639,7 @@ func (s *Server) clearAuthCookies(w http.ResponseWriter) {
 			Expires:  time.Unix(1, 0),
 			MaxAge:   -1,
 			HttpOnly: name == sessionCookieName,
-			Secure:   s.secureCookies,
+			Secure:   s.secureCookiesForRequest(r),
 			SameSite: http.SameSiteStrictMode,
 		})
 	}

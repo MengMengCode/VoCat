@@ -943,6 +943,7 @@ func TestHandleUpdateCheckUsesTrustedRepository(t *testing.T) {
 	}
 }
 
+// TestHandleUpdateApplyInstallsFromTrustedRepository verifies that updates use the configured trusted release repository.
 func TestHandleUpdateApplyInstallsFromTrustedRepository(t *testing.T) {
 	database, err := store.Open(context.Background(), ":memory:")
 	if err != nil {
@@ -955,6 +956,7 @@ func TestHandleUpdateApplyInstallsFromTrustedRepository(t *testing.T) {
 	tokenHash := []byte("active-session")
 	if err := database.CreateSession(
 		context.Background(), 1, tokenHash, []byte("csrf"), time.Now().Add(time.Hour),
+		false,
 	); err != nil {
 		t.Fatal(err)
 	}

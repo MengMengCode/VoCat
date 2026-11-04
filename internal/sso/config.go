@@ -42,14 +42,11 @@ func NormalizeConfig(c Config) (Config, error) {
 		return c, invalidConfig("invalid client ID")
 	}
 	if c.PublicOrigin != "" {
-		u, err := parseURL(c.PublicOrigin)
-		if err != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery {
-			return c, invalidConfig("public origin must contain only scheme, host, and optional port")
+		var err error
+		c.PublicOrigin, err = NormalizePublicOrigin(c.PublicOrigin)
+		if err != nil {
+			return c, err
 		}
-		if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
-			return c, invalidConfig("public origin requires HTTPS (HTTP is limited to loopback development)")
-		}
-		c.PublicOrigin = origin(u)
 	}
 	if c.TokenAuthMethod == "" {
 		switch c.Kind {
@@ -220,4 +217,39 @@ func isLoopbackHost(host string) bool {
 // hasControl reports Unicode control characters that are unsafe in configuration or claims.
 func hasControl(value string) bool {
 	return strings.ContainsFunc(value, unicode.IsControl)
+}
+
+// NormalizePublicOrigin permits HTTPS or explicit local/private HTTP browser entries.
+func NormalizePublicOrigin(raw string) (string, error) {
+	u, err := parseURL(raw)
+	if err != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery {
+		return "", invalidConfig("public origin must contain only scheme, host, and optional port")
+	}
+	if u.Scheme != "https" && !IsLocalHost(u.Hostname()) {
+		return "", invalidConfig("HTTP public origins require localhost or a literal private IP")
+	}
+	// Browsers serialize IPv4-mapped IPv6 as hexadecimal, unlike netip.String.
+	// Limit this normalization to the public entry, not identity-provider URLs.
+	if ip, parseErr := netip.ParseAddr(u.Hostname()); parseErr == nil && ip.Is6() {
+		port := u.Port()
+		host := ip.String()
+		if ip.Is4In6() {
+			b := ip.As16()
+			host = fmt.Sprintf("::ffff:%x:%x", uint16(b[12])<<8|uint16(b[13]), uint16(b[14])<<8|uint16(b[15]))
+		}
+		u.Host = "[" + host + "]"
+		if port != "" {
+			u.Host += ":" + port
+		}
+	}
+	return origin(u), nil
+}
+
+// IsLocalHost never resolves DNS: only localhost, literal loopback and private IPs qualify.
+func IsLocalHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && (ip.Unmap().IsLoopback() || ip.Unmap().IsPrivate())
 }
