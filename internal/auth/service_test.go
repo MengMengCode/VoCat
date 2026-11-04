@@ -34,6 +34,7 @@ func newTestService(t *testing.T) *Service {
 	return service
 }
 
+// TestLoginAuthenticateCSRFAndLogout checks the complete local session lifecycle and rejection of invalid credentials.
 func TestLoginAuthenticateCSRFAndLogout(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
@@ -79,6 +80,7 @@ func TestLoginAuthenticateCSRFAndLogout(t *testing.T) {
 	}
 }
 
+// TestEnsureAdminRevokesSessionOnPasswordChange verifies that replacing administrator credentials revokes existing sessions.
 func TestEnsureAdminRevokesSessionOnPasswordChange(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
@@ -98,6 +100,7 @@ func TestEnsureAdminRevokesSessionOnPasswordChange(t *testing.T) {
 	}
 }
 
+// TestResetAdminCredentialsChangesUsernameAndPasswordWithoutOldPassword checks administrative credential recovery and rejection of superseded credentials.
 func TestResetAdminCredentialsChangesUsernameAndPasswordWithoutOldPassword(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
@@ -139,6 +142,7 @@ func TestResetAdminCredentialsValidatesInput(t *testing.T) {
 	}
 }
 
+// TestResetAdminCredentialsAcceptsPasswordsWithoutComplexityRules keeps administrative recovery independent of password complexity rules.
 func TestResetAdminCredentialsAcceptsPasswordsWithoutComplexityRules(t *testing.T) {
 	ctx := context.Background()
 	for _, password := range []string{"1", strings.Repeat("x", 256)} {
@@ -152,6 +156,7 @@ func TestResetAdminCredentialsAcceptsPasswordsWithoutComplexityRules(t *testing.
 	}
 }
 
+// TestChangePasswordAcceptsPasswordsWithoutComplexityRules keeps authenticated password changes independent of complexity rules.
 func TestChangePasswordAcceptsPasswordsWithoutComplexityRules(t *testing.T) {
 	ctx := context.Background()
 	for _, password := range []string{"1", strings.Repeat("long-password-", 32)} {
@@ -165,6 +170,7 @@ func TestChangePasswordAcceptsPasswordsWithoutComplexityRules(t *testing.T) {
 	}
 }
 
+// TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword preserves an existing administrator when startup credentials differ.
 func TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)

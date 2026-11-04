@@ -9,6 +9,7 @@ import (
 	"time"
 )
 
+// TestStorePersistsAdminAndSessions verifies that administrator, credential digests, expiry, and cookie policy survive reopening storage.
 func TestStorePersistsAdminAndSessions(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "vocat.db")
@@ -55,6 +56,7 @@ func TestStorePersistsAdminAndSessions(t *testing.T) {
 	}
 }
 
+// TestDeleteExpiredSessions checks that cleanup removes expired session credentials.
 func TestDeleteExpiredSessions(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, ":memory:")

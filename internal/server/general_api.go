@@ -415,6 +415,7 @@ func runningInDocker() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("VOCAT_CONTAINER")), "docker")
 }
 
+// handleUpdateApply applies an update from the configured trusted repository and revokes sessions before restarting.
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
@@ -500,6 +501,7 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handlePasswordChange validates the current credentials and requires reauthentication after changing the local password.
 func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return

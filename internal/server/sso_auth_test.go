@@ -48,7 +48,13 @@ type ssoHTTPFixture struct {
 // newSSOHTTPFixture creates isolated storage, local authentication, and a deterministic generic OAuth2 provider.
 func newSSOHTTPFixture(t *testing.T) *ssoHTTPFixture {
 	t.Helper()
-	database, err := store.Open(context.Background(), ":memory:")
+	return newSSOHTTPFixtureWithPath(t, ":memory:")
+}
+
+// newSSOHTTPFixtureWithPath supports persistent databases and failure injection through an independent SQLite connection.
+func newSSOHTTPFixtureWithPath(t *testing.T, path string) *ssoHTTPFixture {
+	t.Helper()
+	database, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}

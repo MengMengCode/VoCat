@@ -95,6 +95,16 @@ test("callback URL is available before creating the OIDC client and follows unsa
   expect(persisted.revision).toBe(0);
   expect(persisted.public_origin).toBe("");
 
+  for (const [input, normalized] of [
+    ["http://[::ffff:192.168.1.20]:7575", "http://[::ffff:c0a8:114]:7575"],
+    ["http://[0:0:0:0:0:0:0:1]:7575", "http://[::1]:7575"],
+  ]) {
+    await origin.fill(input);
+    await expect(card(page).getByText(normalized + "/api/auth/sso/callback", { exact: true })).toBeVisible();
+    await copy.click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(normalized + "/api/auth/sso/callback");
+  }
+
   await origin.fill("https://vocat.nas.test:8443/with-a-path");
   await expect(copy).toBeDisabled();
   await expect(card(page).getByText("https://vocat.nas.test:8443/api/auth/sso/callback", { exact: true })).toHaveCount(0);

@@ -943,6 +943,7 @@ func TestHandleUpdateCheckUsesTrustedRepository(t *testing.T) {
 	}
 }
 
+// TestHandleUpdateApplyInstallsFromTrustedRepository verifies that updates use the configured trusted release repository.
 func TestHandleUpdateApplyInstallsFromTrustedRepository(t *testing.T) {
 	database, err := store.Open(context.Background(), ":memory:")
 	if err != nil {

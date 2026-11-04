@@ -3,10 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -180,6 +183,104 @@ func TestSessionCookiePolicyOnlyUpgrades(t *testing.T) {
 		}
 		if !found {
 			t.Fatal("missing Secure CSRF cookie")
+		}
+	}
+}
+
+// TestSessionPolicyFailurePreservesCSRF checks that failed policy writes leave existing credentials usable and a retry can recover.
+func TestSessionPolicyFailurePreservesCSRF(t *testing.T) {
+	for _, tc := range []struct {
+		name, failure string
+		status        int
+	}{
+		{"database error", "SELECT RAISE(FAIL, 'injected policy failure');", http.StatusInternalServerError},
+		{"session not found", "SELECT RAISE(IGNORE);", http.StatusUnauthorized},
+	} {
+		for _, stale := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stale=%v", tc.name, stale), func(t *testing.T) {
+				ctx := context.Background()
+				path := filepath.Join(t.TempDir(), "failure.db")
+				f := newSSOHTTPFixtureWithPath(t, path)
+				csrf := f.login(t)
+				entry, err := url.Parse(f.server.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var session *http.Cookie
+				for _, cookie := range f.client.Jar.Cookies(entry) {
+					if cookie.Name == sessionCookieName {
+						session = cookie
+					}
+				}
+				if session == nil {
+					t.Fatal("missing session")
+				}
+				before, err := f.store.SessionByTokenHash(ctx, auth.TokenHash(session.Value))
+				if err != nil {
+					t.Fatal(err)
+				}
+				connection, err := sql.Open("sqlite", path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { connection.Close() })
+				if _, err := connection.ExecContext(ctx, `CREATE TRIGGER fail_cookie_policy BEFORE UPDATE OF secure_cookies ON sessions BEGIN `+tc.failure+` END`); err != nil {
+					t.Fatal(err)
+				}
+				refresh := func() *httptest.ResponseRecorder {
+					r := httptest.NewRequest("GET", "http://vocat.example/api/auth/session", nil)
+					r.RemoteAddr = "127.0.0.1:12345"
+					r.Header.Set("Referer", "https://vocat.example/settings")
+					r.AddCookie(session)
+					if stale {
+						r.AddCookie(&http.Cookie{Name: csrfCookieName, Value: "stale-csrf"})
+					}
+					w := httptest.NewRecorder()
+					f.handler.ServeHTTP(w, r)
+					return w
+				}
+				w := refresh()
+				if w.Code != tc.status {
+					t.Fatalf("failed refresh=%d, want=%d", w.Code, tc.status)
+				}
+				for _, c := range w.Result().Cookies() {
+					if c.Name == csrfCookieName && c.MaxAge >= 0 {
+						t.Fatal("failed refresh issued a new CSRF cookie")
+					}
+				}
+				after, err := f.store.SessionByTokenHash(ctx, auth.TokenHash(session.Value))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if after.SecureCookies || !bytes.Equal(before.CSRFHash, after.CSRFHash) {
+					t.Fatal("failed policy update changed the session or CSRF hash")
+				}
+				if _, err := f.auth.ValidateCSRF(ctx, session.Value, csrf); err != nil {
+					t.Fatalf("previous CSRF credential invalidated: %v", err)
+				}
+				if _, err := connection.ExecContext(ctx, `DROP TRIGGER fail_cookie_policy`); err != nil {
+					t.Fatal(err)
+				}
+				w = refresh()
+				if w.Code != http.StatusOK {
+					t.Fatalf("retry=%d", w.Code)
+				}
+				found := false
+				for _, c := range w.Result().Cookies() {
+					if c.Name == csrfCookieName {
+						found = true
+						if !c.Secure {
+							t.Fatal("retry downgraded cookie protection")
+						}
+						if _, err := f.auth.ValidateCSRF(ctx, session.Value, c.Value); err != nil {
+							t.Fatalf("replacement CSRF credential invalid: %v", err)
+						}
+					}
+				}
+				if !found {
+					t.Fatal("retry did not return a CSRF cookie")
+				}
+			})
 		}
 	}
 }

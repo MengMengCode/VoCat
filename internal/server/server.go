@@ -263,6 +263,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleLogin verifies local credentials, applies rate limits, and issues cookies using the request transport policy.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodPost) {
@@ -325,6 +326,7 @@ func (s *Server) loginKey(r *http.Request, username string) string {
 	return address.String() + "|" + strings.ToLower(strings.TrimSpace(username))
 }
 
+// handleSession authenticates the session and persists cookie policy upgrades before issuing or rotating CSRF credentials.
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodGet) {
@@ -338,7 +340,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	if cookie, cookieErr := r.Cookie(csrfCookieName); cookieErr == nil {
 		existingCSRF = cookie.Value
 	}
-	session, csrfToken, err := s.auth.CSRFToken(r.Context(), sessionToken, existingCSRF)
+	session, err := s.auth.Authenticate(r.Context(), sessionToken)
 	if errors.Is(err, auth.ErrUnauthorized) {
 		s.authenticationRequired(w, r)
 		return
@@ -367,6 +369,20 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Persist any policy upgrade before CSRFToken can replace the stored hash.
+	// A failed policy write must leave the browser's current CSRF credential valid.
+	session, csrfToken, err := s.auth.CSRFToken(r.Context(), sessionToken, existingCSRF)
+	if errors.Is(err, auth.ErrUnauthorized) {
+		s.authenticationRequired(w, r)
+		return
+	}
+	if err != nil {
+		s.logger.Error("load session failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "an internal error occurred")
+		return
+	}
+	// The reauthentication also observes policy upgrades made by another request.
+	secure = secure || session.SecureCookies
 	// A reused valid Cookie already has the correct expiry. When transport
 	// metadata is absent, leave its attributes intact rather than downgrading
 	// an existing Secure Cookie after a privacy-filtered proxy refresh.
@@ -383,6 +399,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleLogout requires session-bound CSRF proof before revoking the session and clearing authentication cookies.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if !requireMethod(w, r, http.MethodPost) {

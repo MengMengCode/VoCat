@@ -315,6 +315,7 @@ func TestNewRequiresIndex(t *testing.T) {
 	}
 }
 
+// TestSecureCookieAttributes checks Secure, HttpOnly, SameSite, and deletion attributes for authentication cookies.
 func TestSecureCookieAttributes(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	server := &Server{secureCookies: true}
