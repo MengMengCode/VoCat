@@ -383,11 +383,13 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	// The reauthentication also observes policy upgrades made by another request.
 	secure = secure || session.SecureCookies
-	// A reused valid Cookie already has the correct expiry. When transport
-	// metadata is absent, leave its attributes intact rather than downgrading
-	// an existing Secure Cookie after a privacy-filtered proxy refresh.
-	if secure || existingCSRF != csrfToken {
-		s.setCSRFCookie(w, csrfToken, session.ExpiresAt, secure)
+	if secure {
+		// Upgrade both browser cookies, including retries after the policy was
+		// persisted but the response was lost. Keep the original token and expiry.
+		s.setAuthCookies(w, sessionToken, csrfToken, session.ExpiresAt, true)
+	} else if existingCSRF != csrfToken {
+		// Leave a valid cookie's attributes intact when transport hints are absent.
+		s.setCSRFCookie(w, csrfToken, session.ExpiresAt, false)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{

@@ -146,16 +146,30 @@ func TestSessionCSRFReplacementRemembersSecureLogin(t *testing.T) {
 	}
 }
 
-// TestSessionCookiePolicyOnlyUpgrades keeps a recognized HTTPS refresh sticky for an existing HTTP session.
+// TestSessionCookiePolicyOnlyUpgrades protects both cookies on an HTTPS upgrade
+// and on a hint-free retry whose browser did not receive the first response.
 func TestSessionCookiePolicyOnlyUpgrades(t *testing.T) {
 	f := newSSOHTTPFixture(t)
-	f.login(t)
+	csrf := f.login(t)
 	base := f.server.URL
 	entry, err := url.Parse(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cookies := f.client.Jar.Cookies(entry)
+	var originalSession *http.Cookie
+	for _, c := range cookies {
+		if c.Name == sessionCookieName {
+			originalSession = c
+		}
+	}
+	if originalSession == nil {
+		t.Fatal("missing initial session cookie")
+	}
+	stored, err := f.store.SessionByTokenHash(context.Background(), auth.TokenHash(originalSession.Value))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, hint := range []string{"https://vocat.example/settings", ""} {
 		r := httptest.NewRequest("GET", "http://vocat.example/api/auth/session", nil)
 		if hint != "" {
@@ -166,23 +180,30 @@ func TestSessionCookiePolicyOnlyUpgrades(t *testing.T) {
 				r.AddCookie(c)
 			}
 		}
+		r.AddCookie(&http.Cookie{Name: csrfCookieName, Value: csrf})
 		w := httptest.NewRecorder()
 		r.RemoteAddr = "127.0.0.1:12345"
 		f.handler.ServeHTTP(w, r)
 		if w.Code != 200 {
 			t.Fatalf("session=%d", w.Code)
 		}
-		found := false
+		found := map[string]bool{}
 		for _, c := range w.Result().Cookies() {
-			if c.Name == csrfCookieName {
-				found = true
-				if !c.Secure {
-					t.Fatal("HTTPS policy was downgraded")
+			if c.Name == sessionCookieName || c.Name == csrfCookieName {
+				found[c.Name] = true
+				if !c.Secure || c.HttpOnly != (c.Name == sessionCookieName) || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" {
+					t.Fatalf("invalid upgraded cookie attributes for %s", c.Name)
+				}
+				if !c.Expires.Equal(stored.ExpiresAt) {
+					t.Fatalf("cookie upgrade changed the original expiry for %s", c.Name)
+				}
+				if c.Name == sessionCookieName && c.Value != originalSession.Value || c.Name == csrfCookieName && c.Value != csrf {
+					t.Fatalf("cookie upgrade unexpectedly rotated %s", c.Name)
 				}
 			}
 		}
-		if !found {
-			t.Fatal("missing Secure CSRF cookie")
+		if !found[sessionCookieName] || !found[csrfCookieName] {
+			t.Fatal("upgrade or retry did not issue both Secure authentication cookies")
 		}
 	}
 }

@@ -494,3 +494,43 @@ test("HTTPS proxy password cookies stay Secure without enabling proxy-header tru
   await page.goto(APP + "/settings");
   expect((await checkSession(page)).status).toBe(200);
 });
+
+test("upgrading an HTTP session to HTTPS protects both cookies and preserves the session", async ({ page, context }) => {
+  const httpOrigin = "http://vocat.test:17477";
+  await page.goto(httpOrigin + "/login?redirect=%2Fsettings");
+  await page.locator('input[autocomplete="username"]').fill("admin");
+  await page.locator('input[autocomplete="current-password"]').fill(PASSWORD);
+  await page.getByRole("button", { name: "Sign In", exact: true }).click();
+  await expect(page).toHaveURL(httpOrigin + "/settings");
+  expect((await checkSession(page)).status).toBe(200);
+  const original = (await context.cookies(httpOrigin)).find(c => c.name === "vocat_session");
+  expect(original?.secure).toBe(false);
+
+  // The fixture terminates TLS without enabling forwarded-header trust.
+  await page.goto(APP + "/settings");
+  expect((await checkSession(page)).status).toBe(200);
+  for (const name of ["vocat_session", "vocat_csrf"]) {
+    const cookie = (await context.cookies(APP)).find(c => c.name === name);
+    expect(cookie?.secure).toBe(true);
+    expect(cookie?.sameSite).toBe("Strict");
+    expect(cookie?.httpOnly).toBe(name === "vocat_session");
+  }
+  const upgraded = (await context.cookies(APP)).find(c => c.name === "vocat_session");
+  expect(upgraded?.value).toBe(original?.value);
+  // Max-Age is rounded to whole seconds; refreshing must not extend the session.
+  expect(Math.abs(upgraded!.expires - original!.expires)).toBeLessThanOrEqual(1);
+  const writeStatus = await page.evaluate(async () => {
+    const session = await (await fetch("/api/auth/session", { referrerPolicy: "no-referrer" })).json();
+    return (await fetch("/api/settings/security", {
+      method: "PUT", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.data.csrf_token },
+      body: JSON.stringify({ mode: "internal" }),
+    })).status;
+  });
+  expect(writeStatus).toBe(200);
+
+  await page.goto(httpOrigin + "/login");
+  expect((await checkSession(page)).status).toBe(401);
+  expect(await page.evaluate(async () => (await fetch("/api/settings/security")).status)).toBe(401);
+  await page.goto(APP + "/settings");
+  expect((await checkSession(page)).status).toBe(200);
+});
