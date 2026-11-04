@@ -121,7 +121,7 @@ func run() error {
 	}()
 
 	servers := []*http.Server{
-		{Addr: appAddress, Handler: http.HandlerFunc(f.serveApp), ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0)},
+		{Addr: appAddress, Handler: http.HandlerFunc(f.serveTLSProxy), ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0)},
 		{Addr: "127.0.0.1:17477", Handler: http.HandlerFunc(f.serveApp), ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0)},
 		{Addr: idpAddress, Handler: http.HandlerFunc(f.serveIDP), ReadHeaderTimeout: 5 * time.Second, ErrorLog: log.New(io.Discard, "", 0)},
 	}
@@ -389,4 +389,13 @@ func testCertificate() (tls.Certificate, *x509.CertPool, error) {
 
 func allowedCallback(uri string) bool {
 	return uri == appOrigin+sso.CallbackPath || uri == "http://127.0.0.1:17477"+sso.CallbackPath || uri == "http://localhost:17477"+sso.CallbackPath
+}
+
+// serveTLSProxy simulates TLS termination with proxy-header trust disabled.
+// The browser sees HTTPS while the application receives a plain backend request.
+func (f *fixture) serveTLSProxy(w http.ResponseWriter, r *http.Request) {
+	backend := r.Clone(r.Context())
+	backend.TLS = nil
+	backend.Header.Set("X-Forwarded-Proto", "https")
+	f.serveApp(w, backend)
 }

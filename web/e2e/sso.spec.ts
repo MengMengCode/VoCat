@@ -460,3 +460,25 @@ test("a saved HTTPS SSO draft does not change an existing HTTP password client",
     await context.close();
   }
 });
+
+test("HTTPS proxy password cookies stay Secure without enabling proxy-header trust", async ({ page, context }) => {
+  // The TLS fixture strips TLS state before handing requests to the real app.
+  await passwordLogin(page);
+  for (const name of ["vocat_session", "vocat_csrf"]) {
+    expect((await context.cookies(APP)).find(c => c.name === name)?.secure).toBe(true);
+  }
+  const statuses = await page.evaluate(async () => {
+    const response = await fetch("/api/auth/session", { referrerPolicy: "no-referrer" });
+    const session = await response.json();
+    const write = await fetch("/api/settings/security", { method: "PUT", headers: { "Content-Type": "application/json", "X-CSRF-Token": session.data.csrf_token }, body: JSON.stringify({ mode: "internal" }) });
+    return [response.status, write.status];
+  });
+  expect(statuses).toEqual([200, 200]);
+  for (const name of ["vocat_session", "vocat_csrf"]) {
+    expect((await context.cookies(APP)).find(c => c.name === name)?.secure).toBe(true);
+  }
+  await page.goto("http://vocat.test:17477/login");
+  expect((await checkSession(page)).status).toBe(401);
+  await page.goto(APP + "/settings");
+  expect((await checkSession(page)).status).toBe(200);
+});

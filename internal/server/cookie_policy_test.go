@@ -61,3 +61,34 @@ func TestPasswordCookieTransportPolicy(t *testing.T) {
 		})
 	}
 }
+
+func TestBrowserHTTPSCookieHints(t *testing.T) {
+	for _, tc := range []struct {
+		name, host        string
+		origins, referers []string
+		want              bool
+	}{
+		{name: "HTTPS Origin", host: "vocat.example", origins: []string{"https://vocat.example"}, want: true},
+		{name: "default HTTPS port", host: "vocat.example:443", origins: []string{"https://vocat.example"}, want: true},
+		{name: "HTTPS Referer", host: "vocat.example", referers: []string{"https://vocat.example/settings?tab=security"}, want: true},
+		{name: "HTTP Origin", host: "vocat.example", origins: []string{"http://vocat.example"}, referers: []string{"https://vocat.example/settings"}},
+		{name: "cross host", host: "vocat.example", origins: []string{"https://evil.example"}},
+		{name: "cross port", host: "vocat.example:7575", origins: []string{"https://vocat.example"}},
+		{name: "opaque Origin", host: "vocat.example", origins: []string{"null"}, referers: []string{"https://vocat.example/"}},
+		{name: "duplicate Origin", host: "vocat.example", origins: []string{"https://vocat.example", "https://vocat.example"}},
+		{name: "Origin with path", host: "vocat.example", origins: []string{"https://vocat.example/settings"}},
+		{name: "Origin with query", host: "vocat.example", origins: []string{"https://vocat.example?"}},
+		{name: "credentials", host: "vocat.example", origins: []string{"https://user@vocat.example"}},
+		{name: "fragment", host: "vocat.example", referers: []string{"https://vocat.example/#fragment"}},
+		{name: "no browser headers", host: "vocat.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest("GET", "http://"+tc.host+"/api/auth/session", nil)
+			request.Header["Origin"] = tc.origins
+			request.Header["Referer"] = tc.referers
+			if got := browserHTTPSCookieHint(request); got != tc.want {
+				t.Fatalf("HTTPS hint=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}

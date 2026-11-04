@@ -44,10 +44,42 @@ func (s *Server) ssoRequestOrigin(r *http.Request, configured string) (string, e
 	return candidate, nil
 }
 
-// secureCookiesForRequest uses only the process override and request transport.
-// Password sessions must not depend on saved SSO configuration or its availability.
+// secureCookiesForRequest never consults saved SSO settings for password
+// sessions. Same-authority browser hints can only upgrade Cookie protection;
+// they are not trusted for access control, authentication, or callback routing.
 func (s *Server) secureCookiesForRequest(r *http.Request) bool {
-	return s.secureCookies || r.TLS != nil || s.forwardedHTTPS(r)
+	return s.secureCookies || r.TLS != nil || s.forwardedHTTPS(r) || browserHTTPSCookieHint(r)
+}
+
+// browserHTTPSCookieHint handles TLS termination without trusting forwarded
+// headers globally. Origin takes precedence; Referer supports same-origin GET
+// refreshes that omit Origin. Neither hint can turn a secure decision off.
+func browserHTTPSCookieHint(r *http.Request) bool {
+	values := r.Header.Values("Origin")
+	origin := len(values) != 0
+	if !origin {
+		values = r.Header.Values("Referer")
+	}
+	if len(values) != 1 {
+		return false
+	}
+	raw := values[0]
+	if strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, "\\#") {
+		return false
+	}
+	hint, err := url.Parse(raw)
+	if err != nil || !strings.EqualFold(hint.Scheme, "https") || hint.Opaque != "" || hint.User != nil || hint.Host == "" {
+		return false
+	}
+	if origin && (hint.Path != "" || hint.RawQuery != "" || hint.ForceQuery) {
+		return false
+	}
+	expected, err := sso.NormalizePublicOrigin("https://" + r.Host)
+	if err != nil {
+		return false
+	}
+	actual, err := sso.NormalizePublicOrigin("https://" + hint.Host)
+	return err == nil && actual == expected
 }
 
 // ssoSessionSecureCookies preserves the SSO entry policy on CSRF refreshes.

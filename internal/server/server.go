@@ -355,7 +355,12 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.setCSRFCookie(w, csrfToken, session.ExpiresAt, secure)
+	// A reused valid Cookie already has the correct expiry. When transport
+	// metadata is absent, leave its attributes intact rather than downgrading
+	// an existing Secure Cookie after a privacy-filtered proxy refresh.
+	if secure || existingCSRF != csrfToken {
+		s.setCSRFCookie(w, csrfToken, session.ExpiresAt, secure)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{
 			"user":          session.Principal,
