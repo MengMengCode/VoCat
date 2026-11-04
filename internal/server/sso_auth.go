@@ -333,14 +333,16 @@ func (s *Server) handleSSOCallback(w http.ResponseWriter, r *http.Request) {
 		s.redirectSSOError(w, r, &flow, "provider_unavailable")
 		return
 	}
+	secure := s.secureCookiesForRequest(r) || strings.HasPrefix(flow.RedirectURI, "https://")
 	_, err = s.store.FinalizeSSOLogin(r.Context(), flow, identity, store.SSOSessionMaterial{
-		TokenHash: auth.TokenHash(credentials.SessionToken), CSRFHash: auth.TokenHash(credentials.CSRFToken), ExpiresAt: credentials.ExpiresAt,
+		SecureCookies: secure,
+		TokenHash:     auth.TokenHash(credentials.SessionToken), CSRFHash: auth.TokenHash(credentials.CSRFToken), ExpiresAt: credentials.ExpiresAt,
 	})
 	if err != nil {
 		s.redirectSSOError(w, r, &flow, ssoCallbackError(err))
 		return
 	}
-	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt, s.secureCookiesForRequest(r) || strings.HasPrefix(flow.RedirectURI, "https://"))
+	s.setAuthCookies(w, credentials.SessionToken, credentials.CSRFToken, credentials.ExpiresAt, secure)
 	s.auditSSO(r, admin.Username, "auth.sso.login", flow, "success")
 	http.Redirect(w, r, sso.SafeRedirect(flow.ReturnPath, ""), http.StatusSeeOther)
 }
@@ -389,7 +391,7 @@ func (s *Server) setSSOFlowCookie(w http.ResponseWriter, flow store.SSOFlow, tok
 	if maxAge < 1 {
 		maxAge = 1
 	}
-	cookie := &http.Cookie{Name: ssoCookiePrefix + flow.ID, Value: token, Path: "/api/auth/sso", HttpOnly: true, Secure: strings.HasPrefix(flow.RedirectURI, "https://"), SameSite: http.SameSiteLaxMode, Expires: flow.ExpiresAt, MaxAge: maxAge}
+	cookie := &http.Cookie{Name: ssoCookiePrefix + flow.ID, Value: token, Path: "/api/auth/sso", HttpOnly: true, Secure: s.secureCookies || strings.HasPrefix(flow.RedirectURI, "https://"), SameSite: http.SameSiteLaxMode, Expires: flow.ExpiresAt, MaxAge: maxAge}
 	if clear {
 		cookie.Value = ""
 		cookie.MaxAge = -1

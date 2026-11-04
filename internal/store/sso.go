@@ -556,9 +556,9 @@ func (s *Store) FinalizeSSOLogin(ctx context.Context, flow SSOFlow, identity SSO
 	}
 	now := time.Now().UTC().Unix()
 	_, err = tx.ExecContext(ctx, `INSERT INTO sessions
-		(token_hash, admin_id, csrf_hash, expires_at, created_at, login_method, sso_binding_id)
-		VALUES (?, ?, ?, ?, ?, 'sso', ?)`, material.TokenHash, admin.ID, material.CSRFHash,
-		material.ExpiresAt.Unix(), now, snapshot.Binding.ID)
+		(token_hash, admin_id, csrf_hash, expires_at, created_at, login_method, sso_binding_id, secure_cookies)
+		VALUES (?, ?, ?, ?, ?, 'sso', ?, ?)`, material.TokenHash, admin.ID, material.CSRFHash,
+		material.ExpiresAt.Unix(), now, snapshot.Binding.ID, material.SecureCookies)
 	if err != nil {
 		return Admin{}, fmt.Errorf("create sso session: %w", err)
 	}

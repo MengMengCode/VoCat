@@ -9,6 +9,7 @@ import (
 	"testing"
 )
 
+// TestPasswordCookieAtHTTPSProxy checks CookieJar transport eligibility behind TLS termination.
 func TestPasswordCookieAtHTTPSProxy(t *testing.T) {
 	for _, tc := range []struct {
 		name                          string

@@ -387,6 +387,7 @@ func testCertificate() (tls.Certificate, *x509.CertPool, error) {
 	return tlsCertificate, roots, nil
 }
 
+// allowedCallback confines fixture redirects to registered local callback entries.
 func allowedCallback(uri string) bool {
 	return uri == appOrigin+sso.CallbackPath || uri == "http://127.0.0.1:17477"+sso.CallbackPath || uri == "http://localhost:17477"+sso.CallbackPath
 }

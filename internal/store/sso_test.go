@@ -36,7 +36,7 @@ func ssoTestDatabase(t *testing.T) (*Store, SSOSnapshot, []byte) {
 		t.Fatal(err)
 	}
 	session := ssoTestHash("password session")
-	if err := database.CreateSession(ctx, 1, session, ssoTestHash("csrf"), time.Now().Add(time.Hour)); err != nil {
+	if err := database.CreateSession(ctx, 1, session, ssoTestHash("csrf"), time.Now().Add(time.Hour), false); err != nil {
 		t.Fatal(err)
 	}
 	secret := "initial-secret"
@@ -341,11 +341,12 @@ func TestSSOIdentityChecksAndSelectiveSessionRevocation(t *testing.T) {
 	}
 	flow := ssoTestClaim(t, database, ssoTestFlow(t, database, snapshot, "login", nil))
 	material := ssoTestMaterial()
+	material.SecureCookies = true
 	if _, err := database.FinalizeSSOLogin(ctx, flow, ssoTestIdentity(), material); err != nil {
 		t.Fatal(err)
 	}
 	created, err := database.SessionByTokenHash(ctx, material.TokenHash)
-	if err != nil || created.LoginMethod != "sso" || created.SSOBindingID != snapshot.Binding.ID {
+	if err != nil || !created.SecureCookies || created.LoginMethod != "sso" || created.SSOBindingID != snapshot.Binding.ID {
 		t.Fatalf("sso session source missing: %+v error=%v", created, err)
 	}
 	result, reauth, err := database.UnbindSSO(ctx, snapshot.Config.Revision, material.TokenHash)

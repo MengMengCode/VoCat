@@ -172,3 +172,15 @@ test("callback errors use a fixed whitelist, including prototype keys", () => {
     assert.equal(ssoErrorMessage(code), "SSO 操作未完成，请重新发起。");
   }
 });
+
+// Cover all accepted IPv4-mapped private ranges and adjacent rejected boundaries.
+test("mapped IPv6 callback previews agree with the backend private IPv4 policy", () => {
+  for (const address of ["10.0.0.0", "10.255.255.255", "127.0.0.1", "172.16.0.0", "172.31.255.255", "192.168.0.0", "192.168.255.255", "a00:2", "ac10:2", "c0a8:114"]) {
+    const origin = `http://[::ffff:${address}]:7575`;
+    assert.equal(ssoCallbackPreview(origin), `${origin}/api/auth/sso/callback`, address);
+  }
+  for (const address of ["9.255.255.255", "11.0.0.0", "126.255.255.255", "128.0.0.0", "172.15.255.255", "172.32.0.0", "192.167.255.255", "192.169.0.0", "169.254.169.254", "8.8.8.8", "808:808"]) {
+    const origin = `http://[::ffff:${address}]:7575`;
+    assert.equal(ssoCallbackPreview(origin), null, address);
+  }
+});

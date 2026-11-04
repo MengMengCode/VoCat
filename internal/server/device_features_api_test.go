@@ -955,6 +955,7 @@ func TestHandleUpdateApplyInstallsFromTrustedRepository(t *testing.T) {
 	tokenHash := []byte("active-session")
 	if err := database.CreateSession(
 		context.Background(), 1, tokenHash, []byte("csrf"), time.Now().Add(time.Hour),
+		false,
 	); err != nil {
 		t.Fatal(err)
 	}

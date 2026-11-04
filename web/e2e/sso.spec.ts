@@ -467,6 +467,8 @@ test("HTTPS proxy password cookies stay Secure without enabling proxy-header tru
   for (const name of ["vocat_session", "vocat_csrf"]) {
     expect((await context.cookies(APP)).find(c => c.name === name)?.secure).toBe(true);
   }
+  await context.clearCookies({ name: "vocat_csrf" });
+  expect((await context.cookies(APP)).some(c => c.name === "vocat_csrf")).toBe(false);
   const statuses = await page.evaluate(async () => {
     const response = await fetch("/api/auth/session", { referrerPolicy: "no-referrer" });
     const session = await response.json();

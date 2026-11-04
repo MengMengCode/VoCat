@@ -38,10 +38,10 @@ func TestLoginAuthenticateCSRFAndLogout(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
 
-	if _, err := service.Login(ctx, "admin", "wrong-password"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := service.Login(ctx, "admin", "wrong-password", false); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("Login() error = %v, want ErrInvalidCredentials", err)
 	}
-	credentials, err := service.Login(ctx, "admin", "correct-password")
+	credentials, err := service.Login(ctx, "admin", "correct-password", false)
 	if err != nil {
 		t.Fatalf("Login() error = %v", err)
 	}
@@ -82,7 +82,7 @@ func TestLoginAuthenticateCSRFAndLogout(t *testing.T) {
 func TestEnsureAdminRevokesSessionOnPasswordChange(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
-	credentials, err := service.Login(ctx, "admin", "correct-password")
+	credentials, err := service.Login(ctx, "admin", "correct-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestEnsureAdminRevokesSessionOnPasswordChange(t *testing.T) {
 	if _, err := service.Authenticate(ctx, credentials.SessionToken); !errors.Is(err, ErrUnauthorized) {
 		t.Fatalf("old session error = %v, want ErrUnauthorized", err)
 	}
-	if _, err := service.Login(ctx, "admin", "new-password"); err != nil {
+	if _, err := service.Login(ctx, "admin", "new-password", false); err != nil {
 		t.Fatalf("login with new password: %v", err)
 	}
 }
@@ -101,7 +101,7 @@ func TestEnsureAdminRevokesSessionOnPasswordChange(t *testing.T) {
 func TestResetAdminCredentialsChangesUsernameAndPasswordWithoutOldPassword(t *testing.T) {
 	ctx := context.Background()
 	service := newTestService(t)
-	credentials, err := service.Login(ctx, "admin", "correct-password")
+	credentials, err := service.Login(ctx, "admin", "correct-password", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,10 +109,10 @@ func TestResetAdminCredentialsChangesUsernameAndPasswordWithoutOldPassword(t *te
 	if err := service.ResetAdminCredentials(ctx, "new-admin", "replacement-password"); err != nil {
 		t.Fatalf("ResetAdminCredentials() error = %v", err)
 	}
-	if _, err := service.Login(ctx, "admin", "correct-password"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := service.Login(ctx, "admin", "correct-password", false); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("old credentials error = %v, want ErrInvalidCredentials", err)
 	}
-	if _, err := service.Login(ctx, "new-admin", "replacement-password"); err != nil {
+	if _, err := service.Login(ctx, "new-admin", "replacement-password", false); err != nil {
 		t.Fatalf("new credentials login error = %v", err)
 	}
 	if _, err := service.Authenticate(ctx, credentials.SessionToken); !errors.Is(err, ErrUnauthorized) {
@@ -146,7 +146,7 @@ func TestResetAdminCredentialsAcceptsPasswordsWithoutComplexityRules(t *testing.
 		if err := service.ResetAdminCredentials(ctx, "admin", password); err != nil {
 			t.Fatalf("ResetAdminCredentials(%d-byte password) error = %v", len(password), err)
 		}
-		if _, err := service.Login(ctx, "admin", password); err != nil {
+		if _, err := service.Login(ctx, "admin", password, false); err != nil {
 			t.Fatalf("Login(%d-byte password) error = %v", len(password), err)
 		}
 	}
@@ -159,7 +159,7 @@ func TestChangePasswordAcceptsPasswordsWithoutComplexityRules(t *testing.T) {
 		if err := service.ChangePassword(ctx, "admin", "correct-password", password); err != nil {
 			t.Fatalf("ChangePassword(%d-byte password) error = %v", len(password), err)
 		}
-		if _, err := service.Login(ctx, "admin", password); err != nil {
+		if _, err := service.Login(ctx, "admin", password, false); err != nil {
 			t.Fatalf("Login(%d-byte password) error = %v", len(password), err)
 		}
 	}
@@ -178,10 +178,10 @@ func TestEnsureAdminIfMissingDoesNotOverwriteChangedPassword(t *testing.T) {
 	if created {
 		t.Fatal("existing administrator was reported as newly created")
 	}
-	if _, err := service.Login(ctx, "admin", "changed-password"); err != nil {
+	if _, err := service.Login(ctx, "admin", "changed-password", false); err != nil {
 		t.Fatalf("database password was overwritten: %v", err)
 	}
-	if _, err := service.Login(ctx, "admin", "stale-config-password"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := service.Login(ctx, "admin", "stale-config-password", false); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("stale configured password became active: %v", err)
 	}
 }

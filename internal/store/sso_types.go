@@ -100,7 +100,8 @@ type SSOIdentity struct {
 }
 
 type SSOSessionMaterial struct {
-	TokenHash []byte
-	CSRFHash  []byte
-	ExpiresAt time.Time
+	SecureCookies bool
+	TokenHash     []byte
+	CSRFHash      []byte
+	ExpiresAt     time.Time
 }

@@ -358,7 +358,7 @@ func TestSSOMutationsRejectCrossSessionCSRF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.CreateSession(ctx, 1, auth.TokenHash(other.SessionToken), auth.TokenHash(other.CSRFToken), other.ExpiresAt); err != nil {
+	if err := f.store.CreateSession(ctx, 1, auth.TokenHash(other.SessionToken), auth.TokenHash(other.CSRFToken), other.ExpiresAt, false); err != nil {
 		t.Fatal(err)
 	}
 	serverURL, _ := url.Parse(f.server.URL)

@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 29
+const schemaVersion = 30
 
 var ErrNotFound = errors.New("store: not found")
 
@@ -39,13 +39,14 @@ type Admin struct {
 }
 
 type Session struct {
-	TokenHash    []byte
-	CSRFHash     []byte
-	ExpiresAt    time.Time
-	CreatedAt    time.Time
-	LoginMethod  string
-	SSOBindingID string
-	Admin        Admin
+	TokenHash     []byte
+	CSRFHash      []byte
+	ExpiresAt     time.Time
+	CreatedAt     time.Time
+	LoginMethod   string
+	SSOBindingID  string
+	SecureCookies bool
+	Admin         Admin
 }
 
 // Open creates the parent directory, opens SQLite, applies safety pragmas and
@@ -147,7 +148,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 					(nextVersion == 23 && strings.Contains(statement, "ADD COLUMN")) ||
 					(nextVersion == 24 && strings.Contains(statement, "ADD COLUMN mbn_profile")) ||
 					(nextVersion == 26 && strings.Contains(statement, "ADD COLUMN revert_profile")) ||
-					(nextVersion == 29 && strings.Contains(statement, "ADD COLUMN"))
+					(nextVersion == 29 && strings.Contains(statement, "ADD COLUMN")) ||
+					(nextVersion == 30 && strings.Contains(statement, "ADD COLUMN"))
 				if duplicateAdditiveColumn && strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 					continue
 				}
@@ -272,18 +274,20 @@ func (s *Store) DeleteAllSessions(ctx context.Context) error {
 	return nil
 }
 
+// CreateSession persists credentials and their cookie transport policy in one insert.
 func (s *Store) CreateSession(
 	ctx context.Context,
 	adminID int64,
 	tokenHash []byte,
 	csrfHash []byte,
 	expiresAt time.Time,
+	secureCookies bool,
 ) error {
 	now := time.Now().UTC().Unix()
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, tokenHash, adminID, csrfHash, expiresAt.UTC().Unix(), now)
+		INSERT INTO sessions (token_hash, admin_id, csrf_hash, expires_at, created_at, secure_cookies)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, tokenHash, adminID, csrfHash, expiresAt.UTC().Unix(), now, secureCookies)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
@@ -305,6 +309,7 @@ func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Sessi
 			s.created_at,
 			s.login_method,
 			COALESCE(s.sso_binding_id, ''),
+			s.secure_cookies,
 			a.id,
 			a.username,
 			a.created_at,
@@ -319,6 +324,7 @@ func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Sessi
 		&createdAt,
 		&session.LoginMethod,
 		&session.SSOBindingID,
+		&session.SecureCookies,
 		&session.Admin.ID,
 		&session.Admin.Username,
 		&adminCreatedAt,
@@ -335,6 +341,23 @@ func (s *Store) SessionByTokenHash(ctx context.Context, tokenHash []byte) (Sessi
 	session.Admin.CreatedAt = time.Unix(adminCreatedAt, 0).UTC()
 	session.Admin.UpdatedAt = time.Unix(adminUpdatedAt, 0).UTC()
 	return session, nil
+}
+
+// RequireSessionSecureCookies permanently upgrades a live session's cookie policy.
+// Missing request metadata on later requests can never undo this requirement.
+func (s *Store) RequireSessionSecureCookies(ctx context.Context, tokenHash []byte) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET secure_cookies = 1 WHERE token_hash = ? AND expires_at > ?`, tokenHash, time.Now().UTC().Unix())
+	if err != nil {
+		return fmt.Errorf("secure session cookies: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read secure session update result: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) UpdateSessionCSRF(ctx context.Context, tokenHash []byte, csrfHash []byte) error {

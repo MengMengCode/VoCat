@@ -14,6 +14,7 @@ import (
 	"vocat/internal/store"
 )
 
+// newCookieCompatibilityFixture creates a local server with a disabled SSO draft for client compatibility tests.
 func newCookieCompatibilityFixture(t *testing.T, origin string) *ssoHTTPFixture {
 	t.Helper()
 	f := newSSOHTTPFixture(t)
@@ -113,6 +114,7 @@ func TestPasswordCookieClientIgnoresSSODraft(t *testing.T) {
 	}
 }
 
+// TestBearerEntriesRemainIndependentOfSSO checks bearer authorization and read-only enforcement across entries.
 func TestBearerEntriesRemainIndependentOfSSO(t *testing.T) {
 	f := newCookieCompatibilityFixture(t, "https://vocat.example")
 	rw, err := f.auth.CreateAPIToken(context.Background(), "review-rw", false, 0)

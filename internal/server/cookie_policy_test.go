@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestBrowserEntryOrigin checks entry selection without trusting arbitrary proxy headers.
 func TestBrowserEntryOrigin(t *testing.T) {
 	for _, tc := range []struct {
 		name, host, saved, forwarded, want string
@@ -62,6 +63,7 @@ func TestPasswordCookieTransportPolicy(t *testing.T) {
 	}
 }
 
+// TestBrowserHTTPSCookieHints accepts only unambiguous same-authority HTTPS browser hints.
 func TestBrowserHTTPSCookieHints(t *testing.T) {
 	for _, tc := range []struct {
 		name, host        string

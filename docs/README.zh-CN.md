@@ -278,7 +278,11 @@ Generic OAuth2 不提供 OIDC ID Token 验证。
 
 同一份身份服务配置和账号绑定可用于已配置的 HTTPS 公开入口，以及 localhost、loopback 和明确的私网 IP 入口。请在身份服务登记每个入口的完整回调 URL（路径为 `/api/auth/sso/callback`）。程序按当前入口生成授权回调地址，并在 Token 交换时使用同一个地址；跨入口提交回调会被拒绝。普通公网 HTTP 地址仍不被允许。
 
-直接 TLS、已配置的 HTTPS 反代入口或可信的 `X-Forwarded-Proto` 会自动启用安全 Cookie；未受信任的转发头不会参与判断，反代应保留 Host。密码会话依据请求传输方式、显式强制设置以及同源 HTTPS Origin/Referer 信息选择 Cookie 属性；浏览器信息只可加强 Cookie 保护，不参与鉴权、网络访问控制或回调地址选择。保存或关闭 SSO 不会改变密码客户端的行为。若代理剥除全部浏览器与传输协议信息，需要显式提供可信 HTTPS 标识。公开地址的推断仅用于 SSO 登录和 SSO 会话的 CSRF 刷新。独立的内网 HTTP 入口无需切换配置或重启。混合使用两种协议时请移除旧的全局 `VOCAT_SECURE_COOKIES=true` 强制设置。HTTP 入口的登录凭据会以明文传输。
+直接 TLS、已配置的 HTTPS 反代入口或可信的 `X-Forwarded-Proto` 会自动启用安全 Cookie；未受信任的转发头不会参与判断，反代应保留 Host。密码会话依据请求传输方式、显式强制设置以及同源 HTTPS Origin/Referer 信息选择 Cookie 属性；浏览器信息只可加强 Cookie 保护，不参与鉴权、网络访问控制或回调地址选择。
+
+会话在登录时保存安全 Cookie 要求，之后识别到 HTTPS 时只会加强保护；即使 CSRF Cookie 丢失或失效、刷新请求又没有协议提示，补发时也会保留这个要求。数据库升级会保留已有会话；旧会话无法反推出此前的传输协议，HTTPS 用户重新登录一次或进行一次带有可识别 HTTPS 信息的刷新后，即可保存该要求。
+
+保存或关闭 SSO 不会改变密码客户端的行为。若代理剥除全部浏览器与传输协议信息，需要显式提供可信 HTTPS 标识。公开地址的推断仅用于 SSO 登录和 SSO 会话的 CSRF 刷新。独立的内网 HTTP 入口无需切换配置或重启。混合使用两种协议时请移除旧的全局 `VOCAT_SECURE_COOKIES=true` 强制设置。HTTP 入口的登录凭据会以明文传输。
 
 ### 网络、凭据与会话
 
