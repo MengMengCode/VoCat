@@ -83,6 +83,10 @@ func (card *profileSwitchPCSCCard) Transmit(_ context.Context, command []byte) (
 			return nil, 0, fmt.Errorf("truncated test STORE DATA")
 		}
 		request := append([]byte(nil), command[5:5+length]...)
+		if len(request) >= 2 && request[0] == 0xBF && request[1] == 0x2D {
+			// GetProfilesInfo during ISD-R resolution: report no profiles.
+			return []byte{0xBF, 0x2D, 2, 0xA0, 0}, 0x9000, nil
+		}
 		backend.enableRequests = append(backend.enableRequests, request)
 		result := byte(7)
 		if refresh := derFindValue(request, 0x81); len(refresh) == 1 && refresh[0] == 0 {
