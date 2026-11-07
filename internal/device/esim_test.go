@@ -625,12 +625,50 @@ func TestDiscoverEuiccAIDsFindsXeSIMAlternateISDR(t *testing.T) {
 		manageChannel,
 		selectStep(xesimISDRAID, "9000"),
 		closeChannel,
+		manageChannel,
+		selectStep(fiveBerISDRAID, "6A82"),
+		closeChannel,
 	}}
 	manager, id := newStartedTestManager(t, client)
 
 	aids := manager.discoverEuiccAIDs(context.Background(), id)
 	if len(aids) != 1 || aids[0] != xesimISDRAID {
 		t.Fatalf("discovered AIDs = %#v, want XeSIM %s", aids, xesimISDRAID)
+	}
+	client.assertDone(t)
+}
+
+func TestDiscoverEuiccAIDsFinds5berISDR(t *testing.T) {
+	manageChannel := clientStep{
+		command:  `AT+CSIM=10,"0070000001"`,
+		response: okResponse(`+CSIM: 6,"019000"`),
+	}
+	closeChannel := clientStep{
+		command:  `AT+CSIM=10,"0070800100"`,
+		response: okResponse(`+CSIM: 4,"9000"`),
+	}
+	selectStep := func(aid, response string) clientStep {
+		return clientStep{
+			command:  fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, aid),
+			response: okResponse(fmt.Sprintf(`+CSIM: 4,"%s"`, response)),
+		}
+	}
+
+	client := &transcriptClient{steps: []clientStep{
+		manageChannel, selectStep(estkProductAID, "6A82"), closeChannel,
+		// 5ber cards reject both the GSMA and XeSIM ISD-R AIDs...
+		manageChannel, selectStep(isdRAID, "6A82"), closeChannel,
+		manageChannel, selectStep(xesimISDRAID, "6A82"), closeChannel,
+		// ...and answer SELECT on their own ISD-R with response data pending.
+		manageChannel, selectStep(fiveBerISDRAID, "6121"),
+		{command: `AT+CSIM=10,"81C0000021"`, response: okResponse(`+CSIM: 4,"9000"`)},
+		closeChannel,
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	aids := manager.discoverEuiccAIDs(context.Background(), id)
+	if len(aids) != 1 || aids[0] != fiveBerISDRAID {
+		t.Fatalf("discovered AIDs = %#v, want 5ber %s", aids, fiveBerISDRAID)
 	}
 	client.assertDone(t)
 }

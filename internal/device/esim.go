@@ -35,6 +35,10 @@ const isdRAID = "A0000005591010FFFFFFFF8900000100"
 // state is never changed during discovery.
 const xesimISDRAID = "A0000005591010FFFFFFFF8900000177"
 
+// fiveBerISDRAID is the ISD-R application of 5ber removable eUICC cards. They
+// answer 6A82 to the standard ...0100 AID and expose ES10 only here.
+const fiveBerISDRAID = "A0000005591010FFFFFFFF8900050500"
+
 // eSTK multi-SE products expose each eUICC storage through its own vendor
 // ISD-R AID. The standard GSMA AID aliases one of them, so probing only that
 // AID silently hides the second storage.
@@ -559,7 +563,7 @@ func (manager *Manager) discoverEuiccAIDsForInventory(ctx context.Context, id st
 	}
 
 	var found []string
-	for _, aid := range []string{isdRAID, xesimISDRAID} {
+	for _, aid := range []string{isdRAID, xesimISDRAID, fiveBerISDRAID} {
 		channel, err := manager.openEuiccAID(ctx, id, aid)
 		if err != nil {
 			continue
