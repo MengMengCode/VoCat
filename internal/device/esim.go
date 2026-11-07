@@ -35,6 +35,10 @@ const isdRAID = "A0000005591010FFFFFFFF8900000100"
 // state is never changed during discovery.
 const xesimISDRAID = "A0000005591010FFFFFFFF8900000177"
 
+// fiveBerISDRAID is the ISD-R application of 5ber removable eUICC cards. They
+// answer 6A82 to the standard ...0100 AID and expose ES10 only here.
+const fiveBerISDRAID = "A0000005591010FFFFFFFF8900050500"
+
 // eSTK multi-SE products expose each eUICC storage through its own vendor
 // ISD-R AID. The standard GSMA AID aliases one of them, so probing only that
 // AID silently hides the second storage.
@@ -558,17 +562,17 @@ func (manager *Manager) discoverEuiccAIDsForInventory(ctx context.Context, id st
 		managementMissing = missing == 2
 	}
 
-	var found []string
-	for _, aid := range []string{isdRAID, xesimISDRAID} {
+	// The standard and vendor ISD-R AIDs are alternatives: a card exposes ES10
+	// through exactly one of them. Stop at the first match so an optional
+	// vendor probe cannot spend the caller's deadline after discovery has
+	// already succeeded.
+	for _, aid := range []string{isdRAID, xesimISDRAID, fiveBerISDRAID} {
 		channel, err := manager.openEuiccAID(ctx, id, aid)
 		if err != nil {
 			continue
 		}
 		channel.close(context.Background())
-		found = append(found, aid)
-	}
-	if len(found) > 0 {
-		return found, nil
+		return []string{aid}, nil
 	}
 	if managementMissing {
 		return nil, ErrESIMManagementUnavailable
@@ -873,6 +877,42 @@ func boundESIMContext(ctx context.Context) (context.Context, context.CancelFunc)
 	return context.WithTimeout(ctx, 10*time.Second)
 }
 
+// resolveProfileISDR returns the ISD-R that owns iccid when a caller (such as
+// the MCP switch tool) omits the AID. It prefers the cached inventory, then
+// falls back to read-only discovery and GetProfilesInfo on each candidate. An
+// empty result keeps the standard ISD-R default. The caller holds the eSIM lock.
+func (manager *Manager) resolveProfileISDR(ctx context.Context, id, iccid string) string {
+	clean := strings.TrimSpace(iccid)
+	if cached, ok := manager.cachedESIMInfo(id); ok && strings.TrimSpace(cached.AID) != "" {
+		for _, profile := range cached.Profiles {
+			if strings.TrimSpace(profile.ICCID) == clean {
+				return strings.TrimSpace(cached.AID)
+			}
+		}
+	}
+	aids := manager.discoverEuiccAIDs(ctx, id)
+	if len(aids) == 1 {
+		return aids[0]
+	}
+	for _, aid := range aids {
+		channel, err := manager.openEuiccAID(ctx, id, aid)
+		if err != nil {
+			continue
+		}
+		payload, err := channel.es10(ctx, []byte{0xBF, 0x2D, 0x00}) // GetProfilesInfo
+		channel.close(context.Background())
+		if err != nil {
+			continue
+		}
+		for _, profile := range parseProfilesInfo(payload) {
+			if strings.TrimSpace(profile.ICCID) == clean {
+				return aid
+			}
+		}
+	}
+	return ""
+}
+
 // resolveProfileAID attempts to look up the ISD-P AID for a profile by its ICCID.
 // It checks the in-memory eSIM cache first; if missing and an active eUICC
 // channel is provided, it executes a live GetProfilesInfo (BF2D) on the open channel.
@@ -950,6 +990,9 @@ func (manager *Manager) esimSwitchProfile(ctx context.Context, id string, iccid 
 	if err := manager.waitForESIMRecovery(ctx, id); err != nil {
 		manager.unlockESIM()
 		return err
+	}
+	if strings.TrimSpace(aidHex) == "" {
+		aidHex = manager.resolveProfileISDR(ctx, id, iccid)
 	}
 	channel, err := manager.openEuiccAID(ctx, id, targetEuiccAID(aidHex))
 	if err != nil {

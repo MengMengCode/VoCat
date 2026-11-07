@@ -625,12 +625,48 @@ func TestDiscoverEuiccAIDsFindsXeSIMAlternateISDR(t *testing.T) {
 		manageChannel,
 		selectStep(xesimISDRAID, "9000"),
 		closeChannel,
+		// Discovery stops at the first ISD-R; the 5ber AID is not probed.
 	}}
 	manager, id := newStartedTestManager(t, client)
 
 	aids := manager.discoverEuiccAIDs(context.Background(), id)
 	if len(aids) != 1 || aids[0] != xesimISDRAID {
 		t.Fatalf("discovered AIDs = %#v, want XeSIM %s", aids, xesimISDRAID)
+	}
+	client.assertDone(t)
+}
+
+func TestDiscoverEuiccAIDsFinds5berISDR(t *testing.T) {
+	manageChannel := clientStep{
+		command:  `AT+CSIM=10,"0070000001"`,
+		response: okResponse(`+CSIM: 6,"019000"`),
+	}
+	closeChannel := clientStep{
+		command:  `AT+CSIM=10,"0070800100"`,
+		response: okResponse(`+CSIM: 4,"9000"`),
+	}
+	selectStep := func(aid, response string) clientStep {
+		return clientStep{
+			command:  fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, aid),
+			response: okResponse(fmt.Sprintf(`+CSIM: 4,"%s"`, response)),
+		}
+	}
+
+	client := &transcriptClient{steps: []clientStep{
+		manageChannel, selectStep(estkProductAID, "6A82"), closeChannel,
+		// 5ber cards reject both the GSMA and XeSIM ISD-R AIDs...
+		manageChannel, selectStep(isdRAID, "6A82"), closeChannel,
+		manageChannel, selectStep(xesimISDRAID, "6A82"), closeChannel,
+		// ...and answer SELECT on their own ISD-R with response data pending.
+		manageChannel, selectStep(fiveBerISDRAID, "6121"),
+		{command: `AT+CSIM=10,"81C0000021"`, response: okResponse(`+CSIM: 4,"9000"`)},
+		closeChannel,
+	}}
+	manager, id := newStartedTestManager(t, client)
+
+	aids := manager.discoverEuiccAIDs(context.Background(), id)
+	if len(aids) != 1 || aids[0] != fiveBerISDRAID {
+		t.Fatalf("discovered AIDs = %#v, want 5ber %s", aids, fiveBerISDRAID)
 	}
 	client.assertDone(t)
 }
@@ -784,4 +820,48 @@ func TestMarkCachedProfileEnabled(t *testing.T) {
 	if info.Profiles[1].State != 1 || info.Profiles[1].StateText != "已启用" {
 		t.Fatalf("target profile state = %#v", info.Profiles[1])
 	}
+}
+
+func TestDiscoverEuiccAIDsStopsAtStandardISDR(t *testing.T) {
+	client := &transcriptClient{steps: append(
+		simResetSelectSteps(estkProductAID, "6A82"),
+		simResetSelectSteps(isdRAID, "9000")...,
+	)}
+	manager, id := newStartedTestManager(t, client)
+	aids := manager.discoverEuiccAIDs(context.Background(), id)
+	if len(aids) != 1 || aids[0] != isdRAID {
+		t.Fatalf("discovered AIDs = %#v, want only %s", aids, isdRAID)
+	}
+	client.assertDone(t)
+}
+
+func TestResolveProfileISDRUsesCachedInventory(t *testing.T) {
+	client := &transcriptClient{}
+	manager, id := newStartedTestManager(t, client)
+	manager.cacheESIMInfo(id, EsimInfo{
+		AID:      fiveBerISDRAID,
+		Profiles: []EsimProfile{{ICCID: "8944000000000000001"}},
+	})
+	if got := manager.resolveProfileISDR(context.Background(), id, "8944000000000000001"); got != fiveBerISDRAID {
+		t.Fatalf("resolved ISD-R = %q, want %s", got, fiveBerISDRAID)
+	}
+	client.assertDone(t)
+}
+
+func TestResolveProfileISDRDiscoversSingleISDR(t *testing.T) {
+	var steps []clientStep
+	for _, aid := range []string{estkProductAID, isdRAID, xesimISDRAID} {
+		steps = append(steps, simResetSelectSteps(aid, "6A82")...)
+	}
+	steps = append(steps,
+		clientStep{command: `AT+CSIM=10,"0070000001"`, response: okResponse(`+CSIM: 6,"019000"`)},
+		clientStep{command: fmt.Sprintf(`AT+CSIM=42,"01A4040010%s"`, fiveBerISDRAID), response: okResponse(`+CSIM: 4,"9000"`)},
+		clientStep{command: `AT+CSIM=10,"0070800100"`, response: okResponse(`+CSIM: 4,"9000"`)},
+	)
+	client := &transcriptClient{steps: steps}
+	manager, id := newStartedTestManager(t, client)
+	if got := manager.resolveProfileISDR(context.Background(), id, "8944000000000000001"); got != fiveBerISDRAID {
+		t.Fatalf("resolved ISD-R = %q, want %s", got, fiveBerISDRAID)
+	}
+	client.assertDone(t)
 }

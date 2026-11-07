@@ -36,7 +36,10 @@ func TestESIMManagementFailureRequiresLiveESTKAndTwoMissingApplications(t *testi
 			}
 			if test.standardSW != "" {
 				steps = append(steps, simResetSelectSteps(isdRAID, test.standardSW)...)
-				steps = append(steps, simResetSelectSteps(xesimISDRAID, "6A82")...)
+				if test.standardSW != "9000" {
+					steps = append(steps, simResetSelectSteps(xesimISDRAID, "6A82")...)
+					steps = append(steps, simResetSelectSteps(fiveBerISDRAID, "6A82")...)
+				}
 			}
 			client := &transcriptClient{steps: steps}
 			manager, id := newStartedTestManager(t, client)
@@ -54,7 +57,7 @@ func TestESIMManagementFailureRequiresLiveESTKAndTwoMissingApplications(t *testi
 
 func TestOrdinarySIMInventoryDoesNotAddChannelProbeOrReset(t *testing.T) {
 	var steps []clientStep
-	for _, aid := range []string{estkProductAID, isdRAID, xesimISDRAID, isdRAID} {
+	for _, aid := range []string{estkProductAID, isdRAID, xesimISDRAID, fiveBerISDRAID, isdRAID} {
 		steps = append(steps, simResetSelectSteps(aid, "6A82")...)
 	}
 	client := &transcriptClient{steps: steps}
