@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertRegular, CheckmarkRegular } from "@fluentui/react-icons";
-import { api, apiMessage, getApiTokens, getSecuritySettings, revokeApiToken, updateSecuritySettings } from "../api";
+import { ApiError, api, apiMessage, getApiTokens, getSecuritySettings, revokeApiToken, updateSecuritySettings } from "../api";
 import type { ApiTokenListItem, DeveloperSettings, DeviceListItem, DevicesResponse, HTTPSSettings, NotificationSettings, SecuritySettings, SMSSettings, SystemInfo } from "../types";
 import { Button, PageHeader, confirmDialog, message } from "../components/ui";
 import { CardDecor, CardIcon, CardTitle, SecurityCard, SystemInfoCard } from "../components/settings/Cards";
@@ -446,15 +446,22 @@ export default function SettingsPage() {
       });
       setQQBind(state);
     } catch (error) {
-      message.error(apiMessage(error) || t("无法开始绑定"));
-      // 响应可能丢失而服务器已开始绑定：查询一次，若仍在进行则继续轮询并同步结果。
-      // 只接管进行中的会话，较早结束的会话不影响当前表单。
-      try {
-        const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
-        if (qqBotBindActive(state)) setQQBind(state);
-      } catch {
-        // 查询也失败时保持现状，绑定会在有效期结束后自动停止。
+      // 服务器明确拒绝（返回了带错误码的响应）时没有开始绑定，直接提示。
+      // 只有没收到服务器响应（网络中断，或代理超时等不带错误码的 5xx）时，绑定才可能已在服务器上开始：
+      // 查询一次，若仍在进行则接管并继续轮询，不再提示错误。
+      const unanswered = !(error instanceof ApiError) || (error.status >= 500 && !error.code);
+      if (unanswered) {
+        try {
+          const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
+          if (qqBotBindActive(state)) {
+            setQQBind(state);
+            return;
+          }
+        } catch {
+          // 查询也失败时按开始失败处理，绑定会在有效期结束后自动停止。
+        }
       }
+      message.error(apiMessage(error) || t("无法开始绑定"));
     } finally {
       setStartingQQBind(false);
     }
