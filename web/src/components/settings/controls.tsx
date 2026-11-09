@@ -153,12 +153,14 @@ export function ChannelHeader({
   onToggle,
   actions,
   onClear,
+  clearLabel,
 }: {
   title: ReactNode;
   enabled: boolean;
   onToggle: (enabled: boolean) => void;
   actions?: ReactNode;
   onClear?: () => void;
+  clearLabel?: ReactNode;
 }) {
   return (
     <div className="mb-4 flex items-center justify-between">
@@ -166,7 +168,7 @@ export function ChannelHeader({
         <div className="font-bold text-gray-800 dark:text-gray-100">{title}</div>
       </div>
       <div className="flex items-center gap-2">
-        {onClear ? <Button size="small" variant="danger" plain onClick={onClear}>{tl("清空配置")}</Button> : null}
+        {onClear ? <Button size="small" variant="danger" plain onClick={onClear}>{clearLabel ?? tl("清空配置")}</Button> : null}
         {actions}
         <Switch checked={enabled} onChange={onToggle} />
       </div>
@@ -188,10 +190,12 @@ export function SegmentedTabs({
   tabs,
   value,
   onChange,
+  disabled,
 }: {
   tabs: { key: string; label: ReactNode }[];
   value: string;
   onChange: (key: string) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="mb-6 inline-flex max-w-full items-center gap-1 overflow-x-auto rounded-xl bg-gray-100 p-1 dark:bg-white/5">
@@ -201,9 +205,12 @@ export function SegmentedTabs({
           <button
             key={tab.key}
             type="button"
+            disabled={disabled && !active}
+            aria-pressed={active}
             onClick={() => onChange(tab.key)}
             className={cx(
               "h-[38px] shrink-0 whitespace-nowrap rounded-lg px-5 text-sm font-medium outline-none transition-all duration-300",
+              "disabled:cursor-not-allowed disabled:opacity-50",
               active
                 ? "bg-white font-semibold text-[#0ea5e9] shadow-[0_1px_4px_rgba(0,0,0,0.05),0_2px_8px_rgba(0,0,0,0.03)] dark:bg-white/10 dark:text-[#7dd3fc]"
                 : "text-gray-500 hover:text-[#0ea5e9] dark:text-gray-400 dark:hover:text-[#7dd3fc]",

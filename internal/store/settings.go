@@ -26,6 +26,8 @@ func DefaultNotificationSensitiveFields(channel string) []string {
 		return []string{"urls"}
 	case "lark":
 		return []string{"url", "secret"}
+	case "qqbot":
+		return []string{"app_secret"}
 	default:
 		return nil
 	}

@@ -17,6 +17,10 @@ import {
   buildEmailPayload,
   buildLarkPayload,
   buildMeowPayload,
+  buildQQBotPayload,
+  qqBotBindActive,
+  type QQBotBindMode,
+  type QQBotBindState,
   buildNotificationsPayload,
   buildWecomPayload,
   buildWebhookPayload,
@@ -26,7 +30,7 @@ import {
   type ClearableNotificationChannel,
 } from "../components/settings/model";
 import { PushplusTab, TelegramTab } from "../components/settings/BotTabs";
-import { BarkTab, EmailTab, LarkTab, WebhookTab, WecomTab, MeowTab } from "../components/settings/PushTabs";
+import { BarkTab, EmailTab, LarkTab, WebhookTab, WecomTab, MeowTab, QQBotTab } from "../components/settings/PushTabs";
 import { PluginsCard } from "../components/settings/PluginsCard";
 import { HTTPSCard } from "../components/settings/HTTPSCard";
 import { DeviceQuotaCard } from "../components/settings/DeviceQuotaCard";
@@ -46,6 +50,7 @@ const NOTIFY_TABS = [
   { key: "wecom", label: "企业微信消息推送" },
   { key: "lark", label: "飞书 / Lark 群机器人" },
   { key: "meow", label: "MeoW" },
+  { key: "qqbot", label: "QQ 机器人" },
 ];
 
 const EMPTY_SYSTEM_INFO: SystemInfo = { version: "", buildTime: "", config: "" };
@@ -63,15 +68,26 @@ export default function SettingsPage() {
   const [clearedChannels, setClearedChannels] = useState<ClearableNotificationChannel[]>([]);
   const clearChannel = async (channel: ClearableNotificationChannel) => {
     const name = t(NOTIFY_TABS.find(tab => tab.key === channel)!.label);
-    if (!await confirmDialog(
-      t("清空后将移除该渠道的账号、地址和凭据，其他选项恢复默认值。启用状态和适用设备保持不变，点击“保存通知配置”后生效。"),
-      t("清空配置") + " · " + name,
-      { type: "warning", confirmVariant: "danger", confirmText: t("清空配置"), cancelText: t("取消") },
-    )) return;
+    // QQ 机器人清空后回到绑定流程。
+    const confirmed = channel === "qqbot"
+      ? await confirmDialog(
+        t("将清除当前机器人的 AppID、AppSecret 和接收方，并回到绑定流程，可以重新扫码或手动绑定。点击“保存通知配置”后生效。"),
+        t("清空配置重新绑定") + " · " + name,
+        { type: "warning", confirmVariant: "danger", confirmText: t("清空并重新绑定"), cancelText: t("取消") },
+      )
+      : await confirmDialog(
+        t("清空后将移除该渠道的账号、地址和凭据，其他选项恢复默认值。启用状态和适用设备保持不变，点击“保存通知配置”后生效。"),
+        t("清空配置") + " · " + name,
+        { type: "warning", confirmVariant: "danger", confirmText: t("清空配置"), cancelText: t("取消") },
+      );
+    if (!confirmed) return;
     setForms(prev => ({ ...prev, [channel]: { ...defaultNotifyForms()[channel], enabled: prev[channel].enabled, deviceIds: prev[channel].deviceIds } }));
     setClearedChannels(prev => prev.includes(channel) ? prev : [...prev, channel]);
   };
   const [testingMeow, setTestingMeow] = useState(false);
+  const [testingQQBot, setTestingQQBot] = useState(false);
+  const [qqBind, setQQBind] = useState<QQBotBindState | null>(null);
+  const [startingQQBind, setStartingQQBind] = useState(false);
   const [activeTab, setActiveTab] = useState("telegram");
   const [loadingNotif, setLoadingNotif] = useState(false);
   const [savingNotif, setSavingNotif] = useState(false);
@@ -387,6 +403,82 @@ export default function SettingsPage() {
     }
   };
 
+  const onTestQQBot = async () => {
+    setTestingQQBot(true);
+    try {
+      await api("/settings/notifications/qqbot/test", { method: "POST", body: buildQQBotPayload(forms.qqbot) });
+      message.success(t("测试通知已发送"));
+    } catch (error) {
+      message.error(apiMessage(error) || t("QQ 机器人测试失败"));
+    } finally {
+      setTestingQQBot(false);
+    }
+  };
+
+  const onBindQQBot = async (mode: QQBotBindMode) => {
+    setStartingQQBind(true);
+    try {
+      // 扫码不需要已有凭据；表单中的代理等设置仍随请求提交。
+      const state = await api<QQBotBindState>("/settings/notifications/qqbot/bind", {
+        method: "POST",
+        body: { ...buildQQBotPayload(forms.qqbot), mode },
+      });
+      setQQBind(state);
+    } catch (error) {
+      message.error(apiMessage(error) || t("无法开始绑定"));
+    } finally {
+      setStartingQQBind(false);
+    }
+  };
+
+  const onCancelQQBind = async () => {
+    // 先更新界面（例如从扫码切换到手动绑定时立即生效），再通知服务器停止。
+    setQQBind(null);
+    try {
+      await api("/settings/notifications/qqbot/bind", { method: "DELETE" });
+    } catch {
+      // 绑定会在有效期结束后自动停止。
+    }
+  };
+
+  // 绑定进行中时轮询状态；绑定成功后只刷新 QQ 机器人的凭据和接收方，不覆盖其他未保存的修改。
+  const qqBindPolling = qqBotBindActive(qqBind);
+  useEffect(() => {
+    if (!qqBindPolling) return;
+    let stopped = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
+        if (stopped || !state) return;
+        setQQBind(state);
+        if (state.status === "bound") {
+          const data = await api<NotificationSettings>("/settings/notifications");
+          const saved = formsFromNotifications(data || {}).qqbot;
+          setForms(prev => ({
+            ...prev,
+            qqbot: {
+              ...prev.qqbot,
+              // 完成绑定后服务器已启用该通道。
+              enabled: saved.enabled,
+              appId: saved.appId,
+              appSecret: saved.appSecret,
+              targetOpenid: saved.targetOpenid,
+            },
+          }));
+          // 绑定已写入新凭据：撤销尚未保存的“清空配置”，否则保存时会清掉刚绑定的 AppSecret。
+          setClearedChannels(prev => prev.filter(channel => channel !== "qqbot"));
+          message.success(t("已绑定 QQ 机器人"));
+        }
+      } catch {
+        // 下一次轮询重试。
+      }
+    }, 2000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [qqBindPolling]);
+
   const onTestWebhook = useCallback(async () => {
     setTestingWebhook(true);
     try {
@@ -606,7 +698,7 @@ export default function SettingsPage() {
               <CardIcon>
                 <AlertRegular className="text-[24px]" />
               </CardIcon>
-              <CardTitle title={t("通知")} subtitle={t("Telegram / Bark / Email / Pushplus / Webhook / 企业微信 / 飞书 / Lark 群机器人 / MeoW")} />
+              <CardTitle title={t("通知")} subtitle={t("Telegram / Bark / Email / Pushplus / Webhook / 企业微信 / 飞书 / Lark 群机器人 / MeoW / QQ 机器人")} />
             </div>
             <Button variant="primary" loading={savingNotif} disabled={loadingNotif} onClick={onSaveNotifications} className="!border-0" icon={<CheckmarkRegular />}>
               {t("保存通知配置")}
@@ -618,6 +710,7 @@ export default function SettingsPage() {
             <fieldset disabled={savingNotif} className="relative z-10 min-w-0 w-full overflow-hidden">
               <SegmentedTabs tabs={NOTIFY_TABS.map((tab) => ({ ...tab, label: t(tab.label) }))} value={activeTab} onChange={setActiveTab} />
               {activeTab === "meow" ? <MeowTab value={forms.meow} onChange={(p) => updateChannel("meow", p)} testing={testingMeow} onTest={onTestMeow} /> : null}
+              {activeTab === "qqbot" ? <QQBotTab onClear={() => void clearChannel("qqbot")} value={forms.qqbot} onChange={(p) => updateChannel("qqbot", p)} testing={testingQQBot} onTest={onTestQQBot} bind={qqBind} binding={startingQQBind} onBind={(mode) => void onBindQQBot(mode)} onCancelBind={() => void onCancelQQBind()} /> : null}
               {activeTab === "telegram" ? (
                 <TelegramTab onClear={() => void clearChannel("telegram")} value={forms.telegram} onChange={(p) => updateChannel("telegram", p)} />
               ) : null}

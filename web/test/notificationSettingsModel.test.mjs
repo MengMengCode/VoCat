@@ -18,6 +18,12 @@ const {
   buildNotificationsPayload,
   defaultNotifyForms,
   formsFromNotifications,
+  qqBotBindActive,
+  qqBotBindRemaining,
+  qqBotConfigured,
+  qqBotDefaultMethod,
+  qqBotNextView,
+  qqBotVisibleMethod,
 } = await import(moduleURL);
 
 test("loads a masked signed Lark group bot config", () => {
@@ -109,7 +115,7 @@ test("default webhook template identifies the receiving card and preserves custo
 test("round-trips MeoW alongside the seven existing channels", () => {
   const forms = formsFromNotifications({ meow: { enabled: true, nickname: " 昵称 ", url: " https://example.com ", imgUrl: " https://example.com/icon.png " } });
   assert.deepEqual(buildNotificationsPayload(forms).meow, { enabled: true, nickname: "昵称", url: "https://example.com", imgUrl: "https://example.com/icon.png", deviceIds: null });
-  assert.deepEqual(Object.keys(buildNotificationsPayload(forms)).sort(), ["bark", "email", "lark", "meow", "pushplus", "telegram", "webhook", "wecom"].sort());
+  assert.deepEqual(Object.keys(buildNotificationsPayload(forms)).sort(), ["bark", "email", "lark", "meow", "pushplus", "qqbot", "telegram", "webhook", "wecom"].sort());
 });
 
 test("clear markers apply only to explicitly cleared Telegram and Email drafts", () => {
@@ -166,4 +172,62 @@ test("round-trips Bark per-URL device scopes and drops stale ones", () => {
   });
   assert.deepEqual(payload.urlScopes, [{ url: a, deviceIds: ["reader-1"] }, { url: b, deviceIds: ["reader-2"] }]);
   assert.equal("urlScopes" in buildBarkPayload(forms.bark, true), false);
+});
+
+test("round-trips QQ Bot and clears only its secret on request", () => {
+  const forms = formsFromNotifications({
+    qqbot: { enabled: true, appId: " 102000001 ", appSecret: "********", targetOpenid: " OPENID_1 ", proxy: "", deviceIds: ["a"] },
+  });
+  assert.deepEqual(buildNotificationsPayload(forms).qqbot, {
+    enabled: true, appId: "102000001", appSecret: "********", targetOpenid: "OPENID_1", proxy: "", deviceIds: ["a"],
+  });
+  assert.equal(Object.hasOwn(formsFromNotifications({ qqbot: { targetType: "group" } }).qqbot, "targetType"), false);
+  assert.equal(Object.hasOwn(buildNotificationsPayload(forms).qqbot, "clearSecrets"), false);
+  forms.qqbot.appSecret = "";
+  const cleared = buildNotificationsPayload(forms, ["qqbot"]);
+  assert.equal(cleared.qqbot.clearSecrets, true);
+  assert.equal(cleared.qqbot.appSecret, "");
+  assert.equal(Object.hasOwn(cleared.telegram, "clearSecrets"), false);
+});
+
+test("tracks QQ Bot binding progress", () => {
+  assert.equal(qqBotBindActive(null), false);
+  assert.equal(qqBotBindActive({ mode: "code", code: "VOCAT-000001", expiresAt: "", status: "connecting" }), true);
+  assert.equal(qqBotBindActive({ mode: "code", code: "VOCAT-000001", expiresAt: "", status: "waiting" }), true);
+  for (const status of ["bound", "expired", "failed", "canceled"]) {
+    assert.equal(qqBotBindActive({ mode: "code", code: "VOCAT-000001", expiresAt: "", status }), false);
+  }
+  const now = Date.parse("2026-11-09T08:00:00Z");
+  assert.equal(qqBotBindRemaining("2026-11-09T08:04:05Z", now), "4:05");
+  assert.equal(qqBotBindRemaining("2026-11-09T07:59:00Z", now), "0:00");
+});
+
+test("QQ bot binding method follows saved state and active binding", () => {
+  assert.equal(qqBotDefaultMethod({ appId: "", appSecret: "", targetOpenid: "" }), "qr");
+  assert.equal(qqBotDefaultMethod({ appId: "102000001", appSecret: "********", targetOpenid: "" }), "manual");
+  assert.equal(qqBotDefaultMethod({ appId: "102000001", appSecret: "********", targetOpenid: "OPENID_1" }), "qr");
+
+  assert.equal(qqBotVisibleMethod("manual", null), "manual");
+  assert.equal(qqBotVisibleMethod("manual", { mode: "qr", expiresAt: "", status: "waiting" }), "qr");
+  // 扫码未返回接收方时回退到绑定码，切到手动方式。
+  assert.equal(qqBotVisibleMethod("qr", { mode: "code", code: "VOCAT-000001", expiresAt: "", status: "connecting" }), "manual");
+  // 结束后恢复用户的选择。
+  assert.equal(qqBotVisibleMethod("qr", { mode: "code", code: "VOCAT-000001", expiresAt: "", status: "bound" }), "qr");
+});
+
+test("QQ bot view separates binding from maintenance", () => {
+  const complete = { appId: "102000001", appSecret: "********", targetOpenid: "OPENID_1" };
+  const empty = { appId: "", appSecret: "", targetOpenid: "" };
+  assert.equal(qqBotConfigured(complete), true);
+  assert.equal(qqBotConfigured({ ...complete, targetOpenid: " " }), false);
+
+  assert.equal(qqBotNextView("bind", complete), "maintain");
+  // 维护面板中编辑单个字段不跳转。
+  assert.equal(qqBotNextView("maintain", { ...complete, targetOpenid: "" }), "maintain");
+  assert.equal(qqBotNextView("maintain", { ...complete, appSecret: "" }), "maintain");
+  // 清空配置回到绑定流程。
+  assert.equal(qqBotNextView("maintain", empty), "bind");
+  // 半完成状态（手动第 1 步、扫码只保存了凭据）留在绑定流程。
+  assert.equal(qqBotNextView("bind", { ...complete, targetOpenid: "" }), "bind");
+  assert.equal(qqBotNextView("bind", empty), "bind");
 });

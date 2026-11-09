@@ -50,6 +50,7 @@ func TestManualNotificationIgnoresDeviceScope(t *testing.T) {
 	config := map[string]any{"device_ids": []string{}, "nickname": "/", "payload_template": "{"}
 	for name, send := range map[string]func() error{
 		"meow":  func() error { return sendMeowNotification(ctx, config, nil, "test", "test") },
+		"qqbot": func() error { return sendQQBotNotification(ctx, config, nil, "test", "test") },
 		"wecom": func() error { return sendWecomNotificationTest(ctx, config) },
 		"lark":  func() error { return sendLarkNotificationTest(ctx, config) },
 	} {

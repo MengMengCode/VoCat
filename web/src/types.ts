@@ -476,6 +476,13 @@ export type NotificationConfig<T = Record<string, unknown>> = T & {
 
 export interface NotificationSettings {
   meow: NotificationConfig<{ enabled: boolean; nickname: string; url: string; imgUrl: string }>;
+  qqbot: NotificationConfig<{
+    enabled: boolean;
+    appId: string;
+    appSecret: string;
+    targetOpenid: string;
+    proxy: string;
+  }>;
   telegram: NotificationConfig;
   webhook: NotificationConfig;
   bark: NotificationConfig;

@@ -158,6 +158,9 @@ func sendCallNotification(ctx context.Context, channel string, config map[string
 	if channel == "meow" {
 		return sendMeowNotification(ctx, config, &message.DeviceID, message.Title(), message.DetailText())
 	}
+	if channel == "qqbot" {
+		return sendQQBotNotification(ctx, config, &message.DeviceID, message.Title(), message.DetailText())
+	}
 	switch channel {
 	case "telegram":
 		return sendTelegramTextNotification(ctx, config, message.DeviceID, message.Text())

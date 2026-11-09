@@ -60,45 +60,48 @@ type Options struct {
 
 // Server is the single HTTP handler for the JSON API and embedded SPA.
 type Server struct {
-	store                     *store.Store
-	auth                      *auth.Service
-	sso                       *sso.Service
-	ssoLimiter                *ssoRateLimiter
-	devices                   DeviceController
-	vowifi                    VoWiFiController
-	ussdSessions              ussdSessionStore
-	logs                      *loghub.Hub
-	assets                    fs.FS
-	indexHTML                 []byte
-	fileServer                http.Handler
-	logger                    *slog.Logger
-	secureCookies             bool
-	maxRequestBodyBytes       int64
-	startedAt                 time.Time
-	handler                   http.Handler
-	e911Sessions              *e911SessionManager
-	accessMu                  sync.RWMutex
-	access                    parsedAccessConfig
-	loginLimiter              *loginRateLimiter
-	extensions                *extensions.Manager
-	exportProxy               *exportproxy.Manager
-	developerEnabled          bool
-	updateRepository          string
-	updateToken               string
-	updateCheck               func(context.Context, string, string, string) (update.CheckResult, error)
-	updateApply               func(context.Context, *slog.Logger, update.Options, bool) (update.CheckResult, error)
-	updateRestart             func(*slog.Logger) error
-	updateMu                  sync.Mutex
-	updateApplying            bool
-	https                     *httpsmode.Manager
-	mcp                       *MCPHandlers
-	netTraffic                *liveNetTracker
-	hostStats                 *hostStatsSampler
-	publicIPMu                sync.RWMutex
-	publicIPs                 map[string]cachedPublicIP
-	lookupPublicIP            func(context.Context, string) (exportproxy.PublicIPInfo, error)
-	automaticTasks            *automaticTaskScheduler
-	smsSyncMu                 sync.Mutex
+	store               *store.Store
+	auth                *auth.Service
+	sso                 *sso.Service
+	ssoLimiter          *ssoRateLimiter
+	devices             DeviceController
+	vowifi              VoWiFiController
+	ussdSessions        ussdSessionStore
+	logs                *loghub.Hub
+	assets              fs.FS
+	indexHTML           []byte
+	fileServer          http.Handler
+	logger              *slog.Logger
+	secureCookies       bool
+	maxRequestBodyBytes int64
+	startedAt           time.Time
+	handler             http.Handler
+	e911Sessions        *e911SessionManager
+	accessMu            sync.RWMutex
+	access              parsedAccessConfig
+	loginLimiter        *loginRateLimiter
+	extensions          *extensions.Manager
+	exportProxy         *exportproxy.Manager
+	developerEnabled    bool
+	updateRepository    string
+	updateToken         string
+	updateCheck         func(context.Context, string, string, string) (update.CheckResult, error)
+	updateApply         func(context.Context, *slog.Logger, update.Options, bool) (update.CheckResult, error)
+	updateRestart       func(*slog.Logger) error
+	updateMu            sync.Mutex
+	updateApplying      bool
+	https               *httpsmode.Manager
+	mcp                 *MCPHandlers
+	netTraffic          *liveNetTracker
+	hostStats           *hostStatsSampler
+	publicIPMu          sync.RWMutex
+	publicIPs           map[string]cachedPublicIP
+	lookupPublicIP      func(context.Context, string) (exportproxy.PublicIPInfo, error)
+	automaticTasks      *automaticTaskScheduler
+	smsSyncMu           sync.Mutex
+	// qqBotBindMu 保护 qqBotBind：当前或最近一次 QQ 机器人接收方绑定。
+	qqBotBindMu               sync.Mutex
+	qqBotBind                 *qqBotBindSession
 	esimSIMResetAttempted     map[string]bool // 由 smsSyncMu 保护；读取成功后允许下一次故障恢复。
 	smsStorageMu              sync.Mutex
 	smsStorage                map[string]device.SMSStorageUsage

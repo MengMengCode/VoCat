@@ -88,8 +88,11 @@ export const DEFAULT_LARK_PAYLOAD_TEMPLATE = `{
   }
 }`;
 
+export type QQBotForm = Omit<NotificationSettings["qqbot"], "deviceIds">;
+
 interface ChannelForms {
   meow: NotificationSettings["meow"];
+  qqbot: QQBotForm;
   telegram: TelegramForm;
   webhook: WebhookForm;
   bark: BarkForm;
@@ -171,6 +174,7 @@ export function defaultNotifyForms(): NotifyForms {
 
 export function formsFromNotifications(data: Partial<NotificationSettings>): NotifyForms {
   const meow = asRecord(data.meow);
+  const qqbot = asRecord(data.qqbot);
   const telegram = asRecord(data.telegram);
   const webhook = asRecord(data.webhook);
   const bark = asRecord(data.bark);
@@ -180,6 +184,13 @@ export function formsFromNotifications(data: Partial<NotificationSettings>): Not
 	const lark = asRecord(data.lark);
   const forms = {
     meow: { enabled: !!meow.enabled, nickname: str(meow.nickname), url: str(meow.url), imgUrl: str(meow.imgUrl) },
+    qqbot: {
+      enabled: !!qqbot.enabled,
+      appId: str(qqbot.appId),
+      appSecret: str(qqbot.appSecret),
+      targetOpenid: str(qqbot.targetOpenid),
+      proxy: str(qqbot.proxy),
+    },
     telegram: {
       enabled: !!telegram.enabled,
       botToken: str(telegram.botToken),
@@ -336,11 +347,85 @@ export function buildMeowPayload(form: NotifyForms["meow"]) {
   };
 }
 
-export type ClearableNotificationChannel = "telegram" | "email";
+export function buildQQBotPayload(form: QQBotForm) {
+  return {
+    enabled: form.enabled,
+    appId: form.appId.trim(),
+    appSecret: form.appSecret || "",
+    targetOpenid: form.targetOpenid.trim(),
+    proxy: form.proxy.trim(),
+  };
+}
+
+export type ClearableNotificationChannel = "telegram" | "email" | "qqbot";
+
+export type QQBotBindStatus = "connecting" | "waiting" | "bound" | "expired" | "failed" | "canceled";
+
+/** 绑定方式：qr 为手机 QQ 扫码，code 为向已配置的机器人私聊发送绑定码。 */
+export type QQBotBindMode = "qr" | "code";
+
+export interface QQBotBindState {
+  mode: QQBotBindMode;
+  code?: string;
+  qrUrl?: string;
+  expiresAt: string;
+  status: QQBotBindStatus;
+  error?: string;
+}
+
+/** 绑定仍在进行中（需要继续轮询）。 */
+export function qqBotBindActive(state: QQBotBindState | null | undefined): boolean {
+  return !!state && (state.status === "connecting" || state.status === "waiting");
+}
+
+/** 设置页的两种绑定方式：扫码，或手动填写凭据后用绑定码绑定。 */
+export type QQBotBindMethod = "qr" | "manual";
+
+/** 默认方式：已保存凭据但还没有接收方时继续手动绑定，否则推荐扫码。 */
+export function qqBotDefaultMethod(form: Pick<QQBotForm, "appId" | "appSecret" | "targetOpenid">): QQBotBindMethod {
+  const hasCredentials = !!form.appId.trim() && !!form.appSecret;
+  return hasCredentials && !form.targetOpenid.trim() ? "manual" : "qr";
+}
+
+/** 绑定进行中时固定显示该绑定所用的方式（扫码失败回退到绑定码时切到手动），否则显示用户的选择。 */
+export function qqBotVisibleMethod(selected: QQBotBindMethod, bind: QQBotBindState | null | undefined): QQBotBindMethod {
+  if (!qqBotBindActive(bind)) return selected;
+  return bind!.mode === "qr" ? "qr" : "manual";
+}
+
+/** QQ 机器人页的视图：未绑定时显示绑定流程，绑定后显示维护面板。 */
+export type QQBotView = "bind" | "maintain";
+
+type QQBotBindingFields = Pick<QQBotForm, "appId" | "appSecret" | "targetOpenid">;
+
+/** 凭据和接收方都已填写。 */
+export function qqBotConfigured(form: QQBotBindingFields): boolean {
+  return !!form.appId.trim() && !!form.appSecret && !!form.targetOpenid.trim();
+}
+
+/**
+ * 维护面板可编辑，视图不能直接跟随表单：完整时进入维护面板，三项全部清空（清空配置）时回到绑定流程，
+ * 其余情况保持原视图，编辑单个字段不会跳转。
+ */
+export function qqBotNextView(previous: QQBotView, form: QQBotBindingFields): QQBotView {
+  if (qqBotConfigured(form)) return "maintain";
+  if (!form.appId.trim() && !form.appSecret && !form.targetOpenid.trim()) return "bind";
+  return previous;
+}
+
+/** 剩余有效期，格式 m:ss；已过期返回 0:00。 */
+export function qqBotBindRemaining(expiresAt: string, now: number = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((Date.parse(expiresAt) - now) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
 
 export function buildNotificationsPayload(forms: NotifyForms, clearedChannels: readonly ClearableNotificationChannel[] = []) {
   const payload: NotificationSettings = {
     meow: buildMeowPayload(forms.meow),
+    qqbot: {
+      ...buildQQBotPayload(forms.qqbot),
+      ...(clearedChannels.includes("qqbot") ? { clearSecrets: true } : {}),
+    },
     telegram: {
       enabled: !!forms.telegram.enabled,
       ...(clearedChannels.includes("telegram") ? { clearSecrets: true } : {}),
