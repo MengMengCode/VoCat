@@ -652,28 +652,33 @@ export function QQBotTab({
             </div>
           ) : (
             <div className={`-mt-2 ${panel}`}>
-              <div className={step}>
-                <span className={stepNumber}>1</span>
-                {t("填写机器人凭据")}
-              </div>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <Field label={t("机器人 AppID")}>
-                  <Input aria-label={t("机器人 AppID")} value={value.appId} onChange={(e) => onChange({ appId: e.target.value })} disabled={active} inputMode="numeric" />
-                </Field>
-                <Field label={t("机器人 AppSecret")}>
-                  <Input aria-label={t("机器人 AppSecret")} value={value.appSecret} onChange={(e) => onChange({ appSecret: e.target.value })} disabled={active} type="password" />
-                </Field>
-              </div>
+              {/* 扫码回退时凭据来自扫码结果，只保存在本次绑定中，不显示手动填写的步骤。 */}
+              {fellBack && active ? null : (
+                <>
+                  <div className={step}>
+                    <span className={stepNumber}>1</span>
+                    {t("填写机器人凭据")}
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <Field label={t("机器人 AppID")}>
+                      <Input aria-label={t("机器人 AppID")} value={value.appId} onChange={(e) => onChange({ appId: e.target.value })} disabled={active} inputMode="numeric" />
+                    </Field>
+                    <Field label={t("机器人 AppSecret")}>
+                      <Input aria-label={t("机器人 AppSecret")} value={value.appSecret} onChange={(e) => onChange({ appSecret: e.target.value })} disabled={active} type="password" />
+                    </Field>
+                  </div>
 
-              <div className={`${step} pt-2`}>
-                <span className={stepNumber}>2</span>
-                {t("绑定接收方")}
-              </div>
+                  <div className={`${step} pt-2`}>
+                    <span className={stepNumber}>2</span>
+                    {t("绑定接收方")}
+                  </div>
+                </>
+              )}
               {active && bind?.mode === "code" ? (
                 <div className="rounded-lg bg-gray-50 px-3 py-3 text-xs leading-5 text-gray-600 dark:bg-gray-800/60 dark:text-gray-300">
                   {fellBack ? (
                     <div className="mb-2 text-amber-700 dark:text-amber-300">
-                      {t("扫码未返回接收方，机器人凭据已保存，请私聊机器人发送下方绑定码。")}
+                      {t("扫码未返回接收方，请在 QQ 中私聊刚才选择的机器人，发送下方绑定码。完成后会一起保存机器人凭据。")}
                     </div>
                   ) : null}
                   <div className="mb-2 font-mono text-lg font-semibold tracking-wider text-gray-900 dark:text-gray-100">{bind.code}</div>

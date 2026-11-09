@@ -100,8 +100,13 @@ type Server struct {
 	automaticTasks      *automaticTaskScheduler
 	smsSyncMu           sync.Mutex
 	// qqBotBindMu 保护 qqBotBind：当前或最近一次 QQ 机器人接收方绑定。
-	qqBotBindMu               sync.Mutex
-	qqBotBind                 *qqBotBindSession
+	qqBotBindMu sync.Mutex
+	qqBotBind   *qqBotBindSession
+	// qqBotBindWork 跟踪绑定期间启动的后台协程；StopQQBotBinding 据此等待其退出。
+	qqBotBindWork sync.WaitGroup
+	// qqBotWorkCtx 是这些协程的父 context，由 qqBotBindMu 保护，StopQQBotBinding 取消它。
+	qqBotWorkCtx              context.Context
+	qqBotWorkCancel           context.CancelFunc
 	esimSIMResetAttempted     map[string]bool // 由 smsSyncMu 保护；读取成功后允许下一次故障恢复。
 	smsStorageMu              sync.Mutex
 	smsStorage                map[string]device.SMSStorageUsage

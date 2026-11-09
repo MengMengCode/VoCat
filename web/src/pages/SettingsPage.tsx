@@ -83,11 +83,15 @@ export default function SettingsPage() {
     if (!confirmed) return;
     setForms(prev => ({ ...prev, [channel]: { ...defaultNotifyForms()[channel], enabled: prev[channel].enabled, deviceIds: prev[channel].deviceIds } }));
     setClearedChannels(prev => prev.includes(channel) ? prev : [...prev, channel]);
+    // 清空表示用户不再要刚才的绑定结果：停止同步，避免稍后到达的响应恢复被清空的字段。
+    if (channel === "qqbot") setQQSyncPending(false);
   };
   const [testingMeow, setTestingMeow] = useState(false);
   const [testingQQBot, setTestingQQBot] = useState(false);
   const [qqBind, setQQBind] = useState<QQBotBindState | null>(null);
   const [startingQQBind, setStartingQQBind] = useState(false);
+  // 绑定完成后要从服务器取回新的凭据和接收方；取回之前不允许保存，避免旧表单覆盖新绑定。
+  const [qqSyncPending, setQQSyncPending] = useState(false);
   const [activeTab, setActiveTab] = useState("telegram");
   const [loadingNotif, setLoadingNotif] = useState(false);
   const [savingNotif, setSavingNotif] = useState(false);
@@ -374,6 +378,10 @@ export default function SettingsPage() {
 
   const onSaveNotifications = useCallback(async () => {
     if (savingNotif) return;
+    if (qqSyncPending) {
+      message.warning(t("正在同步 QQ 机器人的绑定结果，请稍后再保存"));
+      return;
+    }
     setSavingNotif(true);
     try {
       // vocat 后端 PUT 成功即返回完整配置文档（参考实现返回 {applied, warning}）
@@ -389,7 +397,7 @@ export default function SettingsPage() {
     } finally {
       setSavingNotif(false);
     }
-  }, [forms, clearedChannels, savingNotif]);
+  }, [forms, clearedChannels, savingNotif, qqSyncPending]);
 
   const onTestMeow = async () => {
     setTestingMeow(true);
@@ -436,48 +444,83 @@ export default function SettingsPage() {
     setQQBind(null);
     try {
       await api("/settings/notifications/qqbot/bind", { method: "DELETE" });
-    } catch {
-      // 绑定会在有效期结束后自动停止。
+    } catch (error) {
+      // 服务器可能仍在绑定：恢复它的真实状态，继续轮询或同步结果。
+      message.error(apiMessage(error) || t("取消绑定失败"));
+      try {
+        const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
+        setQQBind(state ?? null);
+        if (state?.status === "bound") setQQSyncPending(true);
+      } catch {
+        // 绑定会在有效期结束后自动停止。
+      }
     }
   };
 
-  // 绑定进行中时轮询状态；绑定成功后只刷新 QQ 机器人的凭据和接收方，不覆盖其他未保存的修改。
+  // 绑定进行中时轮询状态。上一次请求结束后才发下一次，避免过期的响应覆盖新状态。
   const qqBindPolling = qqBotBindActive(qqBind);
   useEffect(() => {
     if (!qqBindPolling) return;
     let stopped = false;
-    const timer = window.setInterval(async () => {
+    let timer: number | undefined;
+    const poll = async () => {
       try {
         const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
-        if (stopped || !state) return;
-        setQQBind(state);
-        if (state.status === "bound") {
-          const data = await api<NotificationSettings>("/settings/notifications");
-          const saved = formsFromNotifications(data || {}).qqbot;
-          setForms(prev => ({
-            ...prev,
-            qqbot: {
-              ...prev.qqbot,
-              // 完成绑定后服务器已启用该通道。
-              enabled: saved.enabled,
-              appId: saved.appId,
-              appSecret: saved.appSecret,
-              targetOpenid: saved.targetOpenid,
-            },
-          }));
-          // 绑定已写入新凭据：撤销尚未保存的“清空配置”，否则保存时会清掉刚绑定的 AppSecret。
-          setClearedChannels(prev => prev.filter(channel => channel !== "qqbot"));
-          message.success(t("已绑定 QQ 机器人"));
+        if (stopped) return;
+        if (state) {
+          setQQBind(state);
+          if (state.status === "bound") {
+            setQQSyncPending(true);
+            message.success(t("已绑定 QQ 机器人"));
+            return;
+          }
         }
       } catch {
         // 下一次轮询重试。
       }
-    }, 2000);
+      if (!stopped) timer = window.setTimeout(poll, 2000);
+    };
+    timer = window.setTimeout(poll, 2000);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [qqBindPolling]);
+
+  // 绑定成功后只刷新 QQ 机器人的凭据和接收方，不覆盖其他未保存的修改；失败时持续重试。
+  useEffect(() => {
+    if (!qqSyncPending) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const sync = async () => {
+      try {
+        const data = await api<NotificationSettings>("/settings/notifications");
+        if (stopped) return;
+        const saved = formsFromNotifications(data || {}).qqbot;
+        setForms(prev => ({
+          ...prev,
+          qqbot: {
+            ...prev.qqbot,
+            // 完成绑定后服务器已启用该通道。
+            enabled: saved.enabled,
+            appId: saved.appId,
+            appSecret: saved.appSecret,
+            targetOpenid: saved.targetOpenid,
+          },
+        }));
+        // 绑定已写入新凭据：撤销尚未保存的“清空配置”，否则保存时会清掉刚绑定的 AppSecret。
+        setClearedChannels(prev => prev.filter(channel => channel !== "qqbot"));
+        setQQSyncPending(false);
+      } catch {
+        if (!stopped) timer = window.setTimeout(sync, 2000);
+      }
+    };
+    void sync();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [qqSyncPending]);
 
   const onTestWebhook = useCallback(async () => {
     setTestingWebhook(true);

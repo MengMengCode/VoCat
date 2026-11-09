@@ -120,12 +120,26 @@ func checkQQBotGatewayURL(ctx context.Context, raw string) (string, error) {
 	return parsed.String(), nil
 }
 
+// qqBotBindCodeAlphabet 去掉了容易混淆的 0/O、1/I/L。
+const qqBotBindCodeAlphabet = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+
+// newQQBotBindCode 生成 VOCAT-XXXXX-XXXXX：31^10 ≈ 8×10^14 种组合，
+// 有效期内无法靠给机器人发消息猜中，把自己绑定成接收方。
 func newQQBotBindCode() (string, error) {
-	number, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
-	if err != nil {
-		return "", err
+	var code strings.Builder
+	code.WriteString("VOCAT-")
+	limit := big.NewInt(int64(len(qqBotBindCodeAlphabet)))
+	for index := range 10 {
+		if index == 5 {
+			code.WriteByte('-')
+		}
+		number, err := rand.Int(rand.Reader, limit)
+		if err != nil {
+			return "", err
+		}
+		code.WriteByte(qqBotBindCodeAlphabet[number.Int64()])
 	}
-	return fmt.Sprintf("VOCAT-%06d", number.Int64()), nil
+	return code.String(), nil
 }
 
 func (s *Server) handleQQBotBind(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +195,9 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
 		return
 	}
+	if !s.qqBotSecretReentered(w, r, incoming) {
+		return
+	}
 	// 与测试通知相同：表单回传的掩码从已保存配置中恢复。
 	resolved, _, err := s.resolveNotificationTestConfig(r.Context(), "qqbot", incoming)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -212,7 +229,7 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), qqBotBindTTL)
+	ctx, cancel := context.WithTimeout(s.qqBotWorkContext(), qqBotBindTTL)
 	session := &qqBotBindSession{
 		Mode: mode, ExpiresAt: time.Now().Add(qqBotBindTTL).UTC(),
 		Status: qqBotBindConnecting, cancel: cancel,
@@ -227,7 +244,7 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 		}
 		session.QRURL = task.URL
 		session.Status = qqBotBindWaiting
-		go s.runQQBotQRBind(ctx, session, resolved, env, task)
+		s.qqBotBindWork.Go(func() { s.runQQBotQRBind(ctx, session, resolved, env, task) })
 	} else {
 		code, err := newQQBotBindCode()
 		if err != nil {
@@ -236,7 +253,7 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session.Code = code
-		go s.runQQBotCodeBind(ctx, session, resolved, env)
+		s.qqBotBindWork.Go(func() { s.runQQBotCodeBind(ctx, session, resolved, env) })
 	}
 
 	s.qqBotBindMu.Lock()
@@ -249,6 +266,30 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 	view.cancel = nil
 	s.qqBotBindMu.Unlock()
 	writeJSON(w, http.StatusAccepted, map[string]any{"data": view})
+}
+
+// qqBotWorkContext 返回绑定协程的父 context；StopQQBotBinding 之后返回已取消的 context。
+func (s *Server) qqBotWorkContext() context.Context {
+	s.qqBotBindMu.Lock()
+	defer s.qqBotBindMu.Unlock()
+	if s.qqBotWorkCtx == nil {
+		s.qqBotWorkCtx, s.qqBotWorkCancel = context.WithCancel(context.Background())
+	}
+	return s.qqBotWorkCtx
+}
+
+// StopQQBotBinding 取消进行中的绑定和扫码后的上线登录，并等待它们退出。
+// 在关闭 HTTP 服务之后、关闭数据库之前调用，避免后台协程在关闭后访问存储。
+func (s *Server) StopQQBotBinding() {
+	s.qqBotWorkContext()
+	s.qqBotBindMu.Lock()
+	s.qqBotWorkCancel()
+	if session := s.qqBotBind; session != nil && !session.finished() {
+		session.cancel()
+		session.Status = qqBotBindCanceled
+	}
+	s.qqBotBindMu.Unlock()
+	s.qqBotBindWork.Wait()
 }
 
 func (s *Server) updateQQBotBind(session *qqBotBindSession, update func(*qqBotBindSession)) {
@@ -266,6 +307,26 @@ func (s *Server) failQQBotBind(session *qqBotBindSession, message string) {
 		session.Status = qqBotBindFailed
 		session.Error = message
 	})
+}
+
+// commitQQBotBind 在绑定锁内保存接收方并把会话标记为已绑定，与取消（DELETE 或新的绑定）串行：
+// 已取消的会话不会再写入，已写入的绑定也不会被报告为已取消。返回是否已写入。
+func (s *Server) commitQQBotBind(
+	ctx context.Context,
+	session *qqBotBindSession,
+	config map[string]any,
+	openID string,
+) (bool, error) {
+	s.qqBotBindMu.Lock()
+	defer s.qqBotBindMu.Unlock()
+	if session.Status == qqBotBindCanceled {
+		return false, nil
+	}
+	if err := s.saveQQBotBinding(ctx, config, openID); err != nil {
+		return false, err
+	}
+	session.Status, session.Error, session.QRURL = qqBotBindBound, "", ""
+	return true, nil
 }
 
 // finishQQBotBindOnTimeout 在 ctx 结束时把未完成的绑定标记为过期。
@@ -458,12 +519,8 @@ func (s *Server) completeQQBotQRBind(
 
 	openID := strings.TrimSpace(result.UserOpenID)
 	if !qqBotOpenIDPattern.MatchString(openID) {
-		// 平台未返回扫码用户：先保存凭据，再改用绑定码获取接收方。
-		if err := s.saveQQBotBinding(ctx, scanned, ""); err != nil {
-			s.logger.Error("save QQ bot credentials", "error", err)
-			s.failQQBotBind(session, "the binding could not be saved")
-			return
-		}
+		// 平台未返回扫码用户：改用绑定码获取接收方。新凭据只保存在本次会话中，
+		// 拿到接收方后与之一起写入，避免中途出现“新机器人 + 旧接收方”的配置。
 		code, err := newQQBotBindCode()
 		if err != nil {
 			s.failQQBotBind(session, "the binding could not be saved")
@@ -476,35 +533,32 @@ func (s *Server) completeQQBotQRBind(
 		s.runQQBotCodeBind(ctx, session, scanned, env)
 		return
 	}
-	if err := s.saveQQBotBinding(ctx, scanned, openID); err != nil {
+	committed, err := s.commitQQBotBind(ctx, session, scanned, openID)
+	if err != nil {
 		s.logger.Error("save QQ bot binding", "error", err)
 		s.failQQBotBind(session, "the binding could not be saved")
 		return
 	}
-	s.updateQQBotBind(session, func(session *qqBotBindSession) {
-		session.Status, session.Error, session.QRURL = qqBotBindBound, "", ""
-	})
+	if !committed {
+		return
+	}
 	s.logger.Info("QQ bot notification recipient bound", "method", "qr")
 	// 绑定会话随即结束，上线使用独立的超时。
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), qqBotOnlineTimeout+env.onlineHold)
+	s.qqBotBindWork.Go(func() {
+		ctx, cancel := context.WithTimeout(s.qqBotWorkContext(), qqBotOnlineTimeout+env.onlineHold)
 		defer cancel()
 		if err := bringQQBotOnline(ctx, env, appID, secret); err != nil {
 			s.logger.Warn("QQ bot could not come online after QR binding", "error", redactQQBotError(err, scanned))
 			return
 		}
 		s.logger.Info("QQ bot came online after QR binding")
-	}()
+	})
 }
 
 // bringQQBotOnline 登录一次网关：收到 READY 后保持 env.onlineHold 再断开。
 // 只用于让扫码页确认连接完成，不接收或处理任何消息。
 func bringQQBotOnline(ctx context.Context, env qqBotBindEnv, appID, secret string) error {
-	token, err := qqBotTokens.get(ctx, env.client, env.endpoints.TokenURL, appID, secret)
-	if err != nil {
-		return err
-	}
-	gateway, err := fetchQQBotGateway(ctx, env, token)
+	token, gateway, err := connectQQBotGateway(ctx, env, appID, secret)
 	if err != nil {
 		return err
 	}
@@ -607,11 +661,7 @@ func (s *Server) waitQQBotBindEvent(
 	env qqBotBindEnv,
 	appID, secret string,
 ) (qqBotBindEvent, error) {
-	token, err := qqBotTokens.get(ctx, env.client, env.endpoints.TokenURL, appID, secret)
-	if err != nil {
-		return qqBotBindEvent{}, err
-	}
-	gateway, err := fetchQQBotGateway(ctx, env, token)
+	token, gateway, err := connectQQBotGateway(ctx, env, appID, secret)
 	if err != nil {
 		return qqBotBindEvent{}, err
 	}
@@ -703,6 +753,26 @@ func (s *Server) waitQQBotBindEvent(
 	}
 }
 
+// errQQBotTokenRejected 表示令牌在缓存期内被平台提前作废。
+var errQQBotTokenRejected = errors.New("QQ bot access token was rejected")
+
+// connectQQBotGateway 取得令牌和网关地址；网关拒绝令牌时丢弃缓存并用新令牌重试一次，
+// 与发送消息时的处理一致。
+func connectQQBotGateway(ctx context.Context, env qqBotBindEnv, appID, secret string) (string, string, error) {
+	for attempt := 0; ; attempt++ {
+		token, err := qqBotTokens.get(ctx, env.client, env.endpoints.TokenURL, appID, secret)
+		if err != nil {
+			return "", "", err
+		}
+		gateway, err := fetchQQBotGateway(ctx, env, token)
+		if errors.Is(err, errQQBotTokenRejected) && attempt == 0 {
+			qqBotTokens.invalidate(env.endpoints.TokenURL, appID, token)
+			continue
+		}
+		return token, gateway, err
+	}
+}
+
 func fetchQQBotGateway(ctx context.Context, env qqBotBindEnv, token string) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(env.endpoints.APIBase, "/")+"/gateway", nil)
 	if err != nil {
@@ -720,7 +790,12 @@ func fetchQQBotGateway(ctx context.Context, env qqBotBindEnv, token string) (str
 		URL string `json:"url"`
 	}
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if json.Unmarshal(body, &reply) != nil || response.StatusCode != http.StatusOK || reply.URL == "" {
+	decodeErr := json.Unmarshal(body, &reply)
+	if response.StatusCode == http.StatusUnauthorized {
+		return "", fmt.Errorf("%w: %w: QQ bot gateway lookup HTTP 401%s",
+			errProviderRejected, errQQBotTokenRejected, reply.describe())
+	}
+	if decodeErr != nil || response.StatusCode != http.StatusOK || reply.URL == "" {
 		return "", fmt.Errorf("%w: QQ bot gateway lookup HTTP %d%s", errProviderRejected, response.StatusCode, reply.describe())
 	}
 	return env.checkGateway(ctx, reply.URL)
@@ -753,14 +828,15 @@ func (s *Server) completeQQBotCodeBind(
 	appID, secret string,
 	event qqBotBindEvent,
 ) {
-	if err := s.saveQQBotBinding(ctx, config, event.OpenID); err != nil {
+	committed, err := s.commitQQBotBind(ctx, session, config, event.OpenID)
+	if err != nil {
 		s.logger.Error("save QQ bot binding", "error", err)
 		s.failQQBotBind(session, "the binding could not be saved")
 		return
 	}
-	s.updateQQBotBind(session, func(session *qqBotBindSession) {
-		session.Status, session.Error = qqBotBindBound, ""
-	})
+	if !committed {
+		return
+	}
 	s.logger.Info("QQ bot notification recipient bound", "method", "code")
 	// 被动回复带 msg_id，不占用主动消息额度；失败不影响绑定结果。
 	if err := replyQQBotBind(ctx, env, appID, secret, event); err != nil {
@@ -768,15 +844,12 @@ func (s *Server) completeQQBotCodeBind(
 	}
 }
 
-// saveQQBotBinding 把凭据和接收方写入已保存的配置，保留其他字段。
-// 写入接收方时启用通道；openID 为空时只保存凭据，保留原有接收方和启用状态。
+// saveQQBotBinding 把凭据和接收方一起写入已保存的配置并启用通道，保留其他字段（如设备范围）。
 func (s *Server) saveQQBotBinding(ctx context.Context, config map[string]any, openID string) error {
-	enabled := false
 	stored := map[string]any{}
 	current, err := s.store.NotificationSetting(ctx, "qqbot")
 	switch {
 	case err == nil:
-		enabled = current.Enabled
 		if err := json.Unmarshal(current.Config, &stored); err != nil {
 			return fmt.Errorf("decode stored QQ bot config: %w", err)
 		}
@@ -788,18 +861,14 @@ func (s *Server) saveQQBotBinding(ctx context.Context, config map[string]any, op
 			stored[key] = value
 		}
 	}
-	if openID != "" {
-		stored["target_openid"] = openID
-		// 完成绑定即表示要使用该通道；只保存凭据时保留原有启用状态。
-		enabled = true
-	}
+	stored["target_openid"] = openID
 	encoded, err := json.Marshal(stored)
 	if err != nil {
 		return err
 	}
 	return s.store.UpsertNotificationSetting(ctx, store.NotificationSetting{
 		Channel:         "qqbot",
-		Enabled:         enabled,
+		Enabled:         true,
 		Config:          encoded,
 		SensitiveFields: store.DefaultNotificationSensitiveFields("qqbot"),
 	})

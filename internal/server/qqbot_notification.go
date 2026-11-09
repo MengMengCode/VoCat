@@ -57,6 +57,54 @@ type qqBotEndpoints struct {
 
 var defaultQQBotEndpoints = qqBotEndpoints{TokenURL: qqBotTokenURL, APIBase: qqBotAPIBase, ConnectBase: qqBotConnectBase}
 
+// errQQBotSecretRequired：AppSecret 回传掩码会沿用已保存的值，它属于原来的 AppID。
+var errQQBotSecretRequired = errors.New("qqbot.app_secret must be re-entered when qqbot.app_id changes")
+
+// checkQQBotSecretReentry 在草稿修改了 AppID 却没有填写新 AppSecret 时返回 errQQBotSecretRequired，
+// 避免把新 AppID 与旧机器人的 AppSecret 组合在一起。
+func (s *Server) checkQQBotSecretReentry(ctx context.Context, draft json.RawMessage) error {
+	var config map[string]any
+	if err := json.Unmarshal(draft, &config); err != nil {
+		return err
+	}
+	if secret := strings.TrimSpace(configString(config, "app_secret")); secret != "" && secret != store.SecretMask {
+		return nil
+	}
+	appID := strings.TrimSpace(configString(config, "app_id"))
+	if appID == "" {
+		return nil
+	}
+	current, err := s.store.NotificationSetting(ctx, "qqbot")
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(current.Config, &stored); err != nil {
+		return fmt.Errorf("decode stored QQ bot config: %w", err)
+	}
+	if storedID := strings.TrimSpace(configString(stored, "app_id")); storedID != "" && storedID != appID {
+		return errQQBotSecretRequired
+	}
+	return nil
+}
+
+// qqBotSecretReentered 执行 checkQQBotSecretReentry 并写出错误响应；返回是否可以继续。
+func (s *Server) qqBotSecretReentered(w http.ResponseWriter, r *http.Request, draft json.RawMessage) bool {
+	err := s.checkQQBotSecretReentry(r.Context(), draft)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, errQQBotSecretRequired):
+		writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
+	default:
+		s.writeStoreError(w, err)
+	}
+	return false
+}
+
 // 默认调用真实开放平台；测试中可替换为本地接收端，不访问真实收件人。
 var qqBotNotificationSender = deliverQQBotNotification
 
@@ -144,12 +192,16 @@ type qqBotReply struct {
 	Message string `json:"message"`
 }
 
-// describe 只返回平台的错误码和说明，不包含收件 openid 或令牌。
+// qqBotOpaqueValue 匹配平台说明中可能出现的 openid、令牌等长标识。
+var qqBotOpaqueValue = regexp.MustCompile(`[A-Za-z0-9_-]{20,}`)
+
+// describe 只返回平台的错误码和说明；说明中的长标识（openid、令牌等）会被隐去。
 func (reply qqBotReply) describe() string {
 	if reply.Code == 0 && reply.Message == "" {
 		return ""
 	}
-	message := []rune(strings.TrimSpace(reply.Message))
+	redacted := qqBotOpaqueValue.ReplaceAllString(strings.TrimSpace(reply.Message), "[redacted]")
+	message := []rune(redacted)
 	if len(message) > 200 {
 		message = message[:200]
 	}
@@ -175,8 +227,14 @@ func postQQBotMessage(
 	}
 	defer response.Body.Close()
 	var reply qqBotReply
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	_ = json.Unmarshal(body, &reply)
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return 0, qqBotReply{}, fmt.Errorf("QQ bot response could not be read: %w", err)
+	}
+	// 错误响应不一定是 JSON，只在成功状态下要求响应可解析，避免把异常响应当作已送达。
+	if err := json.Unmarshal(body, &reply); err != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
+		return 0, qqBotReply{}, fmt.Errorf("%w: QQ bot HTTP %d returned an unreadable response", errProviderRejected, response.StatusCode)
+	}
 	return response.StatusCode, reply, nil
 }
 

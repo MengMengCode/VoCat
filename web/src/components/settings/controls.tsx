@@ -163,11 +163,12 @@ export function ChannelHeader({
   clearLabel?: ReactNode;
 }) {
   return (
-    <div className="mb-4 flex items-center justify-between">
-      <div className="flex items-center gap-2">
+    // 窄屏下标题和操作按钮可以换行，避免按钮被挤出卡片。
+    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-2">
         <div className="font-bold text-gray-800 dark:text-gray-100">{title}</div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
         {onClear ? <Button size="small" variant="danger" plain onClick={onClear}>{clearLabel ?? tl("清空配置")}</Button> : null}
         {actions}
         <Switch checked={enabled} onChange={onToggle} />

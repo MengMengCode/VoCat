@@ -183,6 +183,9 @@ func (s *Server) handleNotificationSettings(w http.ResponseWriter, r *http.Reque
 				writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
 				return
 			}
+			if channel == "qqbot" && !clearSecrets && !s.qqBotSecretReentered(w, r, config) {
+				return
+			}
 			clearFields := []string(nil)
 			if clearSecrets {
 				clearFields = store.DefaultNotificationSensitiveFields(channel)
@@ -499,6 +502,9 @@ func (s *Server) handleNotificationTest(
 	_, incoming, err := decodeNotificationConfig(channel, raw, false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
+		return
+	}
+	if channel == "qqbot" && !s.qqBotSecretReentered(w, r, incoming) {
 		return
 	}
 	resolved, provider, err := s.resolveNotificationTestConfig(

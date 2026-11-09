@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -206,15 +207,18 @@ func beginQQBotBind(t *testing.T, api settingsAPITest, body string) map[string]a
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("start bind: %d %s", response.Code, response.Body)
 	}
-	t.Cleanup(func() { api.request(t, http.MethodDelete, "/api/settings/notifications/qqbot/bind", "") })
+	// 先停止并等待后台协程退出，再由 newQQBotFakeGateway 的 cleanup 恢复全局变量。
+	t.Cleanup(api.server.StopQQBotBinding)
 	data, _ := decodeSettingsResponse(t, response)["data"].(map[string]any)
 	return data
 }
 
+var qqBotBindCodePattern = regexp.MustCompile(`^VOCAT-[2-9A-HJKMNP-Z]{5}-[2-9A-HJKMNP-Z]{5}$`)
+
 func checkQQBotBindCode(t *testing.T, data map[string]any) string {
 	t.Helper()
 	code, _ := data["code"].(string)
-	if data["mode"] != "code" || !strings.HasPrefix(code, "VOCAT-") || len(code) != len("VOCAT-000000") {
+	if data["mode"] != "code" || !qqBotBindCodePattern.MatchString(code) {
 		t.Fatalf("bind = %#v", data)
 	}
 	return code
@@ -475,6 +479,14 @@ func TestQQBotQRBindFallsBackToCodeWithoutOpenID(t *testing.T) {
 		}
 	}
 	api := newSettingsAPITest(t)
+	// 已有另一个机器人的绑定：拿到新接收方之前必须原样保留。
+	if err := api.database.UpsertNotificationSetting(context.Background(), store.NotificationSetting{
+		Channel: "qqbot", Enabled: true,
+		Config:          json.RawMessage(`{"app_id":"999","app_secret":"old-secret","target_openid":"OLD_OPENID"}`),
+		SensitiveFields: store.DefaultNotificationSensitiveFields("qqbot"),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	beginQQBotBind(t, api, `{"mode":"qr"}`)
 	data := waitQQBotBind(t, api, qqBotBindWaiting)
 	if data["mode"] != "code" {
@@ -489,13 +501,16 @@ func TestQQBotQRBindFallsBackToCodeWithoutOpenID(t *testing.T) {
 		}
 	}
 	code := checkQQBotBindCode(t, data)
-	// 凭据已先行保存。
-	if setting, config := storedQQBotConfig(t, api); setting.Enabled || config["app_secret"] != qqBotTestSecret || config["target_openid"] != nil {
+	// 扫码得到的新凭据只留在会话中，原有绑定不变。
+	if setting, config := storedQQBotConfig(t, api); !setting.Enabled || config["app_id"] != "999" ||
+		config["app_secret"] != "old-secret" || config["target_openid"] != "OLD_OPENID" {
 		t.Fatalf("enabled=%v config=%#v", setting.Enabled, config)
 	}
 	gateway.push("C2C_MESSAGE_CREATE", `{"id":"m3","content":"`+code+`","author":{"user_openid":"USER_OPENID_3"}}`)
 	waitQQBotBind(t, api, qqBotBindBound)
-	if setting, config := storedQQBotConfig(t, api); !setting.Enabled || config["target_openid"] != "USER_OPENID_3" {
+	// 新凭据与新接收方一起写入。
+	if setting, config := storedQQBotConfig(t, api); !setting.Enabled || config["app_id"] != qqBotTestAppID ||
+		config["app_secret"] != qqBotTestSecret || config["target_openid"] != "USER_OPENID_3" {
 		t.Fatalf("config = %#v", config)
 	}
 }
@@ -573,4 +588,51 @@ func TestQQBotBindHidesCodeAndQRFromReadOnlyTokens(t *testing.T) {
 	if data["status"] != string(qqBotBindWaiting) || data["qr_url"] != nil || data["code"] != nil {
 		t.Fatalf("read-only view = %#v", data)
 	}
+}
+
+func TestQQBotBindRefreshesTokenRejectedByGateway(t *testing.T) {
+	newQQBotFakeGateway(t)
+	// 缓存中的令牌已被平台提前作废：网关查询返回 401 后应换新令牌重试。
+	qqBotTokens.entries[qqBotTokenCacheKeyForTest(t)] = qqBotToken{
+		value: "stale-token", expires: time.Now().Add(time.Hour), secret: qqBotTestSecret,
+	}
+	api := newSettingsAPITest(t)
+	startQQBotBind(t, api, qqBotBindDraft)
+	waitQQBotBind(t, api, qqBotBindWaiting)
+}
+
+func qqBotTokenCacheKeyForTest(t *testing.T) string {
+	t.Helper()
+	env, err := qqBotBindEnvironment(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env.endpoints.TokenURL + "\x00" + qqBotTestAppID
+}
+
+func TestQQBotCanceledBindDoesNotSave(t *testing.T) {
+	api := newSettingsAPITest(t)
+	session := &qqBotBindSession{Status: qqBotBindCanceled, cancel: func() {}}
+	committed, err := api.server.commitQQBotBind(context.Background(), session, qqBotTestConfig(nil), "USER_OPENID")
+	if err != nil || committed {
+		t.Fatalf("committed=%v err=%v", committed, err)
+	}
+	if _, err := api.database.NotificationSetting(context.Background(), "qqbot"); err == nil {
+		t.Fatal("canceled binding was saved")
+	}
+}
+
+func TestQQBotStopBindingCancelsAndWaits(t *testing.T) {
+	newQQBotFakeGateway(t)
+	api := newSettingsAPITest(t)
+	startQQBotBind(t, api, qqBotBindDraft)
+	waitQQBotBind(t, api, qqBotBindWaiting)
+	api.server.StopQQBotBinding()
+	waitQQBotBind(t, api, qqBotBindCanceled)
+	// 停止后新的绑定立即结束，不会在关闭后继续访问存储。
+	response := api.request(t, http.MethodPost, "/api/settings/notifications/qqbot/bind", qqBotBindDraft)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("start after stop: %d %s", response.Code, response.Body)
+	}
+	api.server.StopQQBotBinding()
 }

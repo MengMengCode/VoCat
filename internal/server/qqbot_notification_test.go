@@ -41,6 +41,7 @@ type qqBotFakePlatform struct {
 	rejectToken string // 消息接口对该令牌返回 401
 	rejectAll   bool   // 消息接口对所有令牌返回 401
 	messageCode int    // 非零时消息接口返回业务错误
+	messageBody string // 非空时消息接口以 HTTP 200 返回该内容
 	tokenStatus int    // 非零时令牌接口返回该状态
 }
 
@@ -99,6 +100,10 @@ func (platform *qqBotFakePlatform) serve(w http.ResponseWriter, r *http.Request)
 	if platform.rejectAll || (platform.rejectToken != "" && r.Header.Get("Authorization") == "QQBot "+platform.rejectToken) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"code":11244,"message":"token not exist or expire"}`))
+		return
+	}
+	if platform.messageBody != "" {
+		_, _ = w.Write([]byte(platform.messageBody))
 		return
 	}
 	if platform.messageCode != 0 {
@@ -367,5 +372,56 @@ func TestQQBotTestEndpointUsesSavedSecret(t *testing.T) {
 	response = api.request(t, http.MethodPost, "/api/settings/notifications/qqbot/test", `{}`)
 	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "notification_provider_rejected") {
 		t.Fatalf("rejected test: %d %s", response.Code, response.Body)
+	}
+}
+
+func TestQQBotTreatsHTTP200BusinessErrorsAsRejections(t *testing.T) {
+	platform := newQQBotFakePlatform(t)
+	platform.messageBody = `{"code":22009,"message":"msg limit exceed"}`
+	if err := platform.post(t, qqBotTestConfig(nil), "a", "b"); !errors.Is(err, errProviderRejected) || !strings.Contains(err.Error(), "22009") {
+		t.Fatalf("HTTP 200 business error: %v", err)
+	}
+	// 成功状态下无法解析的响应不能当作已送达。
+	platform.messageBody = `<html>gateway</html>`
+	if err := platform.post(t, qqBotTestConfig(nil), "a", "b"); !errors.Is(err, errProviderRejected) {
+		t.Fatalf("unreadable success response: %v", err)
+	}
+}
+
+func TestQQBotReplyDescriptionHidesIdentifiers(t *testing.T) {
+	description := qqBotReply{Code: 40034, Message: "user OPENID_ABCDEFGHIJKLMNOPQRSTUV0123 rejected token abcdefghijklmnopqrstuvwxyz"}.describe()
+	if strings.Contains(description, "OPENID_ABCDEFGHIJKLMNOPQRSTUV0123") || strings.Contains(description, "abcdefghijklmnopqrstuvwxyz") ||
+		!strings.Contains(description, "40034") || !strings.Contains(description, "rejected token") {
+		t.Fatalf("description = %q", description)
+	}
+}
+
+func TestQQBotRequiresSecretWhenAppIDChanges(t *testing.T) {
+	api := newSettingsAPITest(t)
+	if response := api.request(t, http.MethodPut, "/api/settings/notifications",
+		`{"qqbot":{"enabled":true,"app_id":"102000001","app_secret":"test-secret-value","target_openid":"OPENID_1"}}`); response.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", response.Code, response.Body)
+	}
+	masked := `"app_secret":"` + store.SecretMask + `"`
+	// 掩码沿用的是原 AppID 的 AppSecret：更换 AppID 时保存、测试和绑定都要求重新填写。
+	for _, request := range []struct{ method, path, body string }{
+		{http.MethodPut, "/api/settings/notifications", `{"qqbot":{"enabled":true,"app_id":"102000002",` + masked + `,"target_openid":"OPENID_1"}}`},
+		{http.MethodPut, "/api/settings/notifications", `{"qqbot":{"enabled":true,"app_id":"102000002","app_secret":"","target_openid":"OPENID_1"}}`},
+		{http.MethodPost, "/api/settings/notifications/qqbot/test", `{"app_id":"102000002",` + masked + `,"target_openid":"OPENID_1"}`},
+		{http.MethodPost, "/api/settings/notifications/qqbot/bind", `{"mode":"code","app_id":"102000002",` + masked + `}`},
+	} {
+		response := api.request(t, request.method, request.path, request.body)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "re-entered") {
+			t.Errorf("%s %s: %d %s", request.method, request.path, response.Code, response.Body)
+		}
+	}
+	// AppID 不变时掩码照常沿用；填写新 AppSecret 时可以更换 AppID。
+	for _, body := range []string{
+		`{"qqbot":{"enabled":true,"app_id":"102000001",` + masked + `,"target_openid":"OPENID_2"}}`,
+		`{"qqbot":{"enabled":true,"app_id":"102000002","app_secret":"other-secret","target_openid":"OPENID_2"}}`,
+	} {
+		if response := api.request(t, http.MethodPut, "/api/settings/notifications", body); response.Code != http.StatusOK {
+			t.Errorf("save %s: %d %s", body, response.Code, response.Body)
+		}
 	}
 }
