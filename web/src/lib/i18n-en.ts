@@ -176,6 +176,7 @@ export const EN_DICT: Record<string, string> = {
   "扫码未返回接收方，请在 QQ 中私聊刚才选择的机器人，发送下方绑定码。完成后会一起保存机器人凭据。": "The scan didn't return a recipient. In QQ, send the code below to the bot you just selected. The bot credentials are saved once that's done.",
   "正在同步 QQ 机器人的绑定结果，请稍后再保存": "Syncing the QQ Bot binding. Save again in a moment.",
   "取消绑定失败": "Couldn't cancel binding",
+  "QQ 机器人正在绑定，请完成或取消绑定后再保存": "QQ Bot binding is in progress. Finish or cancel it before saving.",
   "绑定 QQ 机器人": "Bind a QQ Bot",
   "接收方 openid（QQ 单聊用户）": "Recipient openid (QQ direct-message user)",
   "清空并重新绑定": "Clear and bind again",

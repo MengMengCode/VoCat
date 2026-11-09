@@ -95,7 +95,11 @@ export default function SettingsPage() {
   // 取消请求发出后、确认服务器实际状态前同样不允许保存：绑定可能已在取消前完成。
   const [qqCancelPending, setQQCancelPending] = useState(false);
   const pageUnmounted = useRef(false);
-  useEffect(() => () => { pageUnmounted.current = true; }, []);
+  useEffect(() => {
+    // 开发模式的 StrictMode 会先清理再重新运行副作用：每次运行时复位，保证标志只在真正卸载后为真。
+    pageUnmounted.current = false;
+    return () => { pageUnmounted.current = true; };
+  }, []);
   const [activeTab, setActiveTab] = useState("telegram");
   const [loadingNotif, setLoadingNotif] = useState(false);
   const [savingNotif, setSavingNotif] = useState(false);
@@ -382,6 +386,11 @@ export default function SettingsPage() {
 
   const onSaveNotifications = useCallback(async () => {
     if (savingNotif) return;
+    // 绑定可能在下一次轮询前就已完成：从开始绑定到同步完结果之前都不允许保存，避免旧表单覆盖新绑定。
+    if (startingQQBind || qqBotBindActive(qqBind)) {
+      message.warning(t("QQ 机器人正在绑定，请完成或取消绑定后再保存"));
+      return;
+    }
     if (qqSyncPending || qqCancelPending) {
       message.warning(t("正在同步 QQ 机器人的绑定结果，请稍后再保存"));
       return;
@@ -401,7 +410,7 @@ export default function SettingsPage() {
     } finally {
       setSavingNotif(false);
     }
-  }, [forms, clearedChannels, savingNotif, qqSyncPending, qqCancelPending]);
+  }, [forms, clearedChannels, savingNotif, qqSyncPending, qqCancelPending, startingQQBind, qqBind]);
 
   const onTestMeow = async () => {
     setTestingMeow(true);
