@@ -34,6 +34,7 @@ var (
 	qqBotOpenIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 )
 
+// validateQQBotNotificationConfig 检查发送所需的 AppID、AppSecret 和接收方 openid。
 func validateQQBotNotificationConfig(config map[string]any) error {
 	if !qqBotAppIDPattern.MatchString(strings.TrimSpace(configString(config, "app_id"))) {
 		return errors.New("qqbot.app_id must be the numeric AppID")
@@ -108,6 +109,7 @@ func (s *Server) qqBotSecretReentered(w http.ResponseWriter, r *http.Request, dr
 // 默认调用真实开放平台；测试中可替换为本地接收端，不访问真实收件人。
 var qqBotNotificationSender = deliverQQBotNotification
 
+// sendQQBotNotification 按设备范围过滤后发送一条 QQ 机器人通知。
 func sendQQBotNotification(ctx context.Context, config map[string]any, deviceID *string, title, text string) error {
 	if deviceID != nil && !notificationMatchesDevice(configStrings(config, "device_ids"), *deviceID) {
 		return nil
@@ -115,6 +117,7 @@ func sendQQBotNotification(ctx context.Context, config map[string]any, deviceID 
 	return qqBotNotificationSender(ctx, config, title, text)
 }
 
+// deliverQQBotNotification 校验配置和目标地址，通过受限的 HTTP 客户端发送通知。
 func deliverQQBotNotification(ctx context.Context, config map[string]any, title, text string) error {
 	if err := validateQQBotNotificationConfig(config); err != nil {
 		return err
@@ -132,6 +135,7 @@ func deliverQQBotNotification(ctx context.Context, config map[string]any, title,
 	return postQQBotNotification(ctx, client, endpoints, config, title, text)
 }
 
+// postQQBotNotification 用单聊消息接口把通知发给接收方；令牌被拒绝时换新令牌重试一次。
 func postQQBotNotification(
 	ctx context.Context,
 	client *http.Client,
@@ -169,12 +173,14 @@ func postQQBotNotification(
 			continue
 		}
 		if status < 200 || status >= 300 || reply.Code != 0 {
-			return fmt.Errorf("%w: QQ bot HTTP %d%s", errProviderRejected, status, reply.describe())
+			return fmt.Errorf("%w: QQ bot HTTP %d%s", errProviderRejected, status,
+				reply.describe(configString(config, "target_openid")))
 		}
 		return nil
 	}
 }
 
+// qqBotContent 把标题和正文合并为纯文本消息，并限制长度。
 func qqBotContent(title, text string) string {
 	content := strings.TrimSpace(text)
 	if title = strings.TrimSpace(title); title != "" {
@@ -195,12 +201,19 @@ type qqBotReply struct {
 // qqBotOpaqueValue 匹配平台说明中可能出现的 openid、令牌等长标识。
 var qqBotOpaqueValue = regexp.MustCompile(`[A-Za-z0-9_-]{20,}`)
 
-// describe 只返回平台的错误码和说明；说明中的长标识（openid、令牌等）会被隐去。
-func (reply qqBotReply) describe() string {
+// describe 只返回平台的错误码和说明。hidden 中的值（如收件 openid，可能较短）以及
+// 说明中的长标识（openid、令牌等）会被隐去。
+func (reply qqBotReply) describe(hidden ...string) string {
 	if reply.Code == 0 && reply.Message == "" {
 		return ""
 	}
-	redacted := qqBotOpaqueValue.ReplaceAllString(strings.TrimSpace(reply.Message), "[redacted]")
+	redacted := strings.TrimSpace(reply.Message)
+	for _, value := range hidden {
+		if value = strings.TrimSpace(value); value != "" {
+			redacted = strings.ReplaceAll(redacted, value, "[redacted]")
+		}
+	}
+	redacted = qqBotOpaqueValue.ReplaceAllString(redacted, "[redacted]")
 	message := []rune(redacted)
 	if len(message) > 200 {
 		message = message[:200]
@@ -208,6 +221,7 @@ func (reply qqBotReply) describe() string {
 	return fmt.Sprintf(" (code %d: %s)", reply.Code, string(message))
 }
 
+// postQQBotMessage 发送一次消息请求，返回 HTTP 状态和平台的错误码说明。
 func postQQBotMessage(
 	ctx context.Context,
 	client *http.Client,
@@ -262,6 +276,7 @@ type qqBotToken struct {
 
 var qqBotTokens = &qqBotTokenCache{entries: map[string]qqBotToken{}, now: time.Now}
 
+// get 返回缓存中未过期的令牌，否则向开放平台获取新令牌。
 func (cache *qqBotTokenCache) get(
 	ctx context.Context,
 	client *http.Client,
@@ -286,6 +301,7 @@ func (cache *qqBotTokenCache) get(
 	return token, nil
 }
 
+// invalidate 丢弃被平台拒绝的令牌，下次发送时重新获取。
 func (cache *qqBotTokenCache) invalidate(tokenURL, appID, token string) {
 	key := tokenURL + "\x00" + appID
 	cache.mu.Lock()
@@ -295,6 +311,7 @@ func (cache *qqBotTokenCache) invalidate(tokenURL, appID, token string) {
 	}
 }
 
+// fetchQQBotToken 用 AppID 和 AppSecret 换取访问令牌及其有效期。
 func fetchQQBotToken(
 	ctx context.Context,
 	client *http.Client,

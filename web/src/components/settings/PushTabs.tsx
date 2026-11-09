@@ -487,6 +487,7 @@ export function MeowTab({ value, onChange, testing, onTest }: PushChannelProps<N
   );
 }
 
+/** QQ 机器人渠道：未绑定时显示扫码和手动两种绑定流程，绑定完成后显示可编辑的维护面板。 */
 export function QQBotTab({
   value,
   onChange,
@@ -495,12 +496,15 @@ export function QQBotTab({
   onClear,
   bind,
   binding,
+  syncing,
   onBind,
   onCancelBind,
 }: PushChannelProps<QQBotForm> & {
   onClear: () => void;
   bind: QQBotBindState | null;
   binding: boolean;
+  /** 正在从服务器同步绑定结果：期间锁定凭据和接收方，避免编辑被同步结果覆盖。 */
+  syncing: boolean;
   onBind: (mode: QQBotBindMode) => void;
   onCancelBind: () => void;
 }) {
@@ -546,7 +550,11 @@ export function QQBotTab({
     previousMode.current = bind.mode;
   }, [active, bind?.mode]);
   useEffect(() => {
-    if (!active) previousMode.current = null;
+    // 绑定结束后清除回退状态，下一次绑定不会沿用上一次的提示和隐藏的凭据字段。
+    if (!active) {
+      previousMode.current = null;
+      setFellBack(false);
+    }
   }, [active]);
   const qrUrl = active && bind?.mode === "qr" ? bind.qrUrl : undefined;
   // 二维码只编码开放平台的绑定页地址，在本地生成，不经第三方服务。
@@ -593,10 +601,10 @@ export function QQBotTab({
           <div className="space-y-4">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field label={t("机器人 AppID")}>
-                <Input aria-label={t("机器人 AppID")} value={value.appId} onChange={(e) => onChange({ appId: e.target.value })} inputMode="numeric" />
+                <Input aria-label={t("机器人 AppID")} value={value.appId} onChange={(e) => onChange({ appId: e.target.value })} disabled={syncing} inputMode="numeric" />
               </Field>
               <Field label={t("机器人 AppSecret")}>
-                <Input aria-label={t("机器人 AppSecret")} value={value.appSecret} onChange={(e) => onChange({ appSecret: e.target.value })} type="password" />
+                <Input aria-label={t("机器人 AppSecret")} value={value.appSecret} onChange={(e) => onChange({ appSecret: e.target.value })} disabled={syncing} type="password" />
               </Field>
             </div>
             <Field label={t("接收方 openid（QQ 单聊用户）")}>
@@ -604,6 +612,7 @@ export function QQBotTab({
                 aria-label={t("接收方 openid（QQ 单聊用户）")}
                 value={value.targetOpenid}
                 onChange={(e) => onChange({ targetOpenid: e.target.value })}
+                disabled={syncing}
                 className="font-mono"
               />
             </Field>
@@ -661,10 +670,10 @@ export function QQBotTab({
                   </div>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <Field label={t("机器人 AppID")}>
-                      <Input aria-label={t("机器人 AppID")} value={value.appId} onChange={(e) => onChange({ appId: e.target.value })} disabled={active} inputMode="numeric" />
+                      <Input aria-label={t("机器人 AppID")} value={value.appId} onChange={(e) => onChange({ appId: e.target.value })} disabled={active || syncing} inputMode="numeric" />
                     </Field>
                     <Field label={t("机器人 AppSecret")}>
-                      <Input aria-label={t("机器人 AppSecret")} value={value.appSecret} onChange={(e) => onChange({ appSecret: e.target.value })} disabled={active} type="password" />
+                      <Input aria-label={t("机器人 AppSecret")} value={value.appSecret} onChange={(e) => onChange({ appSecret: e.target.value })} disabled={active || syncing} type="password" />
                     </Field>
                   </div>
 

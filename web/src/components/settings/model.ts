@@ -347,6 +347,7 @@ export function buildMeowPayload(form: NotifyForms["meow"]) {
   };
 }
 
+/** 把 QQ 机器人表单整理为提交给接口的配置（去掉首尾空白）。 */
 export function buildQQBotPayload(form: QQBotForm) {
   return {
     enabled: form.enabled,

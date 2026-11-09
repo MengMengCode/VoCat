@@ -92,6 +92,10 @@ export default function SettingsPage() {
   const [startingQQBind, setStartingQQBind] = useState(false);
   // 绑定完成后要从服务器取回新的凭据和接收方；取回之前不允许保存，避免旧表单覆盖新绑定。
   const [qqSyncPending, setQQSyncPending] = useState(false);
+  // 取消请求发出后、确认服务器实际状态前同样不允许保存：绑定可能已在取消前完成。
+  const [qqCancelPending, setQQCancelPending] = useState(false);
+  const pageUnmounted = useRef(false);
+  useEffect(() => () => { pageUnmounted.current = true; }, []);
   const [activeTab, setActiveTab] = useState("telegram");
   const [loadingNotif, setLoadingNotif] = useState(false);
   const [savingNotif, setSavingNotif] = useState(false);
@@ -378,7 +382,7 @@ export default function SettingsPage() {
 
   const onSaveNotifications = useCallback(async () => {
     if (savingNotif) return;
-    if (qqSyncPending) {
+    if (qqSyncPending || qqCancelPending) {
       message.warning(t("正在同步 QQ 机器人的绑定结果，请稍后再保存"));
       return;
     }
@@ -397,7 +401,7 @@ export default function SettingsPage() {
     } finally {
       setSavingNotif(false);
     }
-  }, [forms, clearedChannels, savingNotif, qqSyncPending]);
+  }, [forms, clearedChannels, savingNotif, qqSyncPending, qqCancelPending]);
 
   const onTestMeow = async () => {
     setTestingMeow(true);
@@ -440,20 +444,35 @@ export default function SettingsPage() {
   };
 
   const onCancelQQBind = async () => {
-    // 先更新界面（例如从扫码切换到手动绑定时立即生效），再通知服务器停止。
+    // 先更新界面（例如从扫码切换到手动绑定时立即生效），再通知服务器停止，并确认服务器的实际状态。
     setQQBind(null);
+    setQQCancelPending(true);
     try {
-      await api("/settings/notifications/qqbot/bind", { method: "DELETE" });
-    } catch (error) {
-      // 服务器可能仍在绑定：恢复它的真实状态，继续轮询或同步结果。
-      message.error(apiMessage(error) || t("取消绑定失败"));
+      let status: QQBotBindState["status"] | undefined;
       try {
-        const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
-        setQQBind(state ?? null);
-        if (state?.status === "bound") setQQSyncPending(true);
-      } catch {
-        // 绑定会在有效期结束后自动停止。
+        status = (await api<{ status: QQBotBindState["status"] }>("/settings/notifications/qqbot/bind", { method: "DELETE" }))?.status;
+      } catch (error) {
+        message.error(apiMessage(error) || t("取消绑定失败"));
       }
+      // 绑定已在取消前完成：同步已保存的接收方。
+      if (status === "bound") {
+        setQQSyncPending(true);
+        return;
+      }
+      if (status) return;
+      // 取消请求失败：服务器可能仍在绑定，持续查询直到拿到实际状态，再继续轮询或同步结果。
+      while (!pageUnmounted.current) {
+        try {
+          const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
+          setQQBind(state ?? null);
+          if (state?.status === "bound") setQQSyncPending(true);
+          return;
+        } catch {
+          await new Promise(resolve => window.setTimeout(resolve, 2000));
+        }
+      }
+    } finally {
+      setQQCancelPending(false);
     }
   };
 
@@ -753,7 +772,7 @@ export default function SettingsPage() {
             <fieldset disabled={savingNotif} className="relative z-10 min-w-0 w-full overflow-hidden">
               <SegmentedTabs tabs={NOTIFY_TABS.map((tab) => ({ ...tab, label: t(tab.label) }))} value={activeTab} onChange={setActiveTab} />
               {activeTab === "meow" ? <MeowTab value={forms.meow} onChange={(p) => updateChannel("meow", p)} testing={testingMeow} onTest={onTestMeow} /> : null}
-              {activeTab === "qqbot" ? <QQBotTab onClear={() => void clearChannel("qqbot")} value={forms.qqbot} onChange={(p) => updateChannel("qqbot", p)} testing={testingQQBot} onTest={onTestQQBot} bind={qqBind} binding={startingQQBind} onBind={(mode) => void onBindQQBot(mode)} onCancelBind={() => void onCancelQQBind()} /> : null}
+              {activeTab === "qqbot" ? <QQBotTab onClear={() => void clearChannel("qqbot")} value={forms.qqbot} onChange={(p) => updateChannel("qqbot", p)} testing={testingQQBot} onTest={onTestQQBot} bind={qqBind} binding={startingQQBind} syncing={qqSyncPending || qqCancelPending} onBind={(mode) => void onBindQQBot(mode)} onCancelBind={() => void onCancelQQBind()} /> : null}
               {activeTab === "telegram" ? (
                 <TelegramTab onClear={() => void clearChannel("telegram")} value={forms.telegram} onChange={(p) => updateChannel("telegram", p)} />
               ) : null}

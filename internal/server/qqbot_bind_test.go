@@ -161,8 +161,10 @@ func (gateway *qqBotFakeGateway) serveWebSocket(w http.ResponseWriter, r *http.R
 	}
 	sequence := int64(1)
 	send(qqBotGatewayFrame{Op: 0, S: &sequence, T: "READY", D: json.RawMessage(`{"session_id":"s"}`)})
-	// 后台读取心跳，避免阻塞客户端写入。
+	// 后台读取心跳，避免阻塞客户端写入；连接关闭时通知下面的循环退出。
+	closed := make(chan struct{})
 	go func() {
+		defer close(closed)
 		for {
 			if _, _, err := conn.Read(ctx); err != nil {
 				return
@@ -172,6 +174,8 @@ func (gateway *qqBotFakeGateway) serveWebSocket(w http.ResponseWriter, r *http.R
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-closed:
 			return
 		case frame := <-gateway.events:
 			sequence++
@@ -610,6 +614,57 @@ func qqBotTokenCacheKeyForTest(t *testing.T) string {
 	return env.endpoints.TokenURL + "\x00" + qqBotTestAppID
 }
 
+func TestQQBotCancelDuringCommitDoesNotSave(t *testing.T) {
+	api := newSettingsAPITest(t)
+	session := &qqBotBindSession{Status: qqBotBindWaiting, cancel: func() {}}
+	// 持有绑定锁，让写入等待；期间取消会话，模拟 DELETE 与写入交错。
+	api.server.qqBotBindMu.Lock()
+	type result struct {
+		committed bool
+		err       error
+	}
+	done := make(chan result, 1)
+	go func() {
+		committed, err := api.server.commitQQBotBind(context.Background(), session, qqBotTestConfig(nil), "USER_OPENID")
+		done <- result{committed, err}
+	}()
+	select {
+	case <-done:
+		api.server.qqBotBindMu.Unlock()
+		t.Fatal("commit did not wait for the binding lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	session.Status = qqBotBindCanceled
+	api.server.qqBotBindMu.Unlock()
+	if got := <-done; got.err != nil || got.committed {
+		t.Fatalf("committed=%v err=%v", got.committed, got.err)
+	}
+	if _, err := api.database.NotificationSetting(context.Background(), "qqbot"); err == nil {
+		t.Fatal("canceled binding was saved")
+	}
+}
+
+func TestQQBotCancelAfterCommitReportsBound(t *testing.T) {
+	api := newSettingsAPITest(t)
+	session := &qqBotBindSession{Mode: "code", Status: qqBotBindWaiting, cancel: func() {}}
+	api.server.qqBotBindMu.Lock()
+	api.server.qqBotBind = session
+	api.server.qqBotBindMu.Unlock()
+	committed, err := api.server.commitQQBotBind(context.Background(), session, qqBotTestConfig(nil), "USER_OPENID")
+	if err != nil || !committed {
+		t.Fatalf("committed=%v err=%v", committed, err)
+	}
+	// 绑定完成后才到达的取消不改变结果，并返回实际状态，前端据此同步接收方。
+	response := api.request(t, http.MethodDelete, "/api/settings/notifications/qqbot/bind", "")
+	data, _ := decodeSettingsResponse(t, response)["data"].(map[string]any)
+	if response.Code != http.StatusOK || data["status"] != string(qqBotBindBound) {
+		t.Fatalf("delete: %d %#v", response.Code, data)
+	}
+	if setting, config := storedQQBotConfig(t, api); !setting.Enabled || config["target_openid"] != "USER_OPENID" {
+		t.Fatalf("config = %#v", config)
+	}
+}
+
 func TestQQBotCanceledBindDoesNotSave(t *testing.T) {
 	api := newSettingsAPITest(t)
 	session := &qqBotBindSession{Status: qqBotBindCanceled, cancel: func() {}}
@@ -622,6 +677,36 @@ func TestQQBotCanceledBindDoesNotSave(t *testing.T) {
 	}
 }
 
+func TestQQBotStopBindingWaitsForWorkers(t *testing.T) {
+	api := newSettingsAPITest(t)
+	release := make(chan struct{})
+	api.server.startQQBotWork(func() { <-release })
+	stopped := make(chan struct{})
+	go func() {
+		api.server.StopQQBotBinding()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("StopQQBotBinding returned before the worker exited")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("StopQQBotBinding did not return after the worker exited")
+	}
+	// 停止开始后不再登记新的协程。
+	ran := make(chan struct{}, 1)
+	api.server.startQQBotWork(func() { ran <- struct{}{} })
+	select {
+	case <-ran:
+		t.Fatal("worker started after stop")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestQQBotStopBindingCancelsAndWaits(t *testing.T) {
 	newQQBotFakeGateway(t)
 	api := newSettingsAPITest(t)
@@ -629,10 +714,20 @@ func TestQQBotStopBindingCancelsAndWaits(t *testing.T) {
 	waitQQBotBind(t, api, qqBotBindWaiting)
 	api.server.StopQQBotBinding()
 	waitQQBotBind(t, api, qqBotBindCanceled)
-	// 停止后新的绑定立即结束，不会在关闭后继续访问存储。
+	// 停止开始后拒绝新的绑定，不会在关闭后启动协程或访问存储。
 	response := api.request(t, http.MethodPost, "/api/settings/notifications/qqbot/bind", qqBotBindDraft)
-	if response.Code != http.StatusAccepted {
+	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("start after stop: %d %s", response.Code, response.Body)
 	}
-	api.server.StopQQBotBinding()
+}
+
+func TestQQBotQRBindIgnoresDraftCredentials(t *testing.T) {
+	newQQBotFakeGateway(t)
+	api := newSettingsAPITest(t)
+	if response := api.request(t, http.MethodPut, "/api/settings/notifications",
+		`{"qqbot":{"enabled":true,"app_id":"999","app_secret":"old-secret","target_openid":"OLD"}}`); response.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", response.Code, response.Body)
+	}
+	// 扫码绑定不使用表单中的凭据：改过 AppID 也可以开始扫码。
+	beginQQBotBind(t, api, `{"mode":"qr","app_id":"102000002","app_secret":"`+store.SecretMask+`"}`)
 }

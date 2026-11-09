@@ -63,6 +63,7 @@ type qqBotBindSession struct {
 	cancel    context.CancelFunc
 }
 
+// finished 报告绑定是否已结束（成功、过期、失败或取消）。
 func (session *qqBotBindSession) finished() bool {
 	switch session.Status {
 	case qqBotBindBound, qqBotBindExpired, qqBotBindFailed, qqBotBindCanceled:
@@ -85,6 +86,7 @@ type qqBotBindEnv struct {
 
 var qqBotBindEnvironment = defaultQQBotBindEnv
 
+// defaultQQBotBindEnv 返回连接真实开放平台的绑定环境，并校验各端点和代理。
 func defaultQQBotBindEnv(ctx context.Context, config map[string]any) (qqBotBindEnv, error) {
 	endpoints := defaultQQBotEndpoints
 	for _, endpoint := range []string{endpoints.TokenURL, endpoints.APIBase, endpoints.ConnectBase} {
@@ -142,6 +144,7 @@ func newQQBotBindCode() (string, error) {
 	return code.String(), nil
 }
 
+// handleQQBotBind 处理绑定状态查询（GET）、开始绑定（POST）和取消绑定（DELETE）。
 func (s *Server) handleQQBotBind(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -161,13 +164,18 @@ func (s *Server) handleQQBotBind(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.startQQBotBind(w, r)
 	case http.MethodDelete:
+		// 返回取消后的实际状态：绑定已在取消前完成时为 bound，前端据此同步已保存的接收方。
+		status := qqBotBindCanceled
 		s.qqBotBindMu.Lock()
-		if session := s.qqBotBind; session != nil && !session.finished() {
-			session.cancel()
-			session.Status = qqBotBindCanceled
+		if session := s.qqBotBind; session != nil {
+			if !session.finished() {
+				session.cancel()
+				session.Status = qqBotBindCanceled
+			}
+			status = session.Status
 		}
 		s.qqBotBindMu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"status": qqBotBindCanceled}})
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"status": status}})
 	default:
 		w.Header().Set("Allow", "GET, POST, DELETE")
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
@@ -195,7 +203,8 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
 		return
 	}
-	if !s.qqBotSecretReentered(w, r, incoming) {
+	// 扫码绑定从扫码结果取得凭据，表单中的 AppID/AppSecret 不参与，只有绑定码需要检查。
+	if mode == "code" && !s.qqBotSecretReentered(w, r, incoming) {
 		return
 	}
 	// 与测试通知相同：表单回传的掩码从已保存配置中恢复。
@@ -229,6 +238,7 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var run func()
 	ctx, cancel := context.WithTimeout(s.qqBotWorkContext(), qqBotBindTTL)
 	session := &qqBotBindSession{
 		Mode: mode, ExpiresAt: time.Now().Add(qqBotBindTTL).UTC(),
@@ -244,7 +254,7 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 		}
 		session.QRURL = task.URL
 		session.Status = qqBotBindWaiting
-		s.qqBotBindWork.Go(func() { s.runQQBotQRBind(ctx, session, resolved, env, task) })
+		run = func() { s.runQQBotQRBind(ctx, session, resolved, env, task) }
 	} else {
 		code, err := newQQBotBindCode()
 		if err != nil {
@@ -253,15 +263,23 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session.Code = code
-		s.qqBotBindWork.Go(func() { s.runQQBotCodeBind(ctx, session, resolved, env) })
+		run = func() { s.runQQBotCodeBind(ctx, session, resolved, env) }
 	}
 
 	s.qqBotBindMu.Lock()
+	// 在同一把锁内登记协程：StopQQBotBinding 开始等待之后不再启动新的绑定。
+	if s.qqBotStopping {
+		s.qqBotBindMu.Unlock()
+		cancel()
+		writeError(w, http.StatusServiceUnavailable, "qqbot_bind_unavailable", "the server is shutting down")
+		return
+	}
 	if previous := s.qqBotBind; previous != nil && !previous.finished() {
 		previous.cancel()
 		previous.Status = qqBotBindCanceled
 	}
 	s.qqBotBind = session
+	s.qqBotBindWork.Go(run)
 	view := *session
 	view.cancel = nil
 	s.qqBotBindMu.Unlock()
@@ -283,6 +301,7 @@ func (s *Server) qqBotWorkContext() context.Context {
 func (s *Server) StopQQBotBinding() {
 	s.qqBotWorkContext()
 	s.qqBotBindMu.Lock()
+	s.qqBotStopping = true
 	s.qqBotWorkCancel()
 	if session := s.qqBotBind; session != nil && !session.finished() {
 		session.cancel()
@@ -292,6 +311,16 @@ func (s *Server) StopQQBotBinding() {
 	s.qqBotBindWork.Wait()
 }
 
+// startQQBotWork 在绑定锁内登记并启动后台协程；停止开始后不再启动。
+func (s *Server) startQQBotWork(work func()) {
+	s.qqBotBindMu.Lock()
+	defer s.qqBotBindMu.Unlock()
+	if !s.qqBotStopping {
+		s.qqBotBindWork.Go(work)
+	}
+}
+
+// updateQQBotBind 在绑定锁内更新会话；已取消的会话不再变化。
 func (s *Server) updateQQBotBind(session *qqBotBindSession, update func(*qqBotBindSession)) {
 	s.qqBotBindMu.Lock()
 	defer s.qqBotBindMu.Unlock()
@@ -301,6 +330,7 @@ func (s *Server) updateQQBotBind(session *qqBotBindSession, update func(*qqBotBi
 	update(session)
 }
 
+// failQQBotBind 把会话标记为失败并记录原因。
 func (s *Server) failQQBotBind(session *qqBotBindSession, message string) {
 	s.logger.Warn("QQ bot binding failed", "mode", session.Mode, "error", message)
 	s.updateQQBotBind(session, func(session *qqBotBindSession) {
@@ -338,6 +368,7 @@ func (s *Server) finishQQBotBindOnTimeout(session *qqBotBindSession) {
 	})
 }
 
+// redactQQBotError 隐去错误信息中出现的 AppSecret 等敏感配置。
 func redactQQBotError(err error, config map[string]any) string {
 	encoded, _ := json.Marshal(config)
 	return store.RedactText(err.Error(), store.NotificationSetting{
@@ -359,6 +390,7 @@ type qqBotConnectReply struct {
 	Data    json.RawMessage `json:"data"`
 }
 
+// postQQBotConnect 调用扫码绑定接口，并把返回的 data 解码到 data 中。
 func postQQBotConnect(ctx context.Context, env qqBotBindEnv, path string, body any, data any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -450,6 +482,7 @@ func decryptQQBotSecret(encoded string, key []byte) (string, error) {
 	return string(plain), nil
 }
 
+// runQQBotQRBind 轮询扫码结果，二维码过期时换新任务，直到完成、失败或会话结束。
 func (s *Server) runQQBotQRBind(ctx context.Context, session *qqBotBindSession, config map[string]any, env qqBotBindEnv, task qqBotQRTask) {
 	defer session.cancel()
 	for {
@@ -491,6 +524,7 @@ func (s *Server) runQQBotQRBind(ctx context.Context, session *qqBotBindSession, 
 	}
 }
 
+// completeQQBotQRBind 解密扫码得到的凭据并保存绑定；没有返回接收方时改用绑定码。
 func (s *Server) completeQQBotQRBind(
 	ctx context.Context,
 	session *qqBotBindSession,
@@ -544,7 +578,7 @@ func (s *Server) completeQQBotQRBind(
 	}
 	s.logger.Info("QQ bot notification recipient bound", "method", "qr")
 	// 绑定会话随即结束，上线使用独立的超时。
-	s.qqBotBindWork.Go(func() {
+	s.startQQBotWork(func() {
 		ctx, cancel := context.WithTimeout(s.qqBotWorkContext(), qqBotOnlineTimeout+env.onlineHold)
 		defer cancel()
 		if err := bringQQBotOnline(ctx, env, appID, secret); err != nil {
@@ -610,6 +644,7 @@ func bringQQBotOnline(ctx context.Context, env qqBotBindEnv, appID, secret strin
 
 // ---- 绑定码 ----
 
+// runQQBotCodeBind 连接网关等待绑定码消息，连接断开时重试，直到完成、失败或会话结束。
 func (s *Server) runQQBotCodeBind(ctx context.Context, session *qqBotBindSession, config map[string]any, env qqBotBindEnv) {
 	defer session.cancel()
 	appID := strings.TrimSpace(configString(config, "app_id"))
@@ -773,6 +808,7 @@ func connectQQBotGateway(ctx context.Context, env qqBotBindEnv, appID, secret st
 	}
 }
 
+// fetchQQBotGateway 查询 WebSocket 网关地址并校验。
 func fetchQQBotGateway(ctx context.Context, env qqBotBindEnv, token string) (string, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(env.endpoints.APIBase, "/")+"/gateway", nil)
 	if err != nil {
@@ -820,6 +856,7 @@ func matchQQBotBindEvent(kind string, raw json.RawMessage, code string) (qqBotBi
 	return qqBotBindEvent{OpenID: event.Author.UserOpenID, MessageID: event.ID}, true
 }
 
+// completeQQBotCodeBind 保存发送绑定码的用户为接收方，并被动回复确认消息。
 func (s *Server) completeQQBotCodeBind(
 	ctx context.Context,
 	session *qqBotBindSession,
@@ -874,6 +911,7 @@ func (s *Server) saveQQBotBinding(ctx context.Context, config map[string]any, op
 	})
 }
 
+// replyQQBotBind 以被动回复的方式告知用户绑定已完成。
 func replyQQBotBind(ctx context.Context, env qqBotBindEnv, appID, secret string, event qqBotBindEvent) error {
 	token, err := qqBotTokens.get(ctx, env.client, env.endpoints.TokenURL, appID, secret)
 	if err != nil {
@@ -891,7 +929,7 @@ func replyQQBotBind(ctx context.Context, env qqBotBindEnv, appID, secret string,
 		return err
 	}
 	if status < 200 || status >= 300 || reply.Code != 0 {
-		return fmt.Errorf("%w: QQ bot HTTP %d%s", errProviderRejected, status, reply.describe())
+		return fmt.Errorf("%w: QQ bot HTTP %d%s", errProviderRejected, status, reply.describe(event.OpenID))
 	}
 	return nil
 }

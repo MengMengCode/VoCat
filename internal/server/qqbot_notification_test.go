@@ -425,3 +425,16 @@ func TestQQBotRequiresSecretWhenAppIDChanges(t *testing.T) {
 		}
 	}
 }
+
+func TestQQBotReplyDescriptionHidesShortRecipient(t *testing.T) {
+	description := qqBotReply{Code: 40034, Message: "user OPENID_1 rejected"}.describe("OPENID_1")
+	if strings.Contains(description, "OPENID_1") || !strings.Contains(description, "rejected") {
+		t.Fatalf("description = %q", description)
+	}
+	platform := newQQBotFakePlatform(t)
+	platform.messageBody = `{"code":40034,"message":"user OPENID_1 rejected"}`
+	err := platform.post(t, qqBotTestConfig(map[string]any{"target_openid": "OPENID_1"}), "a", "b")
+	if !errors.Is(err, errProviderRejected) || strings.Contains(err.Error(), "OPENID_1") {
+		t.Fatalf("err = %v", err)
+	}
+}

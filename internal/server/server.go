@@ -107,6 +107,7 @@ type Server struct {
 	// qqBotWorkCtx 是这些协程的父 context，由 qqBotBindMu 保护，StopQQBotBinding 取消它。
 	qqBotWorkCtx              context.Context
 	qqBotWorkCancel           context.CancelFunc
+	qqBotStopping             bool            // 由 qqBotBindMu 保护：StopQQBotBinding 开始后为真。
 	esimSIMResetAttempted     map[string]bool // 由 smsSyncMu 保护；读取成功后允许下一次故障恢复。
 	smsStorageMu              sync.Mutex
 	smsStorage                map[string]device.SMSStorageUsage
