@@ -447,6 +447,14 @@ export default function SettingsPage() {
       setQQBind(state);
     } catch (error) {
       message.error(apiMessage(error) || t("无法开始绑定"));
+      // 响应可能丢失而服务器已开始绑定：查询一次，若仍在进行则继续轮询并同步结果。
+      // 只接管进行中的会话，较早结束的会话不影响当前表单。
+      try {
+        const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
+        if (qqBotBindActive(state)) setQQBind(state);
+      } catch {
+        // 查询也失败时保持现状，绑定会在有效期结束后自动停止。
+      }
     } finally {
       setStartingQQBind(false);
     }
