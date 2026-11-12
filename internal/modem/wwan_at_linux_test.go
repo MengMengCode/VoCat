@@ -179,6 +179,12 @@ func TestNativeWWANATTransportBlockingReaderDoesNotDropWhenQueueFull(t *testing.
 		if err != nil {
 			t.Fatalf("Read: %v", err)
 		}
+		if n == 0 {
+			// A timed-out read means the stream stalled: if a chunk was
+			// dropped, fail here instead of looping until the global
+			// test timeout.
+			t.Fatalf("Read made no progress after %d of %d bytes", len(got), len(want))
+		}
 		got = append(got, buffer[:n]...)
 	}
 	if !bytes.Equal(got, want) {
