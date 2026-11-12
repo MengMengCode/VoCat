@@ -32,7 +32,11 @@ type nativeWWANATTransport struct {
 	// never be recreated per call. The flag is cleared when the reader exits,
 	// so a later Read can start a replacement instead of timing out forever.
 	readerRunning atomic.Bool
-	readResults   chan readResult
+	// readerReady holds the channel the current reader closes immediately
+	// before its first read, so whoever started it can wait until a read is
+	// genuinely about to block in the driver before anything is written.
+	readerReady atomic.Value // chan struct{}
+	readResults chan readResult
 }
 
 // readResult carries one completed blocking read back to Read.
@@ -44,15 +48,27 @@ type readResult struct {
 // persistentReader keeps exactly one blocking read outstanding in the driver.
 // It is started once when the port is opened, before the first AT command is
 // written, because a response is only delivered to a read that is already
-// waiting.
-func (transport *nativeWWANATTransport) persistentReader() {
+// waiting. ready is closed immediately before the first read, so the starter
+// can wait for that point instead of merely having scheduled this goroutine.
+// The descriptor is passed by value so this loop never races Close writing
+// transport.fd while a read is outstanding.
+func (transport *nativeWWANATTransport) persistentReader(ready chan struct{}, fd int) {
 	defer transport.readerRunning.Store(false)
 	buf := make([]byte, 512)
+	first := true
 	for {
 		if transport.closed.Load() {
+			if first {
+				// Release anyone waiting on readiness; Read fails on closed.
+				close(ready)
+			}
 			return
 		}
-		count, err := unix.Read(transport.fd, buf)
+		if first {
+			first = false
+			close(ready)
+		}
+		count, err := unix.Read(fd, buf)
 		if errors.Is(err, unix.EINTR) {
 			continue
 		}
@@ -63,16 +79,44 @@ func (transport *nativeWWANATTransport) persistentReader() {
 		if count < 0 {
 			count = 0
 		}
+		if count == 0 && err == nil {
+			// A zero-byte read with no error is how a character device
+			// reports that the modem side went away. Queuing it as an
+			// empty result would make Read report a timeout while this
+			// loop spins; surface EOF like the poll-based path does.
+			err = io.EOF
+		}
 		data := make([]byte, count)
 		copy(data, buf[:count])
-		select {
-		case transport.readResults <- readResult{err: err, data: data}:
-		default:
-			// The consumer is behind; drop instead of blocking the driver read.
+		if err != nil {
+			// Clear the running flag before publishing the error, so a
+			// consumer that retries Read at once can start the
+			// replacement instead of waiting on a channel nobody feeds.
+			transport.readerRunning.Store(false)
 		}
+		transport.deliver(readResult{err: err, data: data})
 		if err != nil {
 			return
 		}
+	}
+}
+
+// deliver queues one reader result for Read. It waits while the queue is
+// full instead of dropping bytes: Session consumes the channel as a
+// continuous AT byte stream, and a silent gap could truncate a response or
+// an unsolicited event without anyone noticing. Delivery only gives up
+// once the transport is closed, when nobody can consume the result anyway.
+func (transport *nativeWWANATTransport) deliver(result readResult) {
+	for {
+		select {
+		case transport.readResults <- result:
+			return
+		default:
+		}
+		if transport.closed.Load() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -87,7 +131,19 @@ func (transport *nativeWWANATTransport) ensureReader() {
 		}
 	})
 	if transport.readerRunning.CompareAndSwap(false, true) {
-		go transport.persistentReader()
+		ready := make(chan struct{})
+		transport.readerReady.Store(ready)
+		go transport.persistentReader(ready, transport.fd)
+	}
+}
+
+// waitReaderReady blocks until the current reader is about to issue its
+// first read, so a command written immediately afterwards cannot overtake
+// it: on bam-dmux a response is only handed to a read that is already
+// waiting in the driver.
+func (transport *nativeWWANATTransport) waitReaderReady() {
+	if ready, ok := transport.readerReady.Load().(chan struct{}); ok && ready != nil {
+		<-ready
 	}
 }
 
@@ -110,6 +166,7 @@ func openNativeWWANATTransport(path string) (Transport, error) {
 		readResults: make(chan readResult, 16),
 	}
 	transport.ensureReader()
+	transport.waitReaderReady()
 	return transport, nil
 }
 
@@ -129,6 +186,7 @@ func (transport *nativeWWANATTransport) Read(buffer []byte) (int, error) {
 		// Blind spot for the poll-based loop below: this driver never raises
 		// POLLIN, so only the persistent blocking reader can observe data.
 		transport.ensureReader()
+		transport.waitReaderReady()
 		if transport.readResults == nil {
 			return 0, io.ErrClosedPipe
 		}
@@ -286,6 +344,13 @@ func (transport *nativeWWANATTransport) SetReadTimeout(timeout time.Duration) er
 }
 
 func (transport *nativeWWANATTransport) Close() error {
+	// Blocking path: closing the descriptor does not necessarily wake the
+	// persistent reader out of unix.Read on this class of driver. The
+	// reader notices closed at the top of its loop and exits when the
+	// device next delivers data or the read errors, so a reader can
+	// outlive its transport until then. VoCat opens this transport for
+	// the lifetime of a modem session, which bounds the linger to at
+	// most one goroutine per session, and it cannot outlive the process.
 	transport.closed.Store(true)
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
