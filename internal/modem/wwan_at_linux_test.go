@@ -75,6 +75,45 @@ func TestNativeWWANATTransportDrainRejectsClosedTransport(t *testing.T) {
 	}
 }
 
+func TestNativeWWANATTransportBlockingReaderRestartsAfterError(t *testing.T) {
+	readFD, writeFD := socketpair(t)
+	defer unix.Close(writeFD)
+	transport := &nativeWWANATTransport{
+		fd:          readFD,
+		readTimeout: -1,
+		blocking:    true,
+		readResults: make(chan readResult, 16),
+	}
+	transport.ensureReader()
+	if !transport.readerRunning.Load() {
+		t.Fatal("reader not running after ensureReader")
+	}
+	// Closing the fd makes the outstanding read fail with EBADF, which ends
+	// persistentReader. A pending Read must observe that error, and a later
+	// ensureReader must be able to start a replacement reader; a one-shot
+	// start would leave every later Read timing out on a channel nobody
+	// feeds.
+	if err := unix.Close(readFD); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 64)
+	if _, err := transport.Read(buffer); err == nil {
+		t.Fatal("Read after reader death = nil error; want the read error")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for transport.readerRunning.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("reader still marked running after fatal read error")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	transport.ensureReader()
+	if !transport.readerRunning.Load() {
+		t.Fatal("reader did not restart after ensureReader")
+	}
+	transport.closed.Store(true)
+}
+
 func socketpair(t *testing.T) (int, int) {
 	t.Helper()
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)

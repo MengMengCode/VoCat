@@ -21,6 +21,74 @@ type nativeWWANATTransport struct {
 	fd          int
 	readTimeout time.Duration
 	closed      atomic.Bool
+	blocking    bool
+
+	// readerOnce guards lazy creation of readResults for transports that
+	// were not built by openNativeWWANATTransport.
+	readerOnce sync.Once
+	// readerRunning reports whether persistentReader is alive. Downstream
+	// bam-dmux drivers only hand a response to a read that is already blocked
+	// in the driver, so exactly one such read must stay outstanding; it must
+	// never be recreated per call. The flag is cleared when the reader exits,
+	// so a later Read can start a replacement instead of timing out forever.
+	readerRunning atomic.Bool
+	readResults   chan readResult
+}
+
+// readResult carries one completed blocking read back to Read.
+type readResult struct {
+	err  error
+	data []byte
+}
+
+// persistentReader keeps exactly one blocking read outstanding in the driver.
+// It is started once when the port is opened, before the first AT command is
+// written, because a response is only delivered to a read that is already
+// waiting.
+func (transport *nativeWWANATTransport) persistentReader() {
+	defer transport.readerRunning.Store(false)
+	buf := make([]byte, 512)
+	for {
+		if transport.closed.Load() {
+			return
+		}
+		count, err := unix.Read(transport.fd, buf)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if errors.Is(err, unix.EAGAIN) {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if count < 0 {
+			count = 0
+		}
+		data := make([]byte, count)
+		copy(data, buf[:count])
+		select {
+		case transport.readResults <- readResult{err: err, data: data}:
+		default:
+			// The consumer is behind; drop instead of blocking the driver read.
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// ensureReader starts the persistent blocking reader if it is not running.
+// It is called when the port is opened and again from Read, so a reader that
+// exited on a fatal error is replaced rather than leaving every later Read
+// to time out against a channel nobody feeds.
+func (transport *nativeWWANATTransport) ensureReader() {
+	transport.readerOnce.Do(func() {
+		if transport.readResults == nil {
+			transport.readResults = make(chan readResult, 16)
+		}
+	})
+	if transport.readerRunning.CompareAndSwap(false, true) {
+		go transport.persistentReader()
+	}
 }
 
 func openNativeWWANATTransport(path string) (Transport, error) {
@@ -28,7 +96,21 @@ func openNativeWWANATTransport(path string) (Transport, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &nativeWWANATTransport{fd: fd, readTimeout: -1}, nil
+	// The UFI003/OpenStick 410 bam-dmux AT port only answers a read that is
+	// already blocked in the driver: poll() never reports POLLIN and a
+	// non-blocking read returns EAGAIN. Clear O_NONBLOCK and keep one blocking
+	// reader outstanding so responses are actually delivered.
+	if _, fcntlErr := unix.FcntlInt(uintptr(fd), unix.F_SETFL, 0); fcntlErr != nil {
+		return &nativeWWANATTransport{fd: fd, readTimeout: -1}, nil
+	}
+	transport := &nativeWWANATTransport{
+		fd:          fd,
+		readTimeout: -1,
+		blocking:    true,
+		readResults: make(chan readResult, 16),
+	}
+	transport.ensureReader()
+	return transport, nil
 }
 
 func (transport *nativeWWANATTransport) Read(buffer []byte) (int, error) {
@@ -42,6 +124,31 @@ func (transport *nativeWWANATTransport) Read(buffer []byte) (int, error) {
 	if transport.readTimeout >= 0 {
 		deadline = time.Now().Add(transport.readTimeout)
 	}
+
+	if transport.blocking {
+		// Blind spot for the poll-based loop below: this driver never raises
+		// POLLIN, so only the persistent blocking reader can observe data.
+		transport.ensureReader()
+		if transport.readResults == nil {
+			return 0, io.ErrClosedPipe
+		}
+		var wait <-chan time.Time
+		if !deadline.IsZero() {
+			timer := time.NewTimer(time.Until(deadline))
+			defer timer.Stop()
+			wait = timer.C
+		}
+		select {
+		case result := <-transport.readResults:
+			if result.err != nil {
+				return 0, result.err
+			}
+			return copy(buffer, result.data), nil
+		case <-wait:
+			return 0, nil
+		}
+	}
+
 	for {
 		if transport.closed.Load() {
 			return 0, io.ErrClosedPipe
@@ -127,6 +234,21 @@ func (transport *nativeWWANATTransport) ResetInputBuffer() error {
 	defer transport.mu.RUnlock()
 	if transport.closed.Load() {
 		return io.ErrClosedPipe
+	}
+	if transport.blocking {
+		// Discard anything the persistent reader queued for a previous command.
+		// The blocked read in the driver keeps running uninterrupted.
+		if transport.readResults != nil {
+			for {
+				select {
+				case <-transport.readResults:
+					continue
+				default:
+				}
+				break
+			}
+		}
+		return nil
 	}
 	buffer := make([]byte, 4096)
 	for {
