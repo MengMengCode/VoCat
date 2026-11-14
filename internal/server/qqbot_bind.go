@@ -54,6 +54,7 @@ const (
 )
 
 type qqBotBindSession struct {
+	ID        string          `json:"id"`
 	Mode      string          `json:"mode"`
 	Code      string          `json:"code,omitempty"`
 	QRURL     string          `json:"qr_url,omitempty"`
@@ -164,16 +165,24 @@ func (s *Server) handleQQBotBind(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.startQQBotBind(w, r)
 	case http.MethodDelete:
-		// 返回取消后的实际状态：绑定已在取消前完成时为 bound，前端据此同步已保存的接收方。
-		status := qqBotBindCanceled
-		s.qqBotBindMu.Lock()
-		if session := s.qqBotBind; session != nil {
-			if !session.finished() {
-				session.cancel()
-				session.Status = qqBotBindCanceled
-			}
-			status = session.Status
+		ids := r.URL.Query()["id"]
+		if len(ids) != 1 || strings.TrimSpace(ids[0]) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "a binding session id is required")
+			return
 		}
+		// 返回取消后的实际状态：绑定已在取消前完成时为 bound，前端据此同步已保存的接收方。
+		s.qqBotBindMu.Lock()
+		session := s.qqBotBind
+		if session == nil || session.ID != ids[0] {
+			s.qqBotBindMu.Unlock()
+			writeError(w, http.StatusConflict, "qqbot_bind_changed", "the binding session has changed; reload its current state")
+			return
+		}
+		if !session.finished() {
+			session.cancel()
+			session.Status = qqBotBindCanceled
+		}
+		status := session.Status
 		s.qqBotBindMu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"status": status}})
 	default:
@@ -196,6 +205,14 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		delete(document, "mode")
+	}
+	s.qqBotBindMu.Lock()
+	configRevision := s.qqBotConfigRevision
+	stopping := s.qqBotStopping
+	s.qqBotBindMu.Unlock()
+	if stopping {
+		writeError(w, http.StatusServiceUnavailable, "qqbot_bind_unavailable", "the server is shutting down")
+		return
 	}
 	raw, _ := json.Marshal(document)
 	_, incoming, err := decodeNotificationConfig("qqbot", raw, false)
@@ -238,9 +255,15 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
 	var run func()
 	ctx, cancel := context.WithTimeout(s.qqBotWorkContext(), qqBotBindTTL)
 	session := &qqBotBindSession{
+		ID:   base64.RawURLEncoding.EncodeToString(id),
 		Mode: mode, ExpiresAt: time.Now().Add(qqBotBindTTL).UTC(),
 		Status: qqBotBindConnecting, cancel: cancel,
 	}
@@ -272,6 +295,12 @@ func (s *Server) startQQBotBind(w http.ResponseWriter, r *http.Request) {
 		s.qqBotBindMu.Unlock()
 		cancel()
 		writeError(w, http.StatusServiceUnavailable, "qqbot_bind_unavailable", "the server is shutting down")
+		return
+	}
+	if s.qqBotConfigRevision != configRevision {
+		s.qqBotBindMu.Unlock()
+		cancel()
+		writeError(w, http.StatusConflict, "qqbot_bind_changed", "QQ bot settings changed while starting the binding; reload them and retry")
 		return
 	}
 	if previous := s.qqBotBind; previous != nil && !previous.finished() {
@@ -349,12 +378,13 @@ func (s *Server) commitQQBotBind(
 ) (bool, error) {
 	s.qqBotBindMu.Lock()
 	defer s.qqBotBindMu.Unlock()
-	if session.Status == qqBotBindCanceled {
+	if s.qqBotBind != session || session.finished() {
 		return false, nil
 	}
 	if err := s.saveQQBotBinding(ctx, config, openID); err != nil {
 		return false, err
 	}
+	s.qqBotConfigRevision++
 	session.Status, session.Error, session.QRURL = qqBotBindBound, "", ""
 	return true, nil
 }
@@ -831,7 +861,7 @@ func fetchQQBotGateway(ctx context.Context, env qqBotBindEnv, token string) (str
 		return "", fmt.Errorf("%w: %w: QQ bot gateway lookup HTTP 401%s",
 			errProviderRejected, errQQBotTokenRejected, reply.describe())
 	}
-	if decodeErr != nil || response.StatusCode != http.StatusOK || reply.URL == "" {
+	if decodeErr != nil || response.StatusCode != http.StatusOK || reply.errorCode() != 0 || reply.URL == "" {
 		return "", fmt.Errorf("%w: QQ bot gateway lookup HTTP %d%s", errProviderRejected, response.StatusCode, reply.describe())
 	}
 	return env.checkGateway(ctx, reply.URL)
@@ -928,7 +958,7 @@ func replyQQBotBind(ctx context.Context, env qqBotBindEnv, appID, secret string,
 	if err != nil {
 		return err
 	}
-	if status < 200 || status >= 300 || reply.Code != 0 {
+	if status < 200 || status >= 300 || reply.errorCode() != 0 {
 		return fmt.Errorf("%w: QQ bot HTTP %d%s", errProviderRejected, status, reply.describe(event.OpenID))
 	}
 	return nil

@@ -183,9 +183,6 @@ func (s *Server) handleNotificationSettings(w http.ResponseWriter, r *http.Reque
 				writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
 				return
 			}
-			if channel == "qqbot" && !clearSecrets && !s.qqBotSecretReentered(w, r, config) {
-				return
-			}
 			clearFields := []string(nil)
 			if clearSecrets {
 				clearFields = store.DefaultNotificationSensitiveFields(channel)
@@ -209,7 +206,11 @@ func (s *Server) handleNotificationSettings(w http.ResponseWriter, r *http.Reque
 				return
 			}
 		}
-		if err := s.store.SaveNotificationSettings(r.Context(), values); err != nil {
+		if err := s.saveNotificationSettings(r.Context(), values); err != nil {
+			if errors.Is(err, errQQBotSecretRequired) {
+				writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
+				return
+			}
 			s.writeStoreError(w, err)
 			return
 		}
@@ -218,6 +219,34 @@ func (s *Server) handleNotificationSettings(w http.ResponseWriter, r *http.Reque
 		w.Header().Set("Allow", "GET, PUT")
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	}
+}
+
+// saveNotificationSettings serializes QQ configuration changes with binding commits.
+// A failed save leaves the binding intact, while a successful save invalidates
+// both active sessions and drafts that are still preparing their network setup.
+func (s *Server) saveNotificationSettings(ctx context.Context, values []store.NotificationSetting) error {
+	for _, value := range values {
+		if value.Channel != "qqbot" {
+			continue
+		}
+		s.qqBotBindMu.Lock()
+		defer s.qqBotBindMu.Unlock()
+		if len(value.ClearSensitiveFields) == 0 {
+			if err := s.checkQQBotSecretReentry(ctx, value.Config); err != nil {
+				return err
+			}
+		}
+		if err := s.store.SaveNotificationSettings(ctx, values); err != nil {
+			return err
+		}
+		s.qqBotConfigRevision++
+		if session := s.qqBotBind; session != nil && !session.finished() {
+			session.cancel()
+			session.Status = qqBotBindCanceled
+		}
+		return nil
+	}
+	return s.store.SaveNotificationSettings(ctx, values)
 }
 
 func (s *Server) writeNotificationSettings(w http.ResponseWriter, r *http.Request) {

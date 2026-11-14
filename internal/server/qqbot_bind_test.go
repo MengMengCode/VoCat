@@ -341,7 +341,7 @@ func TestQQBotBindReportsInvalidSessionAndCancels(t *testing.T) {
 	gateway := newQQBotFakeGateway(t)
 	gateway.invalidSession = true
 	api := newSettingsAPITest(t)
-	startQQBotBind(t, api, qqBotBindDraft)
+	binding := beginQQBotBind(t, api, qqBotBindDraft)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		data, _ := decodeSettingsResponse(t, api.request(t, http.MethodGet, "/api/settings/notifications/qqbot/bind", ""))["data"].(map[string]any)
@@ -356,7 +356,7 @@ func TestQQBotBindReportsInvalidSessionAndCancels(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	response := api.request(t, http.MethodDelete, "/api/settings/notifications/qqbot/bind", "")
+	response := api.request(t, http.MethodDelete, "/api/settings/notifications/qqbot/bind?id="+binding["id"].(string), "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("cancel: %d", response.Code)
 	}
@@ -555,9 +555,14 @@ func TestQQBotBindHidesCodeAndQRFromReadOnlyTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bindingID := ""
 	call := func(method, token, body string) (int, map[string]any) {
 		t.Helper()
-		request, err := http.NewRequest(method, app.server.URL+"/api/settings/notifications/qqbot/bind", strings.NewReader(body))
+		target := app.server.URL + "/api/settings/notifications/qqbot/bind"
+		if method == http.MethodDelete {
+			target += "?id=" + bindingID
+		}
+		request, err := http.NewRequest(method, target, strings.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -583,7 +588,9 @@ func TestQQBotBindHidesCodeAndQRFromReadOnlyTokens(t *testing.T) {
 	if status != http.StatusAccepted || data["qr_url"] == nil {
 		t.Fatalf("start: %d %#v", status, data)
 	}
+	bindingID = data["id"].(string)
 	t.Cleanup(func() { call(http.MethodDelete, write.Token, "") })
+	t.Cleanup(app.server.Config.Handler.(*Server).StopQQBotBinding)
 
 	if _, data := call(http.MethodGet, write.Token, ""); data["qr_url"] == nil || data["status"] != string(qqBotBindWaiting) {
 		t.Fatalf("writer view = %#v", data)
@@ -619,6 +626,7 @@ func TestQQBotCancelDuringCommitDoesNotSave(t *testing.T) {
 	session := &qqBotBindSession{Status: qqBotBindWaiting, cancel: func() {}}
 	// 持有绑定锁，让写入等待；期间取消会话，模拟 DELETE 与写入交错。
 	api.server.qqBotBindMu.Lock()
+	api.server.qqBotBind = session
 	type result struct {
 		committed bool
 		err       error
@@ -646,7 +654,7 @@ func TestQQBotCancelDuringCommitDoesNotSave(t *testing.T) {
 
 func TestQQBotCancelAfterCommitReportsBound(t *testing.T) {
 	api := newSettingsAPITest(t)
-	session := &qqBotBindSession{Mode: "code", Status: qqBotBindWaiting, cancel: func() {}}
+	session := &qqBotBindSession{ID: "completed", Mode: "code", Status: qqBotBindWaiting, cancel: func() {}}
 	api.server.qqBotBindMu.Lock()
 	api.server.qqBotBind = session
 	api.server.qqBotBindMu.Unlock()
@@ -655,7 +663,7 @@ func TestQQBotCancelAfterCommitReportsBound(t *testing.T) {
 		t.Fatalf("committed=%v err=%v", committed, err)
 	}
 	// 绑定完成后才到达的取消不改变结果，并返回实际状态，前端据此同步接收方。
-	response := api.request(t, http.MethodDelete, "/api/settings/notifications/qqbot/bind", "")
+	response := api.request(t, http.MethodDelete, "/api/settings/notifications/qqbot/bind?id=completed", "")
 	data, _ := decodeSettingsResponse(t, response)["data"].(map[string]any)
 	if response.Code != http.StatusOK || data["status"] != string(qqBotBindBound) {
 		t.Fatalf("delete: %d %#v", response.Code, data)
@@ -668,6 +676,7 @@ func TestQQBotCancelAfterCommitReportsBound(t *testing.T) {
 func TestQQBotCanceledBindDoesNotSave(t *testing.T) {
 	api := newSettingsAPITest(t)
 	session := &qqBotBindSession{Status: qqBotBindCanceled, cancel: func() {}}
+	api.server.qqBotBind = session
 	committed, err := api.server.commitQQBotBind(context.Background(), session, qqBotTestConfig(nil), "USER_OPENID")
 	if err != nil || committed {
 		t.Fatalf("committed=%v err=%v", committed, err)
@@ -730,4 +739,137 @@ func TestQQBotQRBindIgnoresDraftCredentials(t *testing.T) {
 	}
 	// 扫码绑定不使用表单中的凭据：改过 AppID 也可以开始扫码。
 	beginQQBotBind(t, api, `{"mode":"qr","app_id":"102000002","app_secret":"`+store.SecretMask+`"}`)
+}
+
+func TestQQBotCancelOnlyTargetsRequestedSession(t *testing.T) {
+	newQQBotFakeGateway(t)
+	api := newSettingsAPITest(t)
+	old := beginQQBotBind(t, api, `{"mode":"qr"}`)
+	current := beginQQBotBind(t, api, `{"mode":"qr"}`)
+	oldID, currentID := old["id"].(string), current["id"].(string)
+	if oldID == "" || currentID == "" || oldID == currentID {
+		t.Fatalf("binding ids are not distinct: old=%q current=%q", oldID, currentID)
+	}
+	for _, query := range []string{"", "?id=", "?id=" + currentID + "&id=" + currentID} {
+		response := api.request(t, http.MethodDelete, "/api/settings/notifications/qqbot/bind"+query, "")
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("cancel %q: %d %s", query, response.Code, response.Body)
+		}
+	}
+	response := api.request(t, http.MethodDelete, "/api/settings/notifications/qqbot/bind?id="+oldID, "")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("old cancel: %d %s", response.Code, response.Body)
+	}
+	if state := waitQQBotBind(t, api, qqBotBindWaiting); state["id"] != currentID {
+		t.Fatalf("old cancel replaced current binding: %#v", state)
+	}
+	response = api.request(t, http.MethodDelete, "/api/settings/notifications/qqbot/bind?id="+currentID, "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("current cancel: %d %s", response.Code, response.Body)
+	}
+	waitQQBotBind(t, api, qqBotBindCanceled)
+}
+
+func TestQQBotSettingsSaveInvalidatesPendingBinding(t *testing.T) {
+	for _, body := range []string{
+		`{"qqbot":{"enabled":false,"app_id":"","app_secret":"","target_openid":"","clear_secrets":true}}`,
+		`{"qqbot":{"enabled":false,"app_id":"999","app_secret":"replacement-secret","target_openid":"NEW_RECIPIENT","device_ids":["new-device"]}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			newQQBotFakeGateway(t)
+			api := newSettingsAPITest(t)
+			beginQQBotBind(t, api, qqBotBindDraft)
+			waitQQBotBind(t, api, qqBotBindWaiting)
+			api.server.qqBotBindMu.Lock()
+			old := api.server.qqBotBind
+			api.server.qqBotBindMu.Unlock()
+			response := api.request(t, http.MethodPut, "/api/settings/notifications", body)
+			if response.Code != http.StatusOK {
+				t.Fatalf("save: %d %s", response.Code, response.Body)
+			}
+			before, beforeConfig := storedQQBotConfig(t, api)
+			committed, err := api.server.commitQQBotBind(context.Background(), old, qqBotTestConfig(nil), "OLD_RECIPIENT")
+			if err != nil || committed {
+				t.Fatalf("obsolete binding committed=%v err=%v", committed, err)
+			}
+			after, afterConfig := storedQQBotConfig(t, api)
+			if after.Enabled != before.Enabled || mustString(t, afterConfig) != mustString(t, beforeConfig) {
+				t.Fatalf("obsolete binding changed saved config: before=%#v after=%#v", beforeConfig, afterConfig)
+			}
+			waitQQBotBind(t, api, qqBotBindCanceled)
+		})
+	}
+}
+
+func TestQQBotFailedSettingsSavePreservesBinding(t *testing.T) {
+	api := newSettingsAPITest(t)
+	canceled := false
+	session := &qqBotBindSession{ID: "active", Status: qqBotBindWaiting, cancel: func() { canceled = true }}
+	api.server.qqBotBind = session
+	// Invalid input is rejected before persistence and cannot cancel the binding.
+	response := api.request(t, http.MethodPut, "/api/settings/notifications", `{"qqbot":{"enabled":false,"unknown":true}}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid save: %d %s", response.Code, response.Body)
+	}
+	// A canceled transaction likewise leaves the active task and revision intact.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := api.server.saveNotificationSettings(ctx, []store.NotificationSetting{{
+		Channel: "qqbot", Config: json.RawMessage(`{}`),
+		ClearSensitiveFields: store.DefaultNotificationSensitiveFields("qqbot"),
+	}})
+	if err == nil || canceled || session.Status != qqBotBindWaiting || api.server.qqBotConfigRevision != 0 {
+		t.Fatalf("failed save changed binding: canceled=%v status=%s revision=%d err=%v", canceled, session.Status, api.server.qqBotConfigRevision, err)
+	}
+	committed, err := api.server.commitQQBotBind(context.Background(), session, qqBotTestConfig(nil), "RECIPIENT")
+	if err != nil || !committed {
+		t.Fatalf("binding no longer usable after failed save: committed=%v err=%v", committed, err)
+	}
+}
+
+func TestQQBotSettingsChangeRejectsPreparingBinding(t *testing.T) {
+	newQQBotFakeGateway(t)
+	api := newSettingsAPITest(t)
+	env, err := qqBotBindEnvironment(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, release := make(chan struct{}), make(chan struct{})
+	qqBotBindEnvironment = func(context.Context, map[string]any) (qqBotBindEnv, error) {
+		close(prepared)
+		<-release
+		return env, nil
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- api.request(t, http.MethodPost, "/api/settings/notifications/qqbot/bind", qqBotBindDraft)
+	}()
+	<-prepared
+	response := api.request(t, http.MethodPut, "/api/settings/notifications", `{"qqbot":{"enabled":false,"clear_secrets":true}}`)
+	close(release)
+	if response.Code != http.StatusOK {
+		t.Fatalf("save while preparing: %d %s", response.Code, response.Body)
+	}
+	response = <-done
+	if response.Code != http.StatusConflict || api.server.qqBotBind != nil {
+		t.Fatalf("stale draft started: status=%d body=%s session=%#v", response.Code, response.Body, api.server.qqBotBind)
+	}
+	setting, config := storedQQBotConfig(t, api)
+	if setting.Enabled || config["app_secret"] != nil {
+		t.Fatalf("preparing binding restored cleared configuration: %#v", config)
+	}
+}
+
+func TestQQBotOtherChannelSaveKeepsBinding(t *testing.T) {
+	api := newSettingsAPITest(t)
+	session := &qqBotBindSession{ID: "active", Status: qqBotBindWaiting, cancel: func() { t.Error("unrelated save canceled QQ binding") }}
+	api.server.qqBotBind = session
+	response := api.request(t, http.MethodPut, "/api/settings/notifications", `{"email":{"enabled":false}}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("save unrelated channel: %d %s", response.Code, response.Body)
+	}
+	committed, err := api.server.commitQQBotBind(context.Background(), session, qqBotTestConfig(nil), "RECIPIENT")
+	if err != nil || !committed {
+		t.Fatalf("unrelated save invalidated QQ binding: committed=%v err=%v", committed, err)
+	}
 }

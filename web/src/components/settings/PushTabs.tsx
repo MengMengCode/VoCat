@@ -510,6 +510,7 @@ export function QQBotTab({
 }) {
   const { t } = useI18n();
   const hasCredentials = !!value.appId.trim() && !!value.appSecret;
+  const configured = qqBotConfigured(value);
   const active = qqBotBindActive(bind);
   // 绑定完成后显示维护面板；清空配置后回到绑定流程。编辑维护面板中的单个字段不跳转。
   const [view, setView] = useState<QQBotView>(() => qqBotNextView("bind", value));
@@ -529,10 +530,14 @@ export function QQBotTab({
       autoStarted.current = false;
       return;
     }
-    if (autoStarted.current || active || binding) return;
+    if (active) {
+      autoStarted.current = true;
+      return;
+    }
+    if (autoStarted.current || configured || binding || syncing) return;
     autoStarted.current = true;
     onBind("qr");
-  }, [scanVisible]);
+  }, [scanVisible, active, configured, binding, syncing]);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
@@ -577,7 +582,7 @@ export function QQBotTab({
   const step = "flex items-center gap-2 text-sm font-semibold text-gray-800 dark:text-gray-100";
   const stepNumber = "flex h-5 w-5 items-center justify-center rounded-full bg-[#0ea5e9]/10 text-xs text-[#0ea5e9] dark:text-[#7dd3fc]";
   return (
-    <div className="pt-2">
+    <fieldset disabled={binding || syncing} className="min-w-0 pt-2">
       <ChannelHeader
         // 只有绑定完成后才有可清空的配置；清空后回到绑定流程。
         onClear={maintaining ? onClear : undefined}
@@ -724,6 +729,6 @@ export function QQBotTab({
           <Input value={value.proxy} onChange={(e) => onChange({ proxy: e.target.value })} disabled={active} placeholder={t("例如 http://127.0.0.1:7890")} />
         </Field>
       </div>
-    </div>
+    </fieldset>
   );
 }

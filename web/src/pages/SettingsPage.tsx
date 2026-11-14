@@ -84,11 +84,17 @@ export default function SettingsPage() {
     setForms(prev => ({ ...prev, [channel]: { ...defaultNotifyForms()[channel], enabled: prev[channel].enabled, deviceIds: prev[channel].deviceIds } }));
     setClearedChannels(prev => prev.includes(channel) ? prev : [...prev, channel]);
     // 清空表示用户不再要刚才的绑定结果：停止同步，避免稍后到达的响应恢复被清空的字段。
-    if (channel === "qqbot") setQQSyncPending(false);
+    if (channel === "qqbot") {
+      setQQSyncPending(false);
+      setQQBind(null);
+    }
   };
   const [testingMeow, setTestingMeow] = useState(false);
   const [testingQQBot, setTestingQQBot] = useState(false);
   const [qqBind, setQQBind] = useState<QQBotBindState | null>(null);
+  const [qqBindReady, setQQBindReady] = useState(false);
+  const qqBindActionPending = useRef(false);
+  const qqBindGeneration = useRef(0);
   const [startingQQBind, setStartingQQBind] = useState(false);
   // 绑定完成后要从服务器取回新的凭据和接收方；取回之前不允许保存，避免旧表单覆盖新绑定。
   const [qqSyncPending, setQQSyncPending] = useState(false);
@@ -101,7 +107,7 @@ export default function SettingsPage() {
     return () => { pageUnmounted.current = true; };
   }, []);
   const [activeTab, setActiveTab] = useState("telegram");
-  const [loadingNotif, setLoadingNotif] = useState(false);
+  const [loadingNotif, setLoadingNotif] = useState(true);
   const [savingNotif, setSavingNotif] = useState(false);
   const [testingWebhook, setTestingWebhook] = useState(false);
   const [testingBark, setTestingBark] = useState(false);
@@ -154,16 +160,36 @@ export default function SettingsPage() {
     }
   }, []);
 
-  const fetchNotifications = useCallback(async () => {
-    setLoadingNotif(true);
-    try {
-      const data = await api<NotificationSettings>("/settings/notifications");
-      setForms(formsFromNotifications(data || {}));
-    } catch {
-      message.error(t("通知配置加载失败"));
-    } finally {
-      setLoadingNotif(false);
-    }
+  // Restore configuration and any in-progress binding before permitting new work.
+  useEffect(() => {
+    let stopped = false;
+    let timer: number | undefined;
+    let reported = false;
+    const load = async () => {
+      try {
+        const [data, state] = await Promise.all([
+          api<NotificationSettings>("/settings/notifications"),
+          api<QQBotBindState | null>("/settings/notifications/qqbot/bind"),
+        ]);
+        if (stopped) return;
+        setForms(formsFromNotifications(data || {}));
+        setQQBind(state);
+        // The configuration request may have preceded the binding commit.
+        if (state?.status === "bound") setQQSyncPending(true);
+        setQQBindReady(true);
+        setLoadingNotif(false);
+      } catch {
+        if (stopped) return;
+        if (!reported) message.error(t("通知配置加载失败"));
+        reported = true;
+        timer = window.setTimeout(load, 2000);
+      }
+    };
+    void load();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   const fetchApiTokens = useCallback(async () => {
@@ -254,11 +280,10 @@ export default function SettingsPage() {
 
   useEffect(() => {
     void fetchSystemInfo();
-    void fetchNotifications();
     void fetchSecurity();
     void fetchSMSSettings();
     void fetchApiTokens();
-  }, [fetchSystemInfo, fetchNotifications, fetchSecurity, fetchSMSSettings, fetchApiTokens]);
+  }, [fetchSystemInfo, fetchSecurity, fetchSMSSettings, fetchApiTokens]);
 
   useEffect(() => {
     if (systemInfo.developer) {
@@ -385,7 +410,7 @@ export default function SettingsPage() {
   }, [password, refresh]);
 
   const onSaveNotifications = useCallback(async () => {
-    if (savingNotif) return;
+    if (savingNotif || !qqBindReady || loadingNotif || qqBindActionPending.current) return;
     // 绑定可能在下一次轮询前就已完成：从开始绑定到同步完结果之前都不允许保存，避免旧表单覆盖新绑定。
     if (startingQQBind || qqBotBindActive(qqBind)) {
       message.warning(t("QQ 机器人正在绑定，请完成或取消绑定后再保存"));
@@ -410,7 +435,7 @@ export default function SettingsPage() {
     } finally {
       setSavingNotif(false);
     }
-  }, [forms, clearedChannels, savingNotif, qqSyncPending, qqCancelPending, startingQQBind, qqBind]);
+  }, [forms, clearedChannels, savingNotif, loadingNotif, qqBindReady, qqSyncPending, qqCancelPending, startingQQBind, qqBind]);
 
   const onTestMeow = async () => {
     setTestingMeow(true);
@@ -437,6 +462,10 @@ export default function SettingsPage() {
   };
 
   const onBindQQBot = async (mode: QQBotBindMode) => {
+    if (!qqBindReady || loadingNotif || savingNotif || qqSyncPending || qqCancelPending ||
+      qqBotBindActive(qqBind) || qqBindActionPending.current) return;
+    qqBindActionPending.current = true;
+    qqBindGeneration.current++;
     setStartingQQBind(true);
     try {
       // 扫码不需要已有凭据；表单中的代理等设置仍随请求提交。
@@ -453,8 +482,9 @@ export default function SettingsPage() {
       if (unanswered) {
         try {
           const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
-          if (qqBotBindActive(state)) {
+          if (qqBotBindActive(state) || state?.status === "bound") {
             setQQBind(state);
+            if (state?.status === "bound") setQQSyncPending(true);
             return;
           }
         } catch {
@@ -463,18 +493,25 @@ export default function SettingsPage() {
       }
       message.error(apiMessage(error) || t("无法开始绑定"));
     } finally {
+      qqBindActionPending.current = false;
       setStartingQQBind(false);
     }
   };
 
   const onCancelQQBind = async () => {
+    if (!qqBind?.id || qqBindActionPending.current) return;
+    const id = qqBind.id;
+    qqBindActionPending.current = true;
+    qqBindGeneration.current++;
     // 先更新界面（例如从扫码切换到手动绑定时立即生效），再通知服务器停止，并确认服务器的实际状态。
     setQQBind(null);
     setQQCancelPending(true);
     try {
       let status: QQBotBindState["status"] | undefined;
       try {
-        status = (await api<{ status: QQBotBindState["status"] }>("/settings/notifications/qqbot/bind", { method: "DELETE" }))?.status;
+        status = (await api<{ status: QQBotBindState["status"] }>(
+          `/settings/notifications/qqbot/bind?id=${encodeURIComponent(id)}`, { method: "DELETE" },
+        ))?.status;
       } catch (error) {
         message.error(apiMessage(error) || t("取消绑定失败"));
       }
@@ -496,22 +533,24 @@ export default function SettingsPage() {
         }
       }
     } finally {
+      qqBindActionPending.current = false;
       setQQCancelPending(false);
     }
   };
 
   // 绑定进行中时轮询状态。上一次请求结束后才发下一次，避免过期的响应覆盖新状态。
-  const qqBindPolling = qqBotBindActive(qqBind);
+  const qqBindPolling = qqBotBindActive(qqBind) && !qqCancelPending && !startingQQBind;
   useEffect(() => {
     if (!qqBindPolling) return;
     let stopped = false;
     let timer: number | undefined;
+    const generation = qqBindGeneration.current;
     const poll = async () => {
       try {
         const state = await api<QQBotBindState | null>("/settings/notifications/qqbot/bind");
-        if (stopped) return;
+        if (stopped || generation !== qqBindGeneration.current) return;
+        setQQBind(state);
         if (state) {
-          setQQBind(state);
           if (state.status === "bound") {
             setQQSyncPending(true);
             message.success(t("已绑定 QQ 机器人"));
@@ -528,7 +567,7 @@ export default function SettingsPage() {
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [qqBindPolling]);
+  }, [qqBindPolling, qqBind?.id]);
 
   // 绑定成功后只刷新 QQ 机器人的凭据和接收方，不覆盖其他未保存的修改；失败时持续重试。
   useEffect(() => {
@@ -786,7 +825,7 @@ export default function SettingsPage() {
               </CardIcon>
               <CardTitle title={t("通知")} subtitle={t("Telegram / Bark / Email / Pushplus / Webhook / 企业微信 / 飞书 / Lark 群机器人 / MeoW / QQ 机器人")} />
             </div>
-            <Button variant="primary" loading={savingNotif} disabled={loadingNotif} onClick={onSaveNotifications} className="!border-0" icon={<CheckmarkRegular />}>
+            <Button variant="primary" loading={savingNotif} disabled={loadingNotif || !qqBindReady || startingQQBind || qqCancelPending || qqSyncPending || qqBotBindActive(qqBind)} onClick={onSaveNotifications} className="!border-0" icon={<CheckmarkRegular />}>
               {t("保存通知配置")}
             </Button>
           </div>
@@ -796,7 +835,7 @@ export default function SettingsPage() {
             <fieldset disabled={savingNotif} className="relative z-10 min-w-0 w-full overflow-hidden">
               <SegmentedTabs tabs={NOTIFY_TABS.map((tab) => ({ ...tab, label: t(tab.label) }))} value={activeTab} onChange={setActiveTab} />
               {activeTab === "meow" ? <MeowTab value={forms.meow} onChange={(p) => updateChannel("meow", p)} testing={testingMeow} onTest={onTestMeow} /> : null}
-              {activeTab === "qqbot" ? <QQBotTab onClear={() => void clearChannel("qqbot")} value={forms.qqbot} onChange={(p) => updateChannel("qqbot", p)} testing={testingQQBot} onTest={onTestQQBot} bind={qqBind} binding={startingQQBind} syncing={qqSyncPending || qqCancelPending} onBind={(mode) => void onBindQQBot(mode)} onCancelBind={() => void onCancelQQBind()} /> : null}
+              {activeTab === "qqbot" ? <QQBotTab onClear={() => void clearChannel("qqbot")} value={forms.qqbot} onChange={(p) => updateChannel("qqbot", p)} testing={testingQQBot} onTest={onTestQQBot} bind={qqBind} binding={startingQQBind || qqCancelPending || !qqBindReady} syncing={qqSyncPending} onBind={(mode) => void onBindQQBot(mode)} onCancelBind={() => void onCancelQQBind()} /> : null}
               {activeTab === "telegram" ? (
                 <TelegramTab onClear={() => void clearChannel("telegram")} value={forms.telegram} onChange={(p) => updateChannel("telegram", p)} />
               ) : null}

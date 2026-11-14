@@ -102,6 +102,8 @@ type Server struct {
 	// qqBotBindMu 保护 qqBotBind：当前或最近一次 QQ 机器人接收方绑定。
 	qqBotBindMu sync.Mutex
 	qqBotBind   *qqBotBindSession
+	// qqBotConfigRevision is protected by qqBotBindMu and invalidates older binding drafts.
+	qqBotConfigRevision uint64
 	// qqBotBindWork 跟踪绑定期间启动的后台协程；StopQQBotBinding 据此等待其退出。
 	qqBotBindWork sync.WaitGroup
 	// qqBotWorkCtx 是这些协程的父 context，由 qqBotBindMu 保护，StopQQBotBinding 取消它。

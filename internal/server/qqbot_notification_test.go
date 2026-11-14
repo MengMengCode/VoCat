@@ -33,16 +33,17 @@ func qqBotTestConfig(extra map[string]any) map[string]any {
 
 // qqBotFakePlatform 模拟开放平台的令牌接口和消息接口。
 type qqBotFakePlatform struct {
-	t           *testing.T
-	server      *httptest.Server
-	mu          sync.Mutex
-	tokens      int
-	messages    []qqBotFakeMessage
-	rejectToken string // 消息接口对该令牌返回 401
-	rejectAll   bool   // 消息接口对所有令牌返回 401
-	messageCode int    // 非零时消息接口返回业务错误
-	messageBody string // 非空时消息接口以 HTTP 200 返回该内容
-	tokenStatus int    // 非零时令牌接口返回该状态
+	t             *testing.T
+	server        *httptest.Server
+	mu            sync.Mutex
+	tokens        int
+	messages      []qqBotFakeMessage
+	rejectToken   string // 消息接口对该令牌返回 401
+	rejectAll     bool   // 消息接口对所有令牌返回 401
+	messageCode   int    // 非零时消息接口返回业务错误
+	messageBody   string // 非空时消息接口返回该内容
+	messageStatus int    // 自定义响应的状态码，默认 HTTP 200
+	tokenStatus   int    // 非零时令牌接口返回该状态
 }
 
 type qqBotFakeMessage struct {
@@ -103,6 +104,9 @@ func (platform *qqBotFakePlatform) serve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if platform.messageBody != "" {
+		if platform.messageStatus != 0 {
+			w.WriteHeader(platform.messageStatus)
+		}
 		_, _ = w.Write([]byte(platform.messageBody))
 		return
 	}
@@ -385,6 +389,60 @@ func TestQQBotTreatsHTTP200BusinessErrorsAsRejections(t *testing.T) {
 	platform.messageBody = `<html>gateway</html>`
 	if err := platform.post(t, qqBotTestConfig(nil), "a", "b"); !errors.Is(err, errProviderRejected) {
 		t.Fatalf("unreadable success response: %v", err)
+	}
+}
+
+func TestQQBotTreatsCurrentBusinessErrorsAsRejections(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusAccepted} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			platform := newQQBotFakePlatform(t)
+			platform.messageStatus = status
+			platform.messageBody = `{"err_code":40034100,"message":"active message frequency limit exceeded"}`
+			err := platform.post(t, qqBotTestConfig(nil), "a", "b")
+			if !errors.Is(err, errProviderRejected) || !strings.Contains(err.Error(), "40034100") {
+				t.Fatalf("HTTP %d business error: %v", status, err)
+			}
+			if len(platform.messages) != 1 || platform.tokens != 1 {
+				t.Fatalf("business error was retried: tokens=%d messages=%d", platform.tokens, len(platform.messages))
+			}
+		})
+	}
+}
+
+func TestQQBotRequiresMessageIDInSuccessResponse(t *testing.T) {
+	for _, body := range []string{`{}`, `null`, `{"id":""}`, `{"id":" "}`, `{"id":42}`} {
+		t.Run(body, func(t *testing.T) {
+			platform := newQQBotFakePlatform(t)
+			platform.messageBody = body
+			if err := platform.post(t, qqBotTestConfig(nil), "a", "b"); !errors.Is(err, errProviderRejected) {
+				t.Fatalf("accepted response without a valid message ID: %v", err)
+			}
+		})
+	}
+	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusAccepted} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			platform := newQQBotFakePlatform(t)
+			platform.messageStatus = status
+			platform.messageBody = `{"id":"msg-1","err_code":0,"timestamp":"2026-11-14T12:00:00+08:00"}`
+			if err := platform.post(t, qqBotTestConfig(nil), "a", "b"); err != nil {
+				t.Fatalf("valid message response: %v", err)
+			}
+		})
+	}
+}
+
+func TestQQBotMessageIDDoesNotOverrideBusinessErrors(t *testing.T) {
+	for _, body := range []string{
+		`{"id":"msg-1","err_code":40034100,"code":0}`,
+		`{"id":"msg-1","err_code":0,"code":22009}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			platform := newQQBotFakePlatform(t)
+			platform.messageBody = body
+			if err := platform.post(t, qqBotTestConfig(nil), "a", "b"); !errors.Is(err, errProviderRejected) {
+				t.Fatalf("accepted response with a business error: %v", err)
+			}
+		})
 	}
 }
 

@@ -172,7 +172,7 @@ func postQQBotNotification(
 			qqBotTokens.invalidate(endpoints.TokenURL, appID, token)
 			continue
 		}
-		if status < 200 || status >= 300 || reply.Code != 0 {
+		if status < 200 || status >= 300 || reply.errorCode() != 0 {
 			return fmt.Errorf("%w: QQ bot HTTP %d%s", errProviderRejected, status,
 				reply.describe(configString(config, "target_openid")))
 		}
@@ -195,7 +195,16 @@ func qqBotContent(title, text string) string {
 
 type qqBotReply struct {
 	Code    int    `json:"code"`
+	ErrCode int    `json:"err_code"`
 	Message string `json:"message"`
+}
+
+// errorCode 兼容旧版 code，并优先使用当前 OpenAPI 的 err_code。
+func (reply qqBotReply) errorCode() int {
+	if reply.ErrCode != 0 {
+		return reply.ErrCode
+	}
+	return reply.Code
 }
 
 // qqBotOpaqueValue 匹配平台说明中可能出现的 openid、令牌等长标识。
@@ -204,7 +213,7 @@ var qqBotOpaqueValue = regexp.MustCompile(`[A-Za-z0-9_-]{20,}`)
 // describe 只返回平台的错误码和说明。hidden 中的值（如收件 openid，可能较短）以及
 // 说明中的长标识（openid、令牌等）会被隐去。
 func (reply qqBotReply) describe(hidden ...string) string {
-	if reply.Code == 0 && reply.Message == "" {
+	if reply.errorCode() == 0 && reply.Message == "" {
 		return ""
 	}
 	redacted := strings.TrimSpace(reply.Message)
@@ -218,7 +227,7 @@ func (reply qqBotReply) describe(hidden ...string) string {
 	if len(message) > 200 {
 		message = message[:200]
 	}
-	return fmt.Sprintf(" (code %d: %s)", reply.Code, string(message))
+	return fmt.Sprintf(" (code %d: %s)", reply.errorCode(), string(message))
 }
 
 // postQQBotMessage 发送一次消息请求，返回 HTTP 状态和平台的错误码说明。
@@ -240,7 +249,10 @@ func postQQBotMessage(
 		return 0, qqBotReply{}, fmt.Errorf("QQ bot request failed: %w", unwrapURLError(err))
 	}
 	defer response.Body.Close()
-	var reply qqBotReply
+	var reply struct {
+		qqBotReply
+		ID string `json:"id"`
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		return 0, qqBotReply{}, fmt.Errorf("QQ bot response could not be read: %w", err)
@@ -249,7 +261,11 @@ func postQQBotMessage(
 	if err := json.Unmarshal(body, &reply); err != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
 		return 0, qqBotReply{}, fmt.Errorf("%w: QQ bot HTTP %d returned an unreadable response", errProviderRejected, response.StatusCode)
 	}
-	return response.StatusCode, reply, nil
+	// 单聊发送成功必须返回消息 ID。错误体可能使用 2xx，必须先保留业务错误供调用方处理。
+	if response.StatusCode >= 200 && response.StatusCode < 300 && reply.errorCode() == 0 && strings.TrimSpace(reply.ID) == "" {
+		return 0, qqBotReply{}, fmt.Errorf("%w: QQ bot HTTP %d did not return a message ID", errProviderRejected, response.StatusCode)
+	}
+	return response.StatusCode, reply.qqBotReply, nil
 }
 
 // unwrapURLError 去掉 url.Error 中的请求地址：地址包含收件 openid。
@@ -339,7 +355,7 @@ func fetchQQBotToken(
 	}
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if json.Unmarshal(body, &reply) != nil || response.StatusCode < 200 || response.StatusCode >= 300 ||
-		reply.Code != 0 || reply.AccessToken == "" {
+		reply.errorCode() != 0 || reply.AccessToken == "" {
 		return "", 0, fmt.Errorf("%w: QQ bot rejected AppID %s credentials (HTTP %d%s)",
 			errProviderRejected, appID, response.StatusCode, reply.describe())
 	}

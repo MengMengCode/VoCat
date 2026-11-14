@@ -366,6 +366,7 @@ export type QQBotBindStatus = "connecting" | "waiting" | "bound" | "expired" | "
 export type QQBotBindMode = "qr" | "code";
 
 export interface QQBotBindState {
+  id: string;
   mode: QQBotBindMode;
   code?: string;
   qrUrl?: string;
