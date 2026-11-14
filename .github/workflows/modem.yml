@@ -1,0 +1,38 @@
+name: Modem
+
+on:
+  pull_request:
+    paths:
+      - internal/modem/**
+      - internal/device/**
+      - go.mod
+      - go.sum
+      - .github/workflows/modem.yml
+  push:
+    branches: [master]
+    paths:
+      - internal/modem/**
+      - internal/device/**
+      - go.mod
+      - go.sum
+      - .github/workflows/modem.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modem-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./internal/modem ./internal/device
+      - run: go vet ./internal/modem ./internal/device
+      - run: go test -race ./internal/modem
