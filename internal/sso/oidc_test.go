@@ -265,6 +265,7 @@ func TestOIDCAutoTokenClientAuthenticationDoesNotRetryCredentials(t *testing.T) 
 func TestOIDCRejectsInvalidClaimsAndResponseIssuer(t *testing.T) {
 	f := newOIDCFixture(t)
 	p := f.provider(t)
+	// Invalid future claims must stay beyond the 60-second allowance during signing and transport.
 	cases := map[string]func(map[string]any){
 		"wrong issuer":    func(c map[string]any) { c["iss"] = "https://different.example" },
 		"wrong audience":  func(c map[string]any) { c["aud"] = "other-client" },
@@ -275,8 +276,8 @@ func TestOIDCRejectsInvalidClaimsAndResponseIssuer(t *testing.T) {
 		"missing iat":     func(c map[string]any) { delete(c, "iat") },
 		"string iat":      func(c map[string]any) { c["iat"] = fmt.Sprint(time.Now().Unix()) },
 		"null iat":        func(c map[string]any) { c["iat"] = nil },
-		"future iat":      func(c map[string]any) { c["iat"] = time.Now().Add(61 * time.Second).Unix() },
-		"future nbf":      func(c map[string]any) { c["nbf"] = time.Now().Add(61 * time.Second).Unix() },
+		"future iat":      func(c map[string]any) { c["iat"] = time.Now().Add(5 * time.Minute).Unix() },
+		"future nbf":      func(c map[string]any) { c["nbf"] = time.Now().Add(5 * time.Minute).Unix() },
 		"string nbf":      func(c map[string]any) { c["nbf"] = fmt.Sprint(time.Now().Unix()) },
 		"missing nonce":   func(c map[string]any) { delete(c, "nonce") },
 		"wrong nonce":     func(c map[string]any) { c["nonce"] = "another-flow" },
@@ -298,6 +299,28 @@ func TestOIDCRejectsInvalidClaimsAndResponseIssuer(t *testing.T) {
 	before := f.tokenCalls.Load()
 	if _, err := p.VerifyCallback(context.Background(), f.flow, "code", "https://other.example"); !errors.Is(err, ErrInvalidIdentity) || f.tokenCalls.Load() != before {
 		t.Fatal("response issuer mismatch was not rejected before exchange")
+	}
+}
+
+// TestOIDCNumericDateClockToleranceBoundary checks the exact allowance without wall-clock scheduling.
+func TestOIDCNumericDateClockToleranceBoundary(t *testing.T) {
+	now := time.Date(2026, time.November, 14, 0, 0, 0, 0, time.UTC)
+	upper := now.Add(60 * time.Second)
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "before allowance", value: fmt.Sprint(upper.Add(-time.Second).Unix()), want: true},
+		{name: "exact allowance", value: fmt.Sprint(upper.Unix()), want: true},
+		{name: "one millisecond beyond allowance", value: fmt.Sprintf("%d.001", upper.Unix()), want: false},
+		{name: "one second beyond allowance", value: fmt.Sprint(upper.Add(time.Second).Unix()), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validNumericDate(json.RawMessage(tc.value), upper); got != tc.want {
+				t.Fatalf("validNumericDate(%s) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
 	}
 }
 
