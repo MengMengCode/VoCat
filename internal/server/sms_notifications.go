@@ -56,7 +56,7 @@ func smsNotificationRetryDelay(consecutiveFailures int) time.Duration {
 	return delay
 }
 
-var smsOnlyNotificationChannels = []string{"bark", "email", "pushplus", "webhook", "wecom", "lark", "meow"}
+var smsOnlyNotificationChannels = []string{"bark", "email", "pushplus", "webhook", "wecom", "lark", "meow", "qqbot"}
 
 type smsNotification struct {
 	DeviceID    string
@@ -261,6 +261,9 @@ func validateSMSNotificationConfig(channel string, config map[string]any) error 
 	if channel == "meow" {
 		return validateMeowNotificationConfig(config)
 	}
+	if channel == "qqbot" {
+		return validateQQBotNotificationConfig(config)
+	}
 	switch channel {
 	case "bark", "email", "webhook", "wecom", "lark":
 		if err := validateNotificationTestConfig(channel, config); err != nil {
@@ -328,6 +331,9 @@ func (s *Server) logSMSNotificationError(channel string, err error) {
 func sendSMSNotification(ctx context.Context, channel string, config map[string]any, message smsNotification) error {
 	if channel == "meow" {
 		return sendMeowNotification(ctx, config, &message.DeviceID, "收到新短信", message.DetailText())
+	}
+	if channel == "qqbot" {
+		return sendQQBotNotification(ctx, config, &message.DeviceID, "收到新短信", message.DetailText())
 	}
 	switch channel {
 	case "bark":

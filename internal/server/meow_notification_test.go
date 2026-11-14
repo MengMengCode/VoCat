@@ -30,7 +30,7 @@ func TestMeowSettingsRoundTrip(t *testing.T) {
 	}
 	response = api.request(t, http.MethodGet, "/api/settings/notifications", "")
 	data := decodeSettingsResponse(t, response)["data"].(map[string]any)
-	if len(data) != 8 || data["meow"].(map[string]any)["nickname"] != "测试昵称" {
+	if len(data) != len(notificationChannels) || data["meow"].(map[string]any)["nickname"] != "测试昵称" {
 		t.Fatalf("unexpected channels: %#v", data)
 	}
 }

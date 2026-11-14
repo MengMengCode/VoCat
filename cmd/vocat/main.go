@@ -735,6 +735,7 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 	case err := <-serverError:
 		cancelDeviceStartup()
 		_ = protocolMux.Close()
+		handler.StopQQBotBinding()
 		return err
 	case <-signalContext.Done():
 		// Stop delayed OpenStick 410 startup work before the deferred VoWiFi
@@ -761,9 +762,12 @@ func run(logger *slog.Logger, logs *loghub.Hub) error {
 		if err := <-shutdownErrors; err != nil {
 			_ = plainServer.Close()
 			_ = tlsServer.Close()
+			handler.StopQQBotBinding()
 			return fmt.Errorf("graceful HTTP shutdown: %w", err)
 		}
 	}
+	// QQ 机器人绑定在请求结束后仍在后台运行：在数据库关闭前停止并等待。
+	handler.StopQQBotBinding()
 	return nil
 }
 

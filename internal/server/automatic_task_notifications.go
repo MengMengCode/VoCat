@@ -91,6 +91,9 @@ func sendAutomaticTaskNotification(ctx context.Context, channel string, config m
 	if channel == "meow" {
 		return sendMeowNotification(ctx, config, &message.Task.DeviceID, message.Title, message.DetailText())
 	}
+	if channel == "qqbot" {
+		return sendQQBotNotification(ctx, config, &message.Task.DeviceID, message.Title, message.DetailText())
+	}
 	switch channel {
 	case "telegram":
 		return sendTelegramTextNotification(ctx, config, message.Task.DeviceID, message.Text)
