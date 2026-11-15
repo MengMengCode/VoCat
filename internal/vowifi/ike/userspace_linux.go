@@ -645,11 +645,13 @@ func (handle *linuxUserspaceHandle) copyTUNToRelay() {
 			}
 			return
 		}
+		if !userspaceOutboundPacketAllowed(buffer[:count], handle.config) {
+			continue
+		}
 		protected, err := handle.tunnel.seal(buffer[:count])
 		if err != nil {
-			// The kernel may emit IPv6 DAD/link-local traffic when the TUN is
-			// brought up, and local processes may attempt unrelated routes.
-			// Traffic-selector enforcement is a filter, not a session failure.
+			// Traffic-selector rejection drops this packet while the session
+			// continues to carry eligible IMS traffic.
 			if errors.Is(err, errESPPolicyDrop) {
 				continue
 			}
@@ -681,6 +683,9 @@ func (handle *linuxUserspaceHandle) copyRelayToTUN() {
 			// Invalid ICVs, replays, malformed padding, and packets outside the
 			// negotiated selectors are untrusted network input. Drop them
 			// without allowing a forged datagram to tear down the CHILD_SA.
+			continue
+		}
+		if !userspaceInboundPacketAllowed(cleartext) {
 			continue
 		}
 		if err := writeTUNPacket(handle.runContext, handle.tunFD, cleartext); err != nil {
