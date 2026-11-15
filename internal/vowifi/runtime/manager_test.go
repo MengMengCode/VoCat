@@ -333,22 +333,23 @@ func TestManagerReEnablesWhenSwitchChangesDuringDisable(t *testing.T) {
 	if _, err := manager.RequestEnabled("ec20", true); err != nil {
 		t.Fatal(err)
 	}
-	waitForPhase := func(want vowifi.Phase) {
+	waitForIdlePhase := func(want vowifi.Phase) {
 		t.Helper()
 		deadline := time.Now().Add(time.Second)
 		for time.Now().Before(deadline) {
-			state, err := manager.State("ec20")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if state.Phase == want {
+			manager.mu.Lock()
+			item := manager.entries["ec20"]
+			state := item.orchestrator.State()
+			busy := item.busy
+			manager.mu.Unlock()
+			if state.Phase == want && !busy {
 				return
 			}
 			time.Sleep(time.Millisecond)
 		}
-		t.Fatalf("phase did not become %s", want)
+		t.Fatalf("lifecycle did not become idle in phase %s", want)
 	}
-	waitForPhase(vowifi.PhaseSMSReady)
+	waitForIdlePhase(vowifi.PhaseSMSReady)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -368,7 +369,7 @@ func TestManagerReEnablesWhenSwitchChangesDuringDisable(t *testing.T) {
 		t.Fatalf("enable while disable is active: %v", err)
 	}
 	close(release)
-	waitForPhase(vowifi.PhaseSMSReady)
+	waitForIdlePhase(vowifi.PhaseSMSReady)
 }
 
 func TestManagerRejectsUnknownDevice(t *testing.T) {
