@@ -312,15 +312,25 @@ curl -H "Authorization: Bearer vcat_..." http://127.0.0.1:7575/api/devices
 啟用 Telegram 通知並配置好 Chat ID 與 Admin ID 後，機器人支援：
 
 ```text
-/status [device]
-/esim <device>
-/switch <device> <iccid>
-/wfc <device> <status|on|off|reconnect>
-/sms <device> <number> <message>
-/ussd <device> <code>
-/ussd_reply <session> <input>
-/ussd_cancel <session>
+/vocat_menu
+/vocat_status [device]
+/vocat_esim <device>
+/vocat_switch <device> <iccid>
+/vocat_wfc <device> <status|on|off|reconnect>
+/vocat_sms <device> <number> <message>
+/vocat_call <device> <number> <seconds>
+/vocat_calls <device>
+/vocat_answer <device>
+/vocat_hangup <device>
+/vocat_at <device> <at_command>
+/vocat_ussd <device> <code>
+/vocat_ussd_reply <session> <input>
+/vocat_ussd_cancel <session>
+/vocat_cancel
+/vocat_help
 ```
+
+所有指令皆使用 `vocat_` 前綴。群組中機器人會忽略一般聊天訊息與其他機器人的指令，僅回應 `/vocat_*`。互動式輸入（號碼、簡訊內容、AT 指令、USSD 回覆）在等待期間仍接受純文字。
 
 設定檔切換與簡訊提交使用一次性確認按鈕。機器人不暴露 eSIM 下載、刪除或重新命名命令。
 

@@ -492,15 +492,25 @@ the design record.
 When Telegram notifications are enabled and both Chat ID and Admin ID are configured, the bot supports:
 
 ```text
-/status [device]
-/esim <device>
-/switch <device> <iccid>
-/wfc <device> <status|on|off|reconnect>
-/sms <device> <number> <message>
-/ussd <device> <code>
-/ussd_reply <session> <input>
-/ussd_cancel <session>
+/vocat_menu
+/vocat_status [device]
+/vocat_esim <device>
+/vocat_switch <device> <iccid>
+/vocat_wfc <device> <status|on|off|reconnect>
+/vocat_sms <device> <number> <message>
+/vocat_call <device> <number> <seconds>
+/vocat_calls <device>
+/vocat_answer <device>
+/vocat_hangup <device>
+/vocat_at <device> <at_command>
+/vocat_ussd <device> <code>
+/vocat_ussd_reply <session> <input>
+/vocat_ussd_cancel <session>
+/vocat_cancel
+/vocat_help
 ```
+
+All commands are namespaced with the `vocat_` prefix. In group chats the bot ignores ordinary messages and commands aimed at other bots; only `/vocat_*` triggers a reply. Interactive prompts (phone number, SMS body, AT command, USSD reply) still accept plain text while they are active.
 
 Profile switching and SMS submission use one-time confirmation buttons. The bot does not expose eSIM download, delete, or rename commands.
 

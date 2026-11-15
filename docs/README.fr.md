@@ -312,15 +312,25 @@ Consultez [docs/API_MCP_DEVELOPMENT_PLAN.md](API_MCP_DEVELOPMENT_PLAN.md) pour l
 Lorsque les notifications Telegram sont activées et que le Chat ID et l'Admin ID sont configurés, le bot prend en charge :
 
 ```text
-/status [device]
-/esim <device>
-/switch <device> <iccid>
-/wfc <device> <status|on|off|reconnect>
-/sms <device> <number> <message>
-/ussd <device> <code>
-/ussd_reply <session> <input>
-/ussd_cancel <session>
+/vocat_menu
+/vocat_status [device]
+/vocat_esim <device>
+/vocat_switch <device> <iccid>
+/vocat_wfc <device> <status|on|off|reconnect>
+/vocat_sms <device> <number> <message>
+/vocat_call <device> <number> <seconds>
+/vocat_calls <device>
+/vocat_answer <device>
+/vocat_hangup <device>
+/vocat_at <device> <at_command>
+/vocat_ussd <device> <code>
+/vocat_ussd_reply <session> <input>
+/vocat_ussd_cancel <session>
+/vocat_cancel
+/vocat_help
 ```
+
+Toutes les commandes utilisent le préfixe `vocat_`. Dans les groupes, le bot ignore les messages ordinaires et les commandes destinées à d'autres bots ; il ne répond qu'à `/vocat_*`. Les saisies interactives (numéro, texte du SMS, commande AT, réponse USSD) acceptent toujours du texte brut pendant leur attente.
 
 La commutation de profil et l'envoi de SMS utilisent des boutons de confirmation à usage unique. Le bot n'expose pas de commandes de téléchargement, suppression ou renommage d'eSIM.
 

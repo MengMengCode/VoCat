@@ -312,15 +312,25 @@ curl -H "Authorization: Bearer vcat_..." http://127.0.0.1:7575/api/devices
 Когда уведомления Telegram включены и настроены Chat ID и Admin ID, бот поддерживает:
 
 ```text
-/status [device]
-/esim <device>
-/switch <device> <iccid>
-/wfc <device> <status|on|off|reconnect>
-/sms <device> <number> <message>
-/ussd <device> <code>
-/ussd_reply <session> <input>
-/ussd_cancel <session>
+/vocat_menu
+/vocat_status [device]
+/vocat_esim <device>
+/vocat_switch <device> <iccid>
+/vocat_wfc <device> <status|on|off|reconnect>
+/vocat_sms <device> <number> <message>
+/vocat_call <device> <number> <seconds>
+/vocat_calls <device>
+/vocat_answer <device>
+/vocat_hangup <device>
+/vocat_at <device> <at_command>
+/vocat_ussd <device> <code>
+/vocat_ussd_reply <session> <input>
+/vocat_ussd_cancel <session>
+/vocat_cancel
+/vocat_help
 ```
+
+Все команды используют префикс `vocat_`. В групповых чатах бот игнорирует обычные сообщения и команды других ботов, отвечая только на `/vocat_*`. Интерактивный ввод (номер, текст SMS, AT-команда, ответ USSD) по-прежнему принимает обычный текст, пока активен.
 
 Переключение профилей и отправка SMS используют одноразовые кнопки подтверждения. Бот не предоставляет команды загрузки, удаления или переименования eSIM.
 

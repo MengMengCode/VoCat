@@ -320,15 +320,25 @@ curl -H "Authorization: Bearer vcat_..." http://127.0.0.1:7575/api/devices
 عند تفعيل إشعارات Telegram وإعداد كلٍّ من Chat ID وAdmin ID، يدعم البوت:
 
 ```text
-/status [device]
-/esim <device>
-/switch <device> <iccid>
-/wfc <device> <status|on|off|reconnect>
-/sms <device> <number> <message>
-/ussd <device> <code>
-/ussd_reply <session> <input>
-/ussd_cancel <session>
+/vocat_menu
+/vocat_status [device]
+/vocat_esim <device>
+/vocat_switch <device> <iccid>
+/vocat_wfc <device> <status|on|off|reconnect>
+/vocat_sms <device> <number> <message>
+/vocat_call <device> <number> <seconds>
+/vocat_calls <device>
+/vocat_answer <device>
+/vocat_hangup <device>
+/vocat_at <device> <at_command>
+/vocat_ussd <device> <code>
+/vocat_ussd_reply <session> <input>
+/vocat_ussd_cancel <session>
+/vocat_cancel
+/vocat_help
 ```
+
+تستخدم جميع الأوامر البادئة `vocat_`. في المحادثات الجماعية يتجاهل البوت الرسائل العادية وأوامر البوتات الأخرى، ولا يرد إلا على `/vocat_*`. لا تزال المدخلات التفاعلية (الرقم، نص الرسالة القصيرة، أمر AT، رد USSD) تقبل النص العادي أثناء انتظارها.
 
 تستخدم عمليتا تبديل الملفات الشخصية وإرسال الرسائل القصيرة أزرار تأكيد لمرة واحدة. لا يعرض البوت أوامر تنزيل أو حذف أو إعادة تسمية eSIM.
 

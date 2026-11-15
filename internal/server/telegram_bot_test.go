@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -143,12 +144,178 @@ func TestTelegramTextRequestUsesEditForCallbackMenus(t *testing.T) {
 }
 
 func TestParseTelegramCommand(t *testing.T) {
-	command, remainder := parseTelegramCommand("  /sms@vocat_bot EC20 +447700900123 hello world  ")
-	if command != "sms" || remainder != "EC20 +447700900123 hello world" {
-		t.Fatalf("parseTelegramCommand() = %q, %q", command, remainder)
+	tests := []struct {
+		text      string
+		command   string
+		remainder string
+	}{
+		{"  /vocat_sms@vocat_bot EC20 +447700900123 hello world  ", "sms", "EC20 +447700900123 hello world"},
+		{"/VOCAT_STATUS\nEC20", "status", "EC20"},
+		{"/vocat_menu@vocat_bot", "menu", ""},
+		{"/vocat_", "", ""},
+		{"ordinary message", "", ""},
+		{"/status EC20", "", ""},
+		{"/status@other_bot", "", ""},
+		{"/menu", "", ""},
+		{"/start", "", ""},
+		{"/help@some_bot", "", ""},
+		{"", "", ""},
 	}
-	if command, _ := parseTelegramCommand("ordinary message"); command != "" {
-		t.Fatalf("non-command parsed as %q", command)
+	for _, item := range tests {
+		command, remainder := parseTelegramCommand(item.text)
+		if command != item.command || remainder != item.remainder {
+			t.Errorf("parseTelegramCommand(%q) = %q, %q; want %q, %q",
+				item.text, command, remainder, item.command, item.remainder)
+		}
+	}
+}
+
+// telegramRecordingTransport records every Bot API call without contacting
+// Telegram. getUpdates returns an empty slice so bootstrap can be exercised.
+type telegramRecordingTransport struct {
+	texts    []string
+	payloads []map[string]any
+}
+
+func (transport *telegramRecordingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	var payload map[string]any
+	_ = json.NewDecoder(request.Body).Decode(&payload)
+	transport.payloads = append(transport.payloads, payload)
+	if text, ok := payload["text"].(string); ok {
+		transport.texts = append(transport.texts, text)
+	}
+	body := `{"ok":true,"result":{}}`
+	if strings.HasSuffix(request.URL.Path, "getUpdates") {
+		body = `{"ok":true,"result":[]}`
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+func newTestTelegramBot(transport *telegramRecordingTransport) (*telegramBot, telegramRuntimeConfig) {
+	bot := &telegramBot{
+		server: &Server{},
+		client: &http.Client{Transport: transport},
+		inputs: make(map[string]telegramInputState),
+	}
+	config := telegramRuntimeConfig{
+		Token: "123456:test-token", BaseURL: "https://8.8.8.8", ChatID: "1", AdminID: 2,
+	}
+	return bot, config
+}
+
+func testTelegramUpdate(text string) telegramUpdate {
+	return telegramUpdate{
+		Message: &telegramMessage{
+			From: &telegramUser{ID: 2},
+			Chat: telegramChat{ID: 1},
+			Text: text,
+		},
+	}
+}
+
+func TestTelegramIgnoresUnrelatedGroupMessages(t *testing.T) {
+	transport := &telegramRecordingTransport{}
+	bot, config := newTestTelegramBot(transport)
+	ctx := context.Background()
+	for _, text := range []string{
+		"大家早上好",
+		"https://example.com/notice",
+		"/status@other_bot",
+		"/menu",
+		"/start",
+		"/help",
+		"/vocat_",
+		"   ",
+	} {
+		bot.handleUpdate(ctx, config, testTelegramUpdate(text))
+	}
+	if len(transport.texts) != 0 {
+		t.Fatalf("unrelated group messages produced replies: %v", transport.texts)
+	}
+
+	// Prefixed commands still work, including the /command@BotName form used
+	// by Telegram in group chats.
+	bot.handleUpdate(ctx, config, testTelegramUpdate("/vocat_menu@vocat_bot"))
+	if len(transport.texts) != 1 || !strings.Contains(transport.texts[0], "Vocat 控制中心") {
+		t.Fatalf("prefixed command was not answered: %v", transport.texts)
+	}
+}
+
+func TestTelegramPlainTextStillFeedsActiveDialog(t *testing.T) {
+	transport := &telegramRecordingTransport{}
+	bot, config := newTestTelegramBot(transport)
+	bot.setInput(telegramInputState{Kind: "sms_phone", DeviceID: "dev-1", ChatID: 1, AdminID: 2})
+	bot.handleUpdate(context.Background(), config, testTelegramUpdate("+447700900123"))
+	if len(transport.texts) != 1 || !strings.Contains(transport.texts[0], "请输入短信内容") {
+		t.Fatalf("dialog did not consume plain text: %v", transport.texts)
+	}
+	state, ok := bot.input(1, 2)
+	if !ok || state.Kind != "sms_text" || state.Argument != "+447700900123" {
+		t.Fatalf("dialog state was not advanced: %+v", state)
+	}
+}
+
+func TestTelegramPrefixedCommandOverridesPendingDialog(t *testing.T) {
+	transport := &telegramRecordingTransport{}
+	bot, config := newTestTelegramBot(transport)
+	bot.setInput(telegramInputState{Kind: "sms_phone", DeviceID: "dev-1", ChatID: 1, AdminID: 2})
+	bot.handleUpdate(context.Background(), config, testTelegramUpdate("/vocat_cancel"))
+	if _, ok := bot.input(1, 2); ok {
+		t.Fatal("prefixed command left the pending dialog active")
+	}
+	if len(transport.texts) != 1 || !strings.Contains(transport.texts[0], "已取消") {
+		t.Fatalf("cancel command was not answered: %v", transport.texts)
+	}
+}
+
+func TestTelegramHelpListsOnlyPrefixedCommands(t *testing.T) {
+	transport := &telegramRecordingTransport{}
+	bot, config := newTestTelegramBot(transport)
+	bot.handleUpdate(context.Background(), config, testTelegramUpdate("/vocat_help"))
+	if len(transport.texts) != 1 {
+		t.Fatalf("help command sent %d replies: %v", len(transport.texts), transport.texts)
+	}
+	text := transport.texts[0]
+	for _, name := range []string{"menu", "status", "esim", "switch", "wfc", "sms", "call", "at", "ussd", "ussd_reply", "ussd_cancel"} {
+		if !strings.Contains(text, telegramCommandName(name)) {
+			t.Errorf("help text is missing %s", telegramCommandName(name))
+		}
+	}
+	for _, bare := range []string{"\n/status ", "\n/menu", "\n/sms ", "\n/ussd "} {
+		if strings.Contains(text, bare) {
+			t.Errorf("help text still advertises bare command %q", bare)
+		}
+	}
+}
+
+func TestTelegramBootstrapRegistersPrefixedCommands(t *testing.T) {
+	transport := &telegramRecordingTransport{}
+	bot, config := newTestTelegramBot(transport)
+	if _, err := bot.bootstrap(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	var registered []string
+	for _, payload := range transport.payloads {
+		commands, ok := payload["commands"].([]any)
+		if !ok {
+			continue
+		}
+		for _, raw := range commands {
+			if item, ok := raw.(map[string]any); ok {
+				if name, ok := item["command"].(string); ok {
+					registered = append(registered, name)
+				}
+			}
+		}
+	}
+	want := telegramCommandPrefix + "menu," + telegramCommandPrefix + "status," +
+		telegramCommandPrefix + "cancel," + telegramCommandPrefix + "help"
+	if got := strings.Join(registered, ","); got != want {
+		t.Fatalf("registered commands = %q, want %q", got, want)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"vocat/internal/device"
 	"vocat/internal/modem"
@@ -31,9 +32,21 @@ const (
 	telegramMenuTTL            = 15 * time.Minute
 	telegramInputTTL           = 10 * time.Minute
 	telegramMaxDialDuration    = 10 * time.Minute
+
+	// telegramCommandPrefix namespaces every command this bot understands. In a
+	// group chat Telegram delivers every message to the bot, so only commands
+	// carrying this prefix may trigger a reply; plain chat messages and commands
+	// belonging to other bots stay silent.
+	telegramCommandPrefix = "vocat_"
 )
 
 var telegramTokenInURLPattern = regexp.MustCompile(`bot[0-9]{5,20}:[A-Za-z0-9_-]{20,128}`)
+
+// telegramCommandName returns the user-facing form of a command, e.g.
+// telegramCommandName("status") -> "/vocat_status".
+func telegramCommandName(name string) string {
+	return "/" + telegramCommandPrefix + name
+}
 
 type telegramRuntimeConfig struct {
 	Token     string
@@ -194,9 +207,9 @@ func (bot *telegramBot) poll(ctx context.Context) {
 	}
 }
 
-// bootstrap discards stale Telegram updates. Replaying an old /sms, /call, or
-// /switch command after a service restart would be unsafe even though each
-// command has its own confirmation step.
+// bootstrap discards stale Telegram updates. Replaying an old /vocat_sms,
+// /vocat_call, or /vocat_switch command after a service restart would be unsafe
+// even though each command has its own confirmation step.
 func (bot *telegramBot) bootstrap(ctx context.Context, config telegramRuntimeConfig) (int64, error) {
 	requestContext, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -211,10 +224,10 @@ func (bot *telegramBot) bootstrap(ctx context.Context, config telegramRuntimeCon
 		}
 	}
 	commands := []map[string]string{
-		{"command": "menu", "description": "打开可视化操作菜单"},
-		{"command": "status", "description": "查看全部设备状态"},
-		{"command": "cancel", "description": "取消当前输入或操作"},
-		{"command": "help", "description": "查看帮助"},
+		{"command": telegramCommandPrefix + "menu", "description": "打开可视化操作菜单"},
+		{"command": telegramCommandPrefix + "status", "description": "查看全部设备状态"},
+		{"command": telegramCommandPrefix + "cancel", "description": "取消当前输入或操作"},
+		{"command": telegramCommandPrefix + "help", "description": "查看帮助"},
 	}
 	if err := bot.call(requestContext, config, "setMyCommands", map[string]any{"commands": commands}, nil); err != nil {
 		bot.warn("register Telegram command menu", err)
@@ -254,16 +267,24 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 	if message == nil || message.From == nil || !bot.authorized(config, message.Chat.ID, message.From.ID) {
 		return
 	}
+	if strings.TrimSpace(message.Text) == "" {
+		return
+	}
 	command, remainder := parseTelegramCommand(message.Text)
-	if _, waiting := bot.input(message.Chat.ID, message.From.ID); waiting &&
-		command != "menu" && command != "start" && command != "cancel" {
-		bot.handleInputMessage(ctx, config, message)
-		return
-	}
 	if command == "" {
-		bot.handleInputMessage(ctx, config, message)
+		// Not one of our commands. Plain group chatter, links, captions and
+		// commands aimed at other bots must stay silent. Only a live
+		// interactive dialog (phone number, SMS body, AT command, USSD reply)
+		// is allowed to consume arbitrary text.
+		if _, waiting := bot.input(message.Chat.ID, message.From.ID); waiting {
+			bot.handleInputMessage(ctx, config, message)
+		}
 		return
 	}
+	// A prefixed command always takes precedence over a pending dialog, so
+	// checking status or cancelling never leaks the command text into an SMS
+	// or AT input.
+	bot.clearInput(message.Chat.ID, message.From.ID)
 	switch command {
 	case "start", "menu":
 		bot.sendMainMenu(ctx, config, message.Chat.ID)
@@ -292,7 +313,7 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 			return
 		}
 		if len(parts) != 2 {
-			bot.sendText(ctx, config, message.Chat.ID, "用法：/switch <设备ID> <目标ICCID>", nil)
+			bot.sendText(ctx, config, message.Chat.ID, "用法：/vocat_switch <设备ID> <目标ICCID>", nil)
 			return
 		}
 		bot.confirmESIMSwitch(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1])
@@ -307,7 +328,7 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 			return
 		}
 		if len(parts) != 2 {
-			bot.sendText(ctx, config, message.Chat.ID, "请选择菜单按钮，或使用 /wfc <设备ID> <status|on|off|reconnect>。", bot.homeKeyboard())
+			bot.sendText(ctx, config, message.Chat.ID, "请选择菜单按钮，或使用 /vocat_wfc <设备ID> <status|on|off|reconnect>。", bot.homeKeyboard())
 			return
 		}
 		bot.handleVoWiFi(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1])
@@ -322,7 +343,7 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 			return
 		}
 		if len(parts) != 3 {
-			bot.sendText(ctx, config, message.Chat.ID, "用法：/sms <设备ID> <号码> <短信内容>", nil)
+			bot.sendText(ctx, config, message.Chat.ID, "用法：/vocat_sms <设备ID> <号码> <短信内容>", nil)
 			return
 		}
 		bot.confirmSMS(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1], parts[2])
@@ -337,7 +358,7 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 			return
 		}
 		if len(parts) != 3 {
-			bot.sendText(ctx, config, message.Chat.ID, "用法：/call <设备ID> <号码> <持续秒数>\n拨号后将在指定时间自动挂断，不处理通话音频。", nil)
+			bot.sendText(ctx, config, message.Chat.ID, "用法：/vocat_call <设备ID> <号码> <持续秒数>\n拨号后将在指定时间自动挂断，不处理通话音频。", nil)
 			return
 		}
 		seconds, err := strconv.Atoi(parts[2])
@@ -375,7 +396,7 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 			return
 		}
 		if len(parts) != 2 {
-			bot.sendText(ctx, config, message.Chat.ID, "用法：/at <设备ID> <AT指令>\n示例：/at EC20 AT+CSQ", nil)
+			bot.sendText(ctx, config, message.Chat.ID, "用法：/vocat_at <设备ID> <AT指令>\n示例：/vocat_at EC20 AT+CSQ", nil)
 			return
 		}
 		bot.handleATCommand(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1])
@@ -390,21 +411,21 @@ func (bot *telegramBot) handleUpdate(ctx context.Context, config telegramRuntime
 			return
 		}
 		if len(parts) != 2 {
-			bot.sendText(ctx, config, message.Chat.ID, "用法：/ussd <设备ID> <USSD代码>\n示例：/ussd EC20 *100#", nil)
+			bot.sendText(ctx, config, message.Chat.ID, "用法：/vocat_ussd <设备ID> <USSD代码>\n示例：/vocat_ussd EC20 *100#", nil)
 			return
 		}
 		bot.handleUSSDCommand(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1])
 	case "ussd_reply":
 		parts := splitTelegramArguments(remainder, 2)
 		if len(parts) != 2 {
-			bot.sendText(ctx, config, message.Chat.ID, "用法：/ussd_reply <会话ID> <回复内容>", nil)
+			bot.sendText(ctx, config, message.Chat.ID, "用法：/vocat_ussd_reply <会话ID> <回复内容>", nil)
 			return
 		}
 		bot.handleUSSDReply(ctx, config, message.Chat.ID, message.From.ID, parts[0], parts[1])
 	case "ussd_cancel":
 		sessionID := strings.TrimSpace(remainder)
 		if sessionID == "" || strings.ContainsAny(sessionID, " \t\r\n") {
-			bot.sendText(ctx, config, message.Chat.ID, "用法：/ussd_cancel <会话ID>", nil)
+			bot.sendText(ctx, config, message.Chat.ID, "用法：/vocat_ussd_cancel <会话ID>", nil)
 			return
 		}
 		bot.handleUSSDCancel(ctx, config, message.Chat.ID, message.From.ID, sessionID)
@@ -566,7 +587,7 @@ func (bot *telegramBot) homeKeyboard() map[string]any {
 func (bot *telegramBot) sendMainMenu(ctx context.Context, config telegramRuntimeConfig, chatID int64) {
 	bot.clearInput(chatID, config.AdminID)
 	bot.sendMenuText(ctx, config, chatID,
-		"Vocat 控制中心\n\n请选择设备或直接查看全部设备状态。发送 /menu 可随时返回这里。",
+		"Vocat 控制中心\n\n请选择设备或直接查看全部设备状态。发送 "+telegramCommandName("menu")+" 可随时返回这里。",
 		telegramKeyboard(
 			[]map[string]string{telegramButton("📱 设备操作", "menu:devices")},
 			[]map[string]string{
@@ -797,23 +818,25 @@ func (bot *telegramBot) sendExpiredMenu(ctx context.Context, config telegramRunt
 }
 
 func (bot *telegramBot) sendHelp(ctx context.Context, config telegramRuntimeConfig, chatID int64) {
+	cmd := func(name string) string { return telegramCommandName(name) }
 	text := strings.Join([]string{
 		"Vocat Telegram 控制", "",
-		"推荐直接发送 /menu，使用按钮完成设备和功能选择。以下命令仅用于兼容和高级操作：", "",
-		"/status [设备ID] — 查看设备、SIM、蜂窝与 VoWiFi 状态",
-		"/esim <设备ID> — 只读查看已安装 Profile",
-		"/switch <设备ID> <ICCID> — 切换到已安装 Profile（需确认）",
-		"/wfc <设备ID> <status|on|off|reconnect> — 管理 WiFi Calling",
-		"/sms <设备ID> <号码> <内容> — 发送短信（需确认）",
-		"/call <设备ID> <号码> <秒数> — 拨号并在 1–600 秒后自动挂断（需确认）",
-		"/calls <设备ID> — 查看模块当前通话",
-		"/answer <设备ID> — 按当前通道接听来电",
-		"/hangup <设备ID> — 立即挂断",
-		"/at <设备ID> <AT指令> — 执行经过安全校验的单行 AT 指令",
-		"/ussd <设备ID> <代码> — 发送 USSD 指令",
-		"/ussd_reply <会话ID> <内容> — 回复交互式 USSD 菜单",
-		"/ussd_cancel <会话ID> — 取消交互式 USSD 会话",
+		"推荐直接发送 " + cmd("menu") + "，使用按钮完成设备和功能选择。以下命令仅用于兼容和高级操作：", "",
+		cmd("status") + " [设备ID] — 查看设备、SIM、蜂窝与 VoWiFi 状态",
+		cmd("esim") + " <设备ID> — 只读查看已安装 Profile",
+		cmd("switch") + " <设备ID> <ICCID> — 切换到已安装 Profile（需确认）",
+		cmd("wfc") + " <设备ID> <status|on|off|reconnect> — 管理 WiFi Calling",
+		cmd("sms") + " <设备ID> <号码> <内容> — 发送短信（需确认）",
+		cmd("call") + " <设备ID> <号码> <秒数> — 拨号并在 1–600 秒后自动挂断（需确认）",
+		cmd("calls") + " <设备ID> — 查看模块当前通话",
+		cmd("answer") + " <设备ID> — 按当前通道接听来电",
+		cmd("hangup") + " <设备ID> — 立即挂断",
+		cmd("at") + " <设备ID> <AT指令> — 执行经过安全校验的单行 AT 指令",
+		cmd("ussd") + " <设备ID> <代码> — 发送 USSD 指令",
+		cmd("ussd_reply") + " <会话ID> <内容> — 回复交互式 USSD 菜单",
+		cmd("ussd_cancel") + " <会话ID> — 取消交互式 USSD 会话",
 		"",
+		"群聊中机器人仅响应以 /" + telegramCommandPrefix + " 开头的命令，其他消息一律静默忽略（等待交互式输入时的纯文本除外）。",
 		"Bot 不提供 eSIM 下载、删除或改名，也不采集或转发通话音频。控制命令只接受设置中的 Admin ID。",
 	}, "\n")
 	keyboard := telegramKeyboard(
@@ -1065,7 +1088,7 @@ func telegramSignalLine(snapshot *device.Snapshot) string {
 
 func (bot *telegramBot) sendESIMProfiles(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID string) {
 	if deviceID == "" {
-		bot.sendText(ctx, config, chatID, "用法：/esim <设备ID>", nil)
+		bot.sendText(ctx, config, chatID, "用法：/vocat_esim <设备ID>", nil)
 		return
 	}
 	_, _, physicalID, err := bot.device(deviceID)
@@ -1462,7 +1485,7 @@ func (bot *telegramBot) executeTimedCall(ctx context.Context, config telegramRun
 
 func (bot *telegramBot) executeSimpleCallAction(ctx context.Context, config telegramRuntimeConfig, chatID, adminID int64, deviceID, action string) {
 	if deviceID == "" {
-		bot.sendText(ctx, config, chatID, fmt.Sprintf("用法：/%s <设备ID>", map[string]string{"status": "calls", "answer": "answer", "hangup": "hangup"}[action]), nil)
+		bot.sendText(ctx, config, chatID, fmt.Sprintf("用法：%s <设备ID>", telegramCommandName(map[string]string{"status": "calls", "answer": "answer", "hangup": "hangup"}[action])), nil)
 		return
 	}
 	stored, entry, physicalID, err := bot.device(deviceID)
@@ -2594,17 +2617,32 @@ func redactTelegramText(value, token string) string {
 	return telegramTokenInURLPattern.ReplaceAllString(value, "bot[REDACTED]")
 }
 
+// parseTelegramCommand recognises only commands addressed to this bot, for
+// example /vocat_status or /vocat_status@VoCatBot. Bare commands such as
+// /status, commands aimed at other bots and all plain text return an empty
+// command, which keeps the bot silent in shared group chats.
 func parseTelegramCommand(text string) (string, string) {
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, "/") {
 		return "", ""
 	}
-	commandToken, remainder, _ := strings.Cut(text, " ")
+	commandToken, remainder := text, ""
+	if index := strings.IndexFunc(text, unicode.IsSpace); index >= 0 {
+		commandToken, remainder = text[:index], strings.TrimSpace(text[index:])
+	}
 	commandToken = strings.TrimPrefix(commandToken, "/")
 	if at := strings.IndexByte(commandToken, '@'); at >= 0 {
 		commandToken = commandToken[:at]
 	}
-	return strings.ToLower(strings.TrimSpace(commandToken)), strings.TrimSpace(remainder)
+	commandToken = strings.ToLower(strings.TrimSpace(commandToken))
+	if !strings.HasPrefix(commandToken, telegramCommandPrefix) {
+		return "", ""
+	}
+	command := strings.TrimPrefix(commandToken, telegramCommandPrefix)
+	if command == "" {
+		return "", ""
+	}
+	return command, remainder
 }
 
 func splitTelegramArguments(value string, count int) []string {
