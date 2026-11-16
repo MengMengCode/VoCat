@@ -239,7 +239,7 @@ built-in QMI WDS client instead of `qmi-network` CID/PDH state files. The
 one-click installer installs and verifies the corresponding utilities. For manual deployment,
 Debian/Ubuntu uses `apt install libqmi-utils`; Arch Linux uses
 `pacman -S libqmi`, Alpine uses `apk add qmi-utils`, and OpenWrt uses
-`opkg install qmi-utils`.
+`opkg install qmi-utils` (24.10 and earlier) / `apk add qmi-utils` (25.x and later).
 
 `vocat doctor --repair-dji-qmi` checks for `qmicli` before changing any USB
 driver binding or asserting DTR. If the utility is unavailable, the command

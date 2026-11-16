@@ -14,7 +14,7 @@
 #     it directly in SQLite through stdin, and prints it ONCE.
 #   - Administrator credentials are never stored in /etc/vocat/env.
 #   - Verifies Linux XFRM/IPsec support required by IMS; on OpenWrt it tries
-#     the matching opkg packages first.
+#     the matching opkg (OpenWrt <= 24.10) or apk (OpenWrt 25+) packages first.
 #   - (Re)writes a systemd or OpenWrt/procd service and restarts it.
 #
 # Published script: must contain no secrets, IPs, or passwords.
@@ -151,15 +151,74 @@ xfrm_works() {
     command -v ip >/dev/null 2>&1 && ip xfrm state list >/dev/null 2>&1
 }
 
-opkg_has_package() {
-    opkg list "$1" 2>/dev/null | grep -q "^$1 -"
+# OpenWrt <= 24.10 ships opkg; OpenWrt 25.x and newer snapshots replaced it
+# with apk (apk-tools v3). Detect whichever this firmware uses. apk is
+# preferred when both exist because new images may keep an opkg shim around.
+OPENWRT_PKG_MGR=""
+OPENWRT_PKG_UPDATED=0
+
+# Sets OPENWRT_PKG_MGR to apk, opkg or none. Must not be called through $(...)
+# so the cached result survives in the main shell.
+has_openwrt_pkg_manager() {
+    if [ -z "$OPENWRT_PKG_MGR" ]; then
+        if ! is_openwrt; then
+            OPENWRT_PKG_MGR="none"
+        elif command -v apk >/dev/null 2>&1; then
+            OPENWRT_PKG_MGR="apk"
+        elif command -v opkg >/dev/null 2>&1; then
+            OPENWRT_PKG_MGR="opkg"
+        else
+            OPENWRT_PKG_MGR="none"
+        fi
+    fi
+    [ "$OPENWRT_PKG_MGR" != "none" ]
+}
+
+# Refresh the feed index once per run. Returns non-zero when the refresh fails
+# so callers can decide whether to warn; the existing index is still usable.
+openwrt_pkg_update() {
+    has_openwrt_pkg_manager || return 1
+    [ "$OPENWRT_PKG_UPDATED" -eq 0 ] || return 0
+    OPENWRT_PKG_UPDATED=1
+    case "$OPENWRT_PKG_MGR" in
+        apk) apk update >/dev/null 2>&1 ;;
+        opkg) opkg update >/dev/null 2>&1 ;;
+    esac
+}
+
+# openwrt_pkg_available NAME: succeeds when the feed offers exactly NAME.
+openwrt_pkg_available() {
+    has_openwrt_pkg_manager || return 1
+    case "$OPENWRT_PKG_MGR" in
+        apk)
+            # apk prints "name-version" (or just "name" with -q); match the
+            # exact package name so e.g. "ccid" does not match "libccid".
+            apk search -e "$1" 2>/dev/null | grep -Eq "^$1(-[0-9].*)?\$"
+            ;;
+        opkg)
+            opkg list "$1" 2>/dev/null | grep -q "^$1 -"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# openwrt_pkg_install NAME...: install packages from the firmware's own feed.
+openwrt_pkg_install() {
+    [ "$#" -gt 0 ] || return 0
+    has_openwrt_pkg_manager || return 1
+    case "$OPENWRT_PKG_MGR" in
+        apk) apk add "$@" >/dev/null 2>&1 ;;
+        opkg) opkg install "$@" >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
 }
 
 install_openwrt_vowifi_packages() {
+    has_openwrt_pkg_manager || return 0
     msg "正在检查 OpenWrt/Kwrt 的 VoWiFi 内核组件..." "Checking OpenWrt/Kwrt VoWiFi kernel components..."
-    opkg update >/dev/null 2>&1 || msg \
-        "警告：opkg 软件源更新失败，将使用现有索引继续检查。" \
-        "Warning: opkg feed update failed; checking the existing index."
+    openwrt_pkg_update || msg \
+        "警告：${OPENWRT_PKG_MGR} 软件源更新失败，将使用现有索引继续检查。" \
+        "Warning: ${OPENWRT_PKG_MGR} feed update failed; checking the existing index."
 
     local packages=""
     local package
@@ -168,15 +227,16 @@ install_openwrt_vowifi_packages() {
         kmod-ipsec kmod-ipsec4 kmod-ipsec6 \
         kmod-crypto-authenc kmod-crypto-cbc kmod-crypto-aes \
         kmod-crypto-hmac kmod-crypto-sha1; do
-        if opkg_has_package "$package"; then
+        if openwrt_pkg_available "$package"; then
             packages="$packages $package"
         fi
     done
     if [ -n "$packages" ]; then
-        # Kernel packages must come from this firmware's own feed. opkg checks
-        # the kernel ABI and refuses mismatched modules; never bypass that check.
+        # Kernel packages must come from this firmware's own feed. Both opkg
+        # and apk check the kernel ABI and refuse mismatched modules; never
+        # bypass that check with any force option.
         # shellcheck disable=SC2086
-        opkg install $packages >/dev/null 2>&1 || true
+        openwrt_pkg_install $packages || true
     fi
 }
 
@@ -207,16 +267,16 @@ install_qmi_support() {
         return 0
     fi
 
-    if is_openwrt && command -v opkg >/dev/null 2>&1; then
-        opkg update >/dev/null 2>&1 || true
+    if has_openwrt_pkg_manager; then
+        openwrt_pkg_update || true
         local pkgs=""
-        opkg_has_package qmi-utils && pkgs="$pkgs qmi-utils"
-        opkg_has_package libqmi && pkgs="$pkgs libqmi"
+        openwrt_pkg_available qmi-utils && pkgs="$pkgs qmi-utils"
+        openwrt_pkg_available libqmi && pkgs="$pkgs libqmi"
         if [ -z "$pkgs" ]; then
             pkgs="qmi-utils libqmi"
         fi
         # shellcheck disable=SC2086
-        opkg install $pkgs >/dev/null 2>&1 || true
+        openwrt_pkg_install $pkgs || true
     elif command -v apt-get >/dev/null 2>&1; then
         apt-get update -qq || true
         DEBIAN_FRONTEND=noninteractive apt-get install -y libqmi-utils || true
@@ -242,15 +302,15 @@ install_qmi_support() {
 install_pcsc_support() {
     msg "正在检查 USB SIM 读卡器的 PC/SC 运行环境..." "Checking the PC/SC environment for USB SIM readers..."
     local installed=0
-    if is_openwrt && command -v opkg >/dev/null 2>&1; then
-        opkg update >/dev/null 2>&1 || true
+    if has_openwrt_pkg_manager; then
+        openwrt_pkg_update || true
         local packages=""
-        opkg_has_package pcscd && packages="$packages pcscd"
-        opkg_has_package ccid && packages="$packages ccid"
-        opkg_has_package libccid && packages="$packages libccid"
+        openwrt_pkg_available pcscd && packages="$packages pcscd"
+        openwrt_pkg_available ccid && packages="$packages ccid"
+        openwrt_pkg_available libccid && packages="$packages libccid"
         if [ -n "$packages" ]; then
             # shellcheck disable=SC2086
-            opkg install $packages >/dev/null 2>&1 && installed=1 || true
+            openwrt_pkg_install $packages && installed=1 || true
         fi
     elif command -v apt-get >/dev/null 2>&1; then
         if apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y pcscd libccid; then
@@ -290,7 +350,7 @@ check_vowifi_environment() {
         return
     fi
 
-    if is_openwrt && command -v opkg >/dev/null 2>&1; then
+    if has_openwrt_pkg_manager; then
         # Install the crypto algorithms even when NETLINK_XFRM already works;
         # some minimal images provide xfrm_user but omit AES-CBC/authenc.
         install_openwrt_vowifi_packages
