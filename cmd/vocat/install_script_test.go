@@ -98,3 +98,53 @@ func TestInstallerSupportsOpenWrtOpkgAndApk(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallerEnsuresOpenWrtKernelDrivers(t *testing.T) {
+	scriptBytes, err := os.ReadFile("../../scripts/install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	for _, required := range []string{
+		"install_openwrt_kernel_drivers()",
+		"ensure_openwrt_kmod kmod-usb-serial usbserial /sys/bus/usb-serial",
+		"ensure_openwrt_kmod kmod-tun tun /sys/class/misc/tun",
+		"ensure_openwrt_kmod kmod-usb-net-qmi-wwan qmi_wwan /sys/bus/usb/drivers/qmi_wwan",
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("installer is missing OpenWrt kernel driver handling %q", required)
+		}
+	}
+	if strings.Contains(script, "--vowifi-only") || strings.Contains(script, "VOWIFI_ONLY") {
+		t.Error("installer must not introduce a separate VoWiFi-only option; use --skip-vowifi-check")
+	}
+
+	start := strings.Index(script, "install_openwrt_kernel_drivers() {")
+	if start < 0 {
+		t.Fatal("install_openwrt_kernel_drivers body not found")
+	}
+	body := script[start:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end]
+	}
+	// Only the TUN driver (VoWiFi IMS tunnel) may be skipped with
+	// --skip-vowifi-check; USB serial and QMI WWAN stay mandatory.
+	skipAt := strings.Index(body, `if [ "$SKIP_VOWIFI_CHECK" = "1" ]`)
+	tunAt := strings.Index(body, "ensure_openwrt_kmod kmod-tun")
+	serialAt := strings.Index(body, "ensure_openwrt_kmod kmod-usb-serial")
+	qmiAt := strings.Index(body, "ensure_openwrt_kmod kmod-usb-net-qmi-wwan")
+	if skipAt < 0 || tunAt < skipAt {
+		t.Error("kmod-tun must be skipped when --skip-vowifi-check is given")
+	}
+	if serialAt < 0 || serialAt > skipAt || qmiAt < 0 || qmiAt > skipAt {
+		t.Error("kmod-usb-serial and kmod-usb-net-qmi-wwan must be required regardless of --skip-vowifi-check")
+	}
+	if !strings.Contains(body, "die ") {
+		t.Error("installer must fail when required OpenWrt kernel drivers are missing")
+	}
+
+	mainStart := strings.LastIndex(script, "# --- Main ")
+	if mainStart < 0 || !strings.Contains(script[mainStart:], "install_openwrt_kernel_drivers") {
+		t.Error("installer does not check OpenWrt kernel drivers from its main path")
+	}
+}

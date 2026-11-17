@@ -15,6 +15,9 @@
 #   - Administrator credentials are never stored in /etc/vocat/env.
 #   - Verifies Linux XFRM/IPsec support required by IMS; on OpenWrt it tries
 #     the matching opkg (OpenWrt <= 24.10) or apk (OpenWrt 25+) packages first.
+#   - On OpenWrt, ensures the USB serial (kmod-usb-serial) and QMI WWAN
+#     (kmod-usb-net-qmi-wwan) drivers, plus the TUN driver (kmod-tun) used by
+#     the VoWiFi IMS tunnel unless --skip-vowifi-check is given.
 #   - (Re)writes a systemd or OpenWrt/procd service and restarts it.
 #
 # Published script: must contain no secrets, IPs, or passwords.
@@ -238,6 +241,68 @@ install_openwrt_vowifi_packages() {
         # shellcheck disable=SC2086
         openwrt_pkg_install $packages || true
     fi
+}
+
+# kmod_ready MODULE SYSFS_PATH: succeeds when the driver is usable, whether it
+# is built into the kernel or loadable. SYSFS_PATH only exists once the driver
+# is registered, so try loading the module before giving up.
+kmod_ready() {
+    [ -e "$2" ] && return 0
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe "$1" >/dev/null 2>&1 || true
+    fi
+    [ -e "$2" ]
+}
+
+# ensure_openwrt_kmod PACKAGE MODULE SYSFS_PATH: install PACKAGE from the
+# firmware's own feed when the driver is missing, then verify it again.
+ensure_openwrt_kmod() {
+    local package="$1" module="$2" path="$3"
+    kmod_ready "$module" "$path" && return 0
+    if has_openwrt_pkg_manager; then
+        openwrt_pkg_update || true
+        if openwrt_pkg_available "$package"; then
+            # Same rule as the VoWiFi kmods: never force a mismatched kernel ABI.
+            openwrt_pkg_install "$package" || true
+        fi
+    fi
+    kmod_ready "$module" "$path"
+}
+
+install_openwrt_kernel_drivers() {
+    is_openwrt || return 0
+    msg \
+        "正在检查 OpenWrt/Kwrt 的 USB 串口、TUN 与 QMI 网卡驱动..." \
+        "Checking OpenWrt/Kwrt USB serial, TUN and QMI WWAN drivers..."
+    local missing=""
+    # USB serial core: modem AT ports (ttyUSB*).
+    ensure_openwrt_kmod kmod-usb-serial usbserial /sys/bus/usb-serial || \
+        missing="$missing kmod-usb-serial"
+    # QMI WWAN: cdc-wdm control channel and wwan data interface.
+    ensure_openwrt_kmod kmod-usb-net-qmi-wwan qmi_wwan /sys/bus/usb/drivers/qmi_wwan || \
+        missing="$missing kmod-usb-net-qmi-wwan"
+    # TUN: VoWiFi IMS tunnel interface. Not needed when VoWiFi is skipped.
+    if [ "$SKIP_VOWIFI_CHECK" = "1" ]; then
+        msg \
+            "已跳过 VoWiFi 检查：不检查 TUN 驱动 kmod-tun。" \
+            "VoWiFi check skipped: not checking the TUN driver kmod-tun."
+    elif ! ensure_openwrt_kmod kmod-tun tun /sys/class/misc/tun; then
+        missing="$missing kmod-tun"
+    fi
+
+    if [ -n "$missing" ]; then
+        local hint_zh="" hint_en=""
+        case "$missing" in
+            *kmod-tun*)
+                hint_zh="kmod-tun 仅 VoWiFi 需要；仅使用非 VoWiFi 功能时可加 --skip-vowifi-check。"
+                hint_en=" kmod-tun is only needed for VoWiFi; use --skip-vowifi-check only for non-VoWiFi operation."
+                ;;
+        esac
+        die \
+            "当前 OpenWrt/Kwrt 内核 $(uname -r) 缺少驱动且软件源无法安装:${missing}。请使用包含这些 kmod 的同版本固件；严禁安装其他内核版本的 kmod。${hint_zh}" \
+            "The OpenWrt/Kwrt kernel $(uname -r) is missing drivers that its feed cannot provide:${missing}. Use a firmware built with these kmods; never force kmods from another kernel.${hint_en}"
+    fi
+    msg "OpenWrt/Kwrt 内核驱动已就绪。" "OpenWrt/Kwrt kernel drivers are ready."
 }
 
 install_linux_ip_tool() {
@@ -685,6 +750,7 @@ enable_and_start() {
 detect_arch
 install_qmi_support
 install_pcsc_support
+install_openwrt_kernel_drivers
 check_vowifi_environment
 if [ "$CHECK_ENV" -eq 1 ]; then
     msg "VoCat 运行环境检查完成。" "VoCat host environment check completed."
