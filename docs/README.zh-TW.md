@@ -202,7 +202,7 @@ USB SIM 讀卡機使用 Linux PC/SC 服務。一鍵安裝程式會在支援的�
 
 ### QMI 命令列工具
 
-VoCat 使用 `qmicli` 驗證 QMI 控制通道是否就緒，並使用 `qmi-proxy` 多工存取該通道。封包數據連線階段由內建 QMI WDS 用戶端管理，而非使用 `qmi-network` 的 CID/PDH 狀態檔。一鍵安裝程式會安裝並驗證對應工具。手動部署時，Debian/Ubuntu 使用 `apt install libqmi-utils`；Arch Linux 使用 `pacman -S libqmi`，Alpine 使用 `apk add qmi-utils`，OpenWrt 使用 `opkg install qmi-utils`。
+VoCat 使用 `qmicli` 驗證 QMI 控制通道是否就緒，並使用 `qmi-proxy` 多工存取該通道。封包數據連線階段由內建 QMI WDS 用戶端管理，而非使用 `qmi-network` 的 CID/PDH 狀態檔。一鍵安裝程式會安裝並驗證對應工具。手動部署時，Debian/Ubuntu 使用 `apt install libqmi-utils`；Arch Linux 使用 `pacman -S libqmi`，Alpine 使用 `apk add qmi-utils`，OpenWrt 使用 `opkg install qmi-utils`（24.10 及更早）或 `apk add qmi-utils`（25.x 及更新）。
 
 `vocat doctor --repair-dji-qmi` 會在變更任何 USB 驅動程式繫結或將 DTR 設為有效狀態之前檢查 `qmicli`。如果該工具無法使用，指令會停止並提供安裝提示，保持裝置目前狀態不變。
 

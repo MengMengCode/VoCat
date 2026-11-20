@@ -210,7 +210,7 @@ chmod 755 /opt/vocat-host-nft
 
 ### أدوات سطر أوامر QMI
 
-يستخدم VoCat الأداة `qmicli` للتحقق من جاهزية قناة تحكم QMI، و`qmi-proxy` لتعدد الإرسال في الوصول إليها. تُدار جلسات بيانات الحزم بواسطة عميل QMI WDS المدمج بدلًا من ملفات حالة CID/PDH الخاصة بـ `qmi-network`. يثبّت برنامج التثبيت بنقرة واحدة الأدوات المقابلة ويتحقق منها. للنشر اليدوي، يستخدم Debian/Ubuntu الأمر `apt install libqmi-utils`، ويستخدم Arch Linux الأمر `pacman -S libqmi`، ويستخدم Alpine الأمر `apk add qmi-utils`، ويستخدم OpenWrt الأمر `opkg install qmi-utils`.
+يستخدم VoCat الأداة `qmicli` للتحقق من جاهزية قناة تحكم QMI، و`qmi-proxy` لتعدد الإرسال في الوصول إليها. تُدار جلسات بيانات الحزم بواسطة عميل QMI WDS المدمج بدلًا من ملفات حالة CID/PDH الخاصة بـ `qmi-network`. يثبّت برنامج التثبيت بنقرة واحدة الأدوات المقابلة ويتحقق منها. للنشر اليدوي، يستخدم Debian/Ubuntu الأمر `apt install libqmi-utils`، ويستخدم Arch Linux الأمر `pacman -S libqmi`، ويستخدم Alpine الأمر `apk add qmi-utils`، ويستخدم OpenWrt الأمر `opkg install qmi-utils` (≤ 24.10) / `apk add qmi-utils` (25.x+).
 
 يتحقق `vocat doctor --repair-dji-qmi` من وجود `qmicli` قبل تغيير أي ربط لبرنامج تشغيل USB أو تفعيل إشارة DTR. إذا كانت الأداة غير متاحة، يتوقف الأمر مع إرشاد لتثبيتها ويترك حالة الجهاز الحالية دون تغيير.
 

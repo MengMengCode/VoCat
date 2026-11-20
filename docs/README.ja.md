@@ -202,7 +202,7 @@ USB SIM リーダーは Linux の PC/SC サービスを使用します。ワン�
 
 ### QMI コマンドラインユーティリティ
 
-VoCat は `qmicli` を使って QMI 制御チャネルの準備ができていることを確認し、`qmi-proxy` を使ってそのアクセスを多重化します。パケットデータセッションは、`qmi-network` の CID/PDH 状態ファイルではなく、組み込みの QMI WDS クライアントが管理します。ワンクリックインストーラーは対応するユーティリティをインストールして検証します。手動デプロイの場合、Debian/Ubuntu では `apt install libqmi-utils`、Arch Linux では `pacman -S libqmi`、Alpine では `apk add qmi-utils`、OpenWrt では `opkg install qmi-utils` を使用します。
+VoCat は `qmicli` を使って QMI 制御チャネルの準備ができていることを確認し、`qmi-proxy` を使ってそのアクセスを多重化します。パケットデータセッションは、`qmi-network` の CID/PDH 状態ファイルではなく、組み込みの QMI WDS クライアントが管理します。ワンクリックインストーラーは対応するユーティリティをインストールして検証します。手動デプロイの場合、Debian/Ubuntu では `apt install libqmi-utils`、Arch Linux では `pacman -S libqmi`、Alpine では `apk add qmi-utils`、OpenWrt では `opkg install qmi-utils` (≤ 24.10) / `apk add qmi-utils` (25.x+) を使用します。
 
 `vocat doctor --repair-dji-qmi` は、USB ドライバーの関連付けを変更したり、DTR 信号をアサートしたりする前に、`qmicli` の有無を確認します。ユーティリティが利用できない場合、コマンドはインストール方法を案内して停止し、デバイスの現在の状態を変更しません。
 

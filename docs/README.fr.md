@@ -202,7 +202,7 @@ Les lecteurs de cartes SIM USB utilisent le service Linux PC/SC. L'installateur 
 
 ### Utilitaires QMI en ligne de commande
 
-VoCat utilise `qmicli` pour vérifier qu'un canal de contrôle QMI est prêt et `qmi-proxy` pour multiplexer son accès. Les sessions de données par paquets sont gérées par le client QMI WDS intégré plutôt que par les fichiers d'état CID/PDH de `qmi-network`. L'installateur en un clic installe et vérifie les utilitaires correspondants. Pour un déploiement manuel, Debian/Ubuntu utilise `apt install libqmi-utils` ; Arch Linux utilise `pacman -S libqmi`, Alpine utilise `apk add qmi-utils`, et OpenWrt utilise `opkg install qmi-utils`.
+VoCat utilise `qmicli` pour vérifier qu'un canal de contrôle QMI est prêt et `qmi-proxy` pour multiplexer son accès. Les sessions de données par paquets sont gérées par le client QMI WDS intégré plutôt que par les fichiers d'état CID/PDH de `qmi-network`. L'installateur en un clic installe et vérifie les utilitaires correspondants. Pour un déploiement manuel, Debian/Ubuntu utilise `apt install libqmi-utils` ; Arch Linux utilise `pacman -S libqmi`, Alpine utilise `apk add qmi-utils`, et OpenWrt utilise `opkg install qmi-utils` (≤ 24.10) / `apk add qmi-utils` (25.x+).
 
 `vocat doctor --repair-dji-qmi` vérifie la présence de `qmicli` avant de modifier toute liaison de pilote USB ou d'activer le signal DTR. Si l'utilitaire est indisponible, la commande s'arrête avec une indication d'installation et conserve l'état actuel de l'appareil sans modification.
 
