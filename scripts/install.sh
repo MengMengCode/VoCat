@@ -15,9 +15,9 @@
 #   - Administrator credentials are never stored in /etc/vocat/env.
 #   - Verifies Linux XFRM/IPsec support required by IMS; on OpenWrt it tries
 #     the matching opkg (OpenWrt <= 24.10) or apk (OpenWrt 25+) packages first.
-#   - On OpenWrt, ensures the USB serial (kmod-usb-serial) and QMI WWAN
-#     (kmod-usb-net-qmi-wwan) drivers, plus the TUN driver (kmod-tun) used by
-#     the VoWiFi IMS tunnel unless --skip-vowifi-check is given.
+#   - On OpenWrt, tries to provide USB serial and QMI WWAN drivers for USB
+#     modems. Requires the TUN driver used by the VoWiFi IMS tunnel unless
+#     --skip-vowifi-check is given.
 #   - (Re)writes a systemd or OpenWrt/procd service and restarts it.
 #
 # Published script: must contain no secrets, IPs, or passwords.
@@ -274,35 +274,29 @@ install_openwrt_kernel_drivers() {
     msg \
         "正在检查 OpenWrt/Kwrt 的 USB 串口、TUN 与 QMI 网卡驱动..." \
         "Checking OpenWrt/Kwrt USB serial, TUN and QMI WWAN drivers..."
-    local missing=""
-    # USB serial core: modem AT ports (ttyUSB*).
+    local missing_usb_drivers=""
+    # The installer runs before backend selection. PC/SC readers and PCIe/MHI
+    # modems can operate without USB serial or USB QMI WWAN drivers.
     ensure_openwrt_kmod kmod-usb-serial usbserial /sys/bus/usb-serial || \
-        missing="$missing kmod-usb-serial"
-    # QMI WWAN: cdc-wdm control channel and wwan data interface.
+        missing_usb_drivers="$missing_usb_drivers kmod-usb-serial"
     ensure_openwrt_kmod kmod-usb-net-qmi-wwan qmi_wwan /sys/bus/usb/drivers/qmi_wwan || \
-        missing="$missing kmod-usb-net-qmi-wwan"
+        missing_usb_drivers="$missing_usb_drivers kmod-usb-net-qmi-wwan"
+    if [ -n "$missing_usb_drivers" ]; then
+        msg \
+            "警告：USB 模块驱动未就绪:${missing_usb_drivers}。需要这些驱动的 USB 模块请安装匹配固件的 kmod；PC/SC 读卡器及 PCIe/MHI 模块可继续安装。" \
+            "Warning: USB modem drivers are unavailable:${missing_usb_drivers}. USB modems that use them need matching firmware kmods; PC/SC readers and PCIe/MHI modems can continue installation."
+    fi
     # TUN: VoWiFi IMS tunnel interface. Not needed when VoWiFi is skipped.
     if [ "$SKIP_VOWIFI_CHECK" = "1" ]; then
         msg \
             "已跳过 VoWiFi 检查：不检查 TUN 驱动 kmod-tun。" \
             "VoWiFi check skipped: not checking the TUN driver kmod-tun."
     elif ! ensure_openwrt_kmod kmod-tun tun /sys/class/misc/tun; then
-        missing="$missing kmod-tun"
-    fi
-
-    if [ -n "$missing" ]; then
-        local hint_zh="" hint_en=""
-        case "$missing" in
-            *kmod-tun*)
-                hint_zh="kmod-tun 仅 VoWiFi 需要；仅使用非 VoWiFi 功能时可加 --skip-vowifi-check。"
-                hint_en=" kmod-tun is only needed for VoWiFi; use --skip-vowifi-check only for non-VoWiFi operation."
-                ;;
-        esac
         die \
-            "当前 OpenWrt/Kwrt 内核 $(uname -r) 缺少驱动且软件源无法安装:${missing}。请使用包含这些 kmod 的同版本固件；严禁安装其他内核版本的 kmod。${hint_zh}" \
-            "The OpenWrt/Kwrt kernel $(uname -r) is missing drivers that its feed cannot provide:${missing}. Use a firmware built with these kmods; never force kmods from another kernel.${hint_en}"
+            "当前 OpenWrt/Kwrt 内核 $(uname -r) 缺少 VoWiFi 所需的 kmod-tun，且软件源无法安装。请使用包含该驱动的同版本固件；仅使用非 VoWiFi 功能时可加 --skip-vowifi-check。" \
+            "The OpenWrt/Kwrt kernel $(uname -r) lacks kmod-tun required by VoWiFi and its feed cannot provide it. Use firmware with a matching TUN driver; use --skip-vowifi-check for non-VoWiFi operation."
     fi
-    msg "OpenWrt/Kwrt 内核驱动已就绪。" "OpenWrt/Kwrt kernel drivers are ready."
+    msg "OpenWrt/Kwrt 内核驱动检查完成。" "OpenWrt/Kwrt kernel driver checks completed."
 }
 
 install_linux_ip_tool() {
