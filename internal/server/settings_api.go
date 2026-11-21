@@ -68,7 +68,7 @@ var notificationFields = map[string]map[string]string{
 	},
 	"bark": {
 		"urls": "strings", "group": "string", "icon": "string", "level": "string",
-		"url_scopes": "url_scopes",
+		"url_scopes": "url_scopes", barkEncryptionKeyField: "bark_encryption_key",
 	},
 	"pushplus": {
 		"token": "string", "topic": "string", "channel": "string",
@@ -167,11 +167,18 @@ func (s *Server) handleNotificationSettings(w http.ResponseWriter, r *http.Reque
 			}
 			clearSecrets := false
 			if flag, present := document["clear_secrets"]; present {
-				if (channel != "telegram" && channel != "email" && channel != "qqbot") || string(flag) == "null" || json.Unmarshal(flag, &clearSecrets) != nil {
+				if (channel != "telegram" && channel != "email" && channel != "qqbot" && channel != "bark") ||
+					string(flag) == "null" || json.Unmarshal(flag, &clearSecrets) != nil {
 					writeError(w, http.StatusBadRequest, "invalid_notification_config", "clear_secrets must be a boolean for a supported channel")
 					return
 				}
 				delete(document, "clear_secrets")
+			}
+			if channel == "bark" && clearSecrets {
+				var key string
+				if json.Unmarshal(document[barkEncryptionKeyField], &key) == nil && key == store.SecretMask {
+					delete(document, barkEncryptionKeyField)
+				}
 			}
 			raw, err := json.Marshal(document)
 			if err != nil {
@@ -207,11 +214,14 @@ func (s *Server) handleNotificationSettings(w http.ResponseWriter, r *http.Reque
 			}
 		}
 		if err := s.saveNotificationSettings(r.Context(), values); err != nil {
-			if errors.Is(err, errQQBotSecretRequired) {
+			switch {
+			case errors.Is(err, errQQBotSecretRequired):
 				writeError(w, http.StatusBadRequest, "invalid_notification_config", err.Error())
-				return
+			case errors.Is(err, store.ErrBarkEncryptionKeyRequired):
+				writeError(w, http.StatusBadRequest, "invalid_notification_config", store.ErrBarkEncryptionKeyRequired.Error())
+			default:
+				s.writeStoreError(w, err)
 			}
-			s.writeStoreError(w, err)
 			return
 		}
 		s.writeNotificationSettings(w, r)
@@ -312,6 +322,12 @@ func decodeNotificationConfig(
 		if name == "device_ids" {
 			kind, known = "device_ids", true
 		}
+		if channel == "bark" && !requireEnabled && name == "clear_secrets" {
+			kind, known = "boolean", true
+			if string(value) == "null" {
+				return false, nil, errors.New("bark.clear_secrets must be a boolean")
+			}
+		}
 		if !known {
 			return false, nil, fmt.Errorf("%s.%s is not supported", channel, name)
 		}
@@ -365,6 +381,14 @@ func validateNotificationField(
 		var value bool
 		if err := json.Unmarshal(raw, &value); err != nil {
 			return fmt.Errorf("%s must be a boolean", field)
+		}
+	case "bark_encryption_key":
+		var value *string
+		if err := json.Unmarshal(raw, &value); err != nil || value == nil {
+			return fmt.Errorf("%s must be a string", field)
+		}
+		if *value != "" && *value != store.SecretMask {
+			return validateBarkEncryptionKey(*value)
 		}
 	case "string":
 		var value string
@@ -648,13 +672,35 @@ func (s *Server) resolveNotificationTestConfig(
 	if err := json.Unmarshal(incoming, &overlay); err != nil {
 		return nil, store.NotificationSetting{}, fmt.Errorf("decode notification test config: %w", err)
 	}
+	if channel == "bark" {
+		key, hasKey := overlay[barkEncryptionKeyField].(string)
+		if clear, _ := overlay["clear_secrets"].(bool); clear {
+			delete(resolved, barkEncryptionKeyField)
+			if key == store.SecretMask {
+				delete(overlay, barkEncryptionKeyField)
+			}
+		}
+		if hasKey && key == "" {
+			delete(overlay, barkEncryptionKeyField)
+		}
+		delete(overlay, "clear_secrets")
+	}
 	sensitive := make(map[string]struct{})
 	for _, field := range store.DefaultNotificationSensitiveFields(channel) {
 		sensitive[field] = struct{}{}
 	}
 	for key, value := range overlay {
 		if _, secret := sensitive[key]; secret {
-			value = mergeNotificationTestSecretValue(value, resolved[key])
+			if channel == "bark" && key == barkEncryptionKeyField && value == store.SecretMask {
+				// An unresolved Bark mask must reach validation as a mask. An
+				// empty saved value would turn this test into a plaintext send.
+				saved, _ := resolved[key].(string)
+				if validateBarkEncryptionKey(saved) == nil {
+					value = saved
+				}
+			} else {
+				value = mergeNotificationTestSecretValue(value, resolved[key])
+			}
 		}
 		resolved[key] = value
 	}
@@ -740,6 +786,9 @@ func validateNotificationTestConfig(channel string, config map[string]any) error
 		if len(urls) > 8 {
 			return errors.New("bark test is limited to 8 URLs")
 		}
+		if _, err := barkNotificationCipher(config); err != nil {
+			return err
+		}
 	case "wecom":
 		return validateWecomNotificationConfig(config)
 	case "lark":
@@ -823,45 +872,8 @@ func sendWebhookNotificationTest(ctx context.Context, config map[string]any) err
 }
 
 func sendBarkNotificationTest(ctx context.Context, config map[string]any) error {
-	client, err := restrictedHTTPClient(ctx, 6*time.Second, "")
-	if err != nil {
-		return err
-	}
-	message := map[string]any{
-		"title": "vocat",
-		"body":  "vocat notification test",
-	}
-	if group := configString(config, "group"); group != "" {
-		message["group"] = group
-	}
-	if icon := configString(config, "icon"); icon != "" {
-		message["icon"] = icon
-	}
-	if level := configString(config, "level"); level != "" {
-		message["level"] = level
-	}
-	payload, _ := json.Marshal(message)
-	for _, destination := range configStrings(config, "urls") {
-		parsed, err := validateOutboundURL(ctx, destination, false)
-		if err != nil {
-			return err
-		}
-		request, err := http.NewRequestWithContext(
-			ctx,
-			http.MethodPost,
-			parsed.String(),
-			bytes.NewReader(payload),
-		)
-		if err != nil {
-			return fmt.Errorf("create bark test request: %w", err)
-		}
-		request.Header.Set("Content-Type", "application/json; charset=utf-8")
-		request.Header.Set("User-Agent", "vocat-notification-test/1")
-		if err := performNotificationRequest(client, request, false); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sendBarkNotification(ctx, config, configStrings(config, "urls"),
+		"vocat", "vocat notification test", "vocat-notification-test/1", 6*time.Second)
 }
 
 func sendTelegramNotificationTest(ctx context.Context, config map[string]any) error {

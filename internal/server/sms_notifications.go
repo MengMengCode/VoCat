@@ -354,37 +354,8 @@ func sendSMSNotification(ctx context.Context, channel string, config map[string]
 }
 
 func sendBarkSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {
-	destinations := notificationDestinations(config, message.DeviceID)
-	if len(destinations) == 0 {
-		return nil
-	}
-	client, err := restrictedHTTPClient(ctx, 6*time.Second, "")
-	if err != nil {
-		return err
-	}
-	payload := map[string]any{"title": "收到新短信", "body": message.DetailText()}
-	for _, field := range []string{"group", "icon", "level"} {
-		if value := configString(config, field); value != "" {
-			payload[field] = value
-		}
-	}
-	encoded, _ := json.Marshal(payload)
-	for _, destination := range destinations {
-		parsed, err := validateOutboundURL(ctx, destination, false)
-		if err != nil {
-			return err
-		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), bytes.NewReader(encoded))
-		if err != nil {
-			return fmt.Errorf("create Bark notification request: %w", err)
-		}
-		request.Header.Set("Content-Type", "application/json; charset=utf-8")
-		request.Header.Set("User-Agent", "vocat-sms-notification/1")
-		if err := performNotificationRequest(client, request, false); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sendBarkNotification(ctx, config, notificationDestinations(config, message.DeviceID),
+		"收到新短信", message.DetailText(), "vocat-sms-notification/1", 6*time.Second)
 }
 
 func sendWebhookSMSNotification(ctx context.Context, config map[string]any, message smsNotification) error {

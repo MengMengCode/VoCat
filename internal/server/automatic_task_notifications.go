@@ -138,37 +138,8 @@ func sendTelegramTextNotification(ctx context.Context, config map[string]any, de
 }
 
 func sendBarkTextNotification(ctx context.Context, config map[string]any, deviceID, title, text string) error {
-	destinations := notificationDestinations(config, deviceID)
-	if len(destinations) == 0 {
-		return nil
-	}
-	client, err := restrictedHTTPClient(ctx, 8*time.Second, "")
-	if err != nil {
-		return err
-	}
-	payload := map[string]any{"title": title, "body": text}
-	for _, field := range []string{"group", "icon", "level"} {
-		if value := configString(config, field); value != "" {
-			payload[field] = value
-		}
-	}
-	encoded, _ := json.Marshal(payload)
-	for _, destination := range destinations {
-		parsed, err := validateOutboundURL(ctx, destination, false)
-		if err != nil {
-			return err
-		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), bytes.NewReader(encoded))
-		if err != nil {
-			return err
-		}
-		request.Header.Set("Content-Type", "application/json; charset=utf-8")
-		request.Header.Set("User-Agent", "vocat-automatic-task/1")
-		if err := performNotificationRequest(client, request, false); err != nil {
-			return err
-		}
-	}
-	return nil
+	return sendBarkNotification(ctx, config, notificationDestinations(config, deviceID),
+		title, text, "vocat-automatic-task/1", 8*time.Second)
 }
 
 func sendPushplusTextNotification(ctx context.Context, config map[string]any, deviceID, title, text string) error {

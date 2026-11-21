@@ -67,6 +67,17 @@ export default function SettingsPage() {
   const devicesRequested = useRef(false);
   const [clearedChannels, setClearedChannels] = useState<ClearableNotificationChannel[]>([]);
   const clearChannel = async (channel: ClearableNotificationChannel) => {
+    if (channel === "bark") {
+      const confirmed = await confirmDialog(
+        t("清除密钥后，测试通知将使用明文。点击“保存通知配置”后，常规通知也会改为明文。"),
+        t("清除加密密钥"),
+        { type: "warning", confirmVariant: "danger", confirmText: t("清除加密密钥"), cancelText: t("取消") },
+      );
+      if (!confirmed) return;
+      setForms(prev => ({ ...prev, bark: { ...prev.bark, encryptionKey: "" } }));
+      setClearedChannels(prev => prev.includes("bark") ? prev : [...prev, "bark"]);
+      return;
+    }
     const name = t(NOTIFY_TABS.find(tab => tab.key === channel)!.label);
     // QQ 机器人清空后回到绑定流程。
     const confirmed = channel === "qqbot"
@@ -625,7 +636,7 @@ export default function SettingsPage() {
     try {
       await api("/settings/notifications/bark/test", {
         method: "POST",
-        body: buildBarkPayload(forms.bark, true),
+        body: buildBarkPayload(forms.bark, true, clearedChannels.includes("bark")),
       });
       message.success(t("测试通知已发送"));
     } catch (error) {
@@ -633,7 +644,7 @@ export default function SettingsPage() {
     } finally {
       setTestingBark(false);
     }
-  }, [forms.bark]);
+  }, [forms.bark, clearedChannels]);
 
   const onTestEmail = useCallback(async () => {
     setTestingEmail(true);
@@ -841,6 +852,7 @@ export default function SettingsPage() {
               ) : null}
               {activeTab === "bark" ? (
                 <BarkTab value={forms.bark} onChange={(p) => updateChannel("bark", p)} testing={testingBark} onTest={onTestBark}
+                  onClearKey={() => void clearChannel("bark")} clearingKey={clearedChannels.includes("bark")}
                   devices={devices} devicesFailed={devicesFailed} />
               ) : null}
               {activeTab === "email" ? (

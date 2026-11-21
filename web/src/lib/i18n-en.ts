@@ -618,6 +618,13 @@ export const EN_DICT: Record<string, string> = {
 
   // ---- 设置页：Bark / Email / Webhook ----
   "启用 Bark 推送": "Enable Bark",
+  "推送加密密钥": "Push encryption key",
+  "接收端 Bark App 需选择 AES-CBC，使用相同的 16、24 或 32 个可打印 ASCII 字符密钥。每次推送自动生成 IV。":
+    "Select AES-CBC in the receiving Bark app and enter the same key of 16, 24, or 32 printable ASCII characters. Each push uses a fresh IV.",
+  "可选，未配置时使用明文推送": "Optional. A channel without a key sends plaintext.",
+  "清除加密密钥": "Clear encryption key",
+  "清除密钥后，测试通知将使用明文。点击“保存通知配置”后，常规通知也会改为明文。":
+    "Clearing the key makes test notifications use plaintext. Save notification settings to apply this to regular notifications.",
   "启用 Email 推送": "Enable Email",
   "启用 Webhook 推送": "Enable Webhook",
   "企业微信消息推送": "WeCom Message Push",

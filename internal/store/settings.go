@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 )
+
+var ErrBarkEncryptionKeyRequired = errors.New("bark.encryption_key must be re-entered")
 
 func DefaultNotificationSensitiveFields(channel string) []string {
 	switch strings.ToLower(strings.TrimSpace(channel)) {
@@ -20,6 +23,8 @@ func DefaultNotificationSensitiveFields(channel string) []string {
 		return []string{"password"}
 	case "webhook":
 		return []string{"secret"}
+	case "bark":
+		return []string{"encryption_key"}
 	case "pushplus":
 		return []string{"token"}
 	case "wecom":
@@ -72,6 +77,12 @@ func upsertNotificationSetting(
 	))
 	if currentErr != nil && !errors.Is(currentErr, ErrNotFound) {
 		return fmt.Errorf("read %s notification setting before update: %w", value.Channel, currentErr)
+	}
+	if value.Channel == "bark" && barkEncryptionKey(config) == SecretMask {
+		key := barkEncryptionKey(current.Config)
+		if key == "" || key == SecretMask || slices.Contains(value.ClearSensitiveFields, "encryption_key") {
+			return ErrBarkEncryptionKeyRequired
+		}
 	}
 	fields := uniqueNonemptyStrings(
 		DefaultNotificationSensitiveFields(value.Channel),
@@ -129,6 +140,16 @@ func upsertNotificationSetting(
 		return fmt.Errorf("upsert %s notification setting: %w", value.Channel, err)
 	}
 	return nil
+}
+
+func barkEncryptionKey(config json.RawMessage) string {
+	var document struct {
+		Key string `json:"encryption_key"`
+	}
+	if err := json.Unmarshal(config, &document); err != nil {
+		return ""
+	}
+	return document.Key
 }
 
 // SaveNotificationSettings applies a multi-channel settings form atomically.

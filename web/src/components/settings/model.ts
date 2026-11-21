@@ -40,6 +40,8 @@ export interface BarkForm {
   group: string;
   icon: string;
   level: string;
+  encryptionKey: string;
+  hasSavedEncryptionKey: boolean;
 }
 
 export interface EmailForm {
@@ -220,6 +222,8 @@ export function formsFromNotifications(data: Partial<NotificationSettings>): Not
       group: str(bark.group) || "vocat",
       icon: str(bark.icon),
       level: str(bark.level) || "active",
+      encryptionKey: str(bark.encryptionKey),
+      hasSavedEncryptionKey: !!bark.encryptionKey,
     },
     email: {
       enabled: !!email.enabled,
@@ -279,7 +283,7 @@ export function buildWebhookPayload(form: WebhookForm, forTest = false) {
   };
 }
 
-export function buildBarkPayload(form: BarkForm, forTest = false) {
+export function buildBarkPayload(form: BarkForm, forTest = false, clearKey = false) {
   const urls = Array.isArray(form.urls) ? form.urls : [];
   const listed = new Set(urls.map((url) => String(url || "").trim()).filter(Boolean));
   // Drop scopes whose URL was removed or edited away, and keep one per URL; the server rejects both.
@@ -287,6 +291,7 @@ export function buildBarkPayload(form: BarkForm, forTest = false) {
   const urlScopes = (form.urlScopes || [])
     .map((scope) => ({ url: String(scope.url || "").trim(), deviceIds: scope.deviceIds || [] }))
     .filter((scope) => listed.has(scope.url) && !seen.has(scope.url) && seen.add(scope.url));
+  const keepSavedKey = form.encryptionKey === "" && form.hasSavedEncryptionKey && !clearKey;
   return {
     enabled: !!form.enabled,
     urls: forTest ? urls.map((url) => String(url || "").trim()).filter(Boolean) : urls,
@@ -295,6 +300,8 @@ export function buildBarkPayload(form: BarkForm, forTest = false) {
     group: String(form.group || "").trim(),
     icon: String(form.icon || "").trim(),
     level: String(form.level || "").trim(),
+    encryptionKey: keepSavedKey ? "********" : form.encryptionKey,
+    ...(clearKey ? { clearSecrets: true } : {}),
   };
 }
 
@@ -358,7 +365,7 @@ export function buildQQBotPayload(form: QQBotForm) {
   };
 }
 
-export type ClearableNotificationChannel = "telegram" | "email" | "qqbot";
+export type ClearableNotificationChannel = "telegram" | "email" | "qqbot" | "bark";
 
 export type QQBotBindStatus = "connecting" | "waiting" | "bound" | "expired" | "failed" | "canceled";
 
@@ -449,7 +456,7 @@ export function buildNotificationsPayload(forms: NotifyForms, clearedChannels: r
       channel: forms.pushplus.channel || "",
     },
     webhook: buildWebhookPayload(forms.webhook),
-		bark: buildBarkPayload(forms.bark),
+		bark: buildBarkPayload(forms.bark, false, clearedChannels.includes("bark")),
 		wecom: buildWecomPayload(forms.wecom),
 		lark: buildLarkPayload(forms.lark),
 	};

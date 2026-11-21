@@ -86,7 +86,7 @@ func TestNotificationClearRejectsUnsupportedRequests(t *testing.T) {
 	for _, body := range []string{
 		`{"email":{"enabled":false,"clear_secrets":null}}`,
 		`{"telegram":{"enabled":false,"clear_secrets":"true"}}`,
-		`{"bark":{"enabled":false,"clear_secrets":true}}`,
+		`{"bark":{"enabled":false,"clear_secrets":null}}`,
 		`{"webhook":{"enabled":false,"clear_secrets":true}}`,
 		`{"pushplus":{"enabled":false,"clear_secrets":true}}`,
 		`{"wecom":{"enabled":false,"clear_secrets":true}}`,

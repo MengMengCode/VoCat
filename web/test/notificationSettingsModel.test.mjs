@@ -174,6 +174,30 @@ test("round-trips Bark per-URL device scopes and drops stale ones", () => {
   assert.equal("urlScopes" in buildBarkPayload(forms.bark, true), false);
 });
 
+test("uses the same Bark encryption key and clear action for save and test", () => {
+  const forms = formsFromNotifications({
+    bark: { enabled: true, urls: ["https://api.day.app/KeyA/"], encryptionKey: "********" },
+  });
+  assert.equal(forms.bark.hasSavedEncryptionKey, true);
+  assert.equal(buildNotificationsPayload(forms).bark.encryptionKey, "********");
+  assert.equal(buildBarkPayload(forms.bark, true).encryptionKey, "********");
+
+  forms.bark.encryptionKey = "";
+  for (const payload of [buildNotificationsPayload(forms).bark, buildBarkPayload(forms.bark, true)]) {
+    assert.equal(payload.encryptionKey, "********");
+    assert.equal(Object.hasOwn(payload, "clearSecrets"), false);
+  }
+  for (const payload of [buildNotificationsPayload(forms, ["bark"]).bark, buildBarkPayload(forms.bark, true, true)]) {
+    assert.equal(payload.encryptionKey, "");
+    assert.equal(payload.clearSecrets, true);
+  }
+
+  const replacement = " 0123456789abcd ";
+  forms.bark.encryptionKey = replacement;
+  assert.equal(buildNotificationsPayload(forms, ["bark"]).bark.encryptionKey, replacement);
+  assert.equal(buildBarkPayload(forms.bark, true, true).encryptionKey, replacement);
+});
+
 test("round-trips QQ Bot and clears only its secret on request", () => {
   const forms = formsFromNotifications({
     qqbot: { enabled: true, appId: " 102000001 ", appSecret: "********", targetOpenid: " OPENID_1 ", proxy: "", deviceIds: ["a"] },

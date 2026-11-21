@@ -73,12 +73,16 @@ function shortBarkUrl(url: string): string {
   }
 }
 
-export function BarkTab({ value, onChange, testing, onTest, devices, devicesFailed }: PushChannelProps<BarkForm> & {
+export function BarkTab({ value, onChange, testing, onTest, onClearKey, clearingKey, devices, devicesFailed }: PushChannelProps<BarkForm> & {
+  onClearKey: () => void;
+  clearingKey: boolean;
   devices: Pick<DeviceListItem, "id" | "name">[] | null;
   devicesFailed: boolean;
 }) {
   const { t } = useI18n();
   const off = !value.enabled;
+  const savedKey = value.hasSavedEncryptionKey && !clearingKey;
+  const draftKey = value.encryptionKey === "********" ? "" : value.encryptionKey;
   const urls = [...new Set((value.urls || []).map((url) => url.trim()).filter(Boolean))];
   const scopeOf = (url: string) => (value.urlScopes || []).find((scope) => scope.url.trim() === url)?.deviceIds ?? null;
   const setScope = (url: string, deviceIds: string[] | null) => {
@@ -118,6 +122,22 @@ export function BarkTab({ value, onChange, testing, onTest, devices, devicesFail
             </div>
           </Field>
         ) : null}
+        <Field label={t("推送加密密钥")} hint={t("接收端 Bark App 需选择 AES-CBC，使用相同的 16、24 或 32 个可打印 ASCII 字符密钥。每次推送自动生成 IV。")}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              aria-label={t("推送加密密钥")}
+              type="password"
+              autoComplete="new-password"
+              value={draftKey}
+              onChange={(e) => onChange({ encryptionKey: e.target.value })}
+              placeholder={t(savedKey ? "已保存密钥；留空表示保持不变。" : "可选，未配置时使用明文推送")}
+              className="min-w-40 flex-1"
+            />
+            {savedKey || draftKey ? (
+              <Button size="small" variant="danger" plain onClick={onClearKey}>{t("清除加密密钥")}</Button>
+            ) : null}
+          </div>
+        </Field>
         <Field label={t("分组 (Group)")} hint={t("iOS 设备上的通知分组。")}>
           <Input value={value.group} onChange={(e) => onChange({ group: e.target.value })} disabled={off} placeholder={t("例如 vocat")} />
         </Field>
