@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -9,6 +12,7 @@ import (
 
 	"vocat/internal/device"
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 )
@@ -289,6 +293,8 @@ func TestCardPolicyReconcileMissingIdentityCannotEnableIdleRuntime(t *testing.T)
 
 func TestCardPolicyReconcilePhysicalRemovalStopsOldSessionAndReplugResumes(t *testing.T) {
 	r, d, w := newPolicyReconcileFixture(t)
+	var logs bytes.Buffer
+	r.logger = slog.New(slog.NewTextHandler(&logs, nil))
 	config, err := r.database.Device(context.Background(), "dev1")
 	if err != nil {
 		t.Fatal(err)
@@ -308,6 +314,9 @@ func TestCardPolicyReconcilePhysicalRemovalStopsOldSessionAndReplugResumes(t *te
 	if !stored.VoWiFiEnabled || len(w.enables) != 1 || w.enables[0] || w.reconnects != 0 || r.observedCards["dev1"] != "missing" {
 		t.Fatalf("physical removal did not retire only the old session: config=%+v calls=%v", stored, w.enables)
 	}
+	if !strings.Contains(logs.String(), `device_id=dev1 reason="device not found"`) {
+		t.Fatalf("physical removal was not logged with its cause: %s", logs.String())
+	}
 	// Disable finishes asynchronously, preserving the ICCID for diagnostics.
 	// The same card reappears ready and must use its saved policy again.
 	w.state = vowifi.State{ICCID: "old-card", Phase: vowifi.PhaseIdle}
@@ -315,6 +324,57 @@ func TestCardPolicyReconcilePhysicalRemovalStopsOldSessionAndReplugResumes(t *te
 	r.reconcile(context.Background())
 	if len(w.enables) != 2 || !w.enables[1] || w.reconnects != 0 || r.observedCards["dev1"] != "old-card" {
 		t.Fatalf("same-card replug did not resume its saved policy: calls=%v reconnects=%d", w.enables, w.reconnects)
+	}
+}
+
+func TestCardPolicyReconcilePCSCReaderMovedToAnotherUSBPort(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		path              string
+		wantSavedPath     string
+		previouslyMissing bool
+	}{
+		{name: "active session", path: "2-1", wantSavedPath: "2-1"},
+		{name: "replug after removal", path: "2-1", wantSavedPath: "2-1", previouslyMissing: true},
+		{name: "PCSC without USB topology", path: "pcsc:Test reader 00 00", wantSavedPath: "1-1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, d, w := newPolicyReconcileFixture(t)
+			if err := r.database.UpsertDevice(ctx, store.Device{
+				ID: "dev1", Name: "SIM reader", DeviceType: store.DeviceTypeUSBSIMReader,
+				ControlDevice: "Test reader 00 00", USBPath: "1-1", APN: "old.apn", SIMPIN: "1234",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			d.entry.Candidate = modem.Candidate{
+				HardwareKind: pcsc.HardwareKind, ReaderName: "Test reader 00 00", USBPath: test.path,
+			}
+			w.state = vowifi.State{Enabled: true, Active: true, ICCID: "old-card", Phase: vowifi.PhaseSMSReady}
+			r.observedCards["dev1"] = "old-card"
+			if test.previouslyMissing {
+				w.state = vowifi.State{ICCID: "old-card", Phase: vowifi.PhaseIdle}
+				r.observedCards["dev1"] = "missing"
+			}
+
+			r.reconcile(ctx)
+
+			stored, err := r.database.Device(ctx, "dev1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.USBPath != test.wantSavedPath || stored.ControlDevice != "Test reader 00 00" ||
+				stored.SIMPIN != "1234" || stored.APN != "old.apn" || !stored.VoWiFiEnabled {
+				t.Fatal("reconciliation did not preserve the reader binding and saved policy")
+			}
+			wantRequests := 0
+			if test.previouslyMissing {
+				wantRequests = 1
+			}
+			if len(w.enables) != wantRequests || (wantRequests == 1 && !w.enables[0]) || w.reconnects != 0 {
+				t.Fatalf("unexpected VoWiFi requests after reader move: enable=%v reconnects=%d", w.enables, w.reconnects)
+			}
+		})
 	}
 }
 

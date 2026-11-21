@@ -2,10 +2,12 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"vocat/internal/device"
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 	"vocat/internal/store"
 )
 
@@ -220,5 +222,78 @@ func TestATMapperPrefersLiveIMEIOverAllStalePaths(t *testing.T) {
 	}
 	if devices.executedID != "live-imei" {
 		t.Fatalf("ExecuteAT physical ID = %q, want live IMEI candidate", devices.executedID)
+	}
+}
+
+func TestATMapperResolvesPCSCReaderAfterUSBPortMove(t *testing.T) {
+	const name = "Alcor Link AK9563 00 00"
+	config := store.Device{
+		ID: "configured-reader", Name: "SIM reader", DeviceType: store.DeviceTypeUSBSIMReader,
+		DeviceBackend: pcsc.HardwareKind, ControlDevice: name, USBPath: "1-1",
+	}
+	oldPort := device.Device{ID: config.ID, Discovered: true, Candidate: modem.Candidate{
+		HardwareKind: pcsc.HardwareKind, ReaderName: "Other Reader 00 00", USBPath: "1-1",
+	}}
+	moved := device.Device{ID: "reader-new-port", Discovered: true, Candidate: modem.Candidate{
+		HardwareKind: pcsc.HardwareKind, ReaderName: name, USBPath: "2-1",
+	}}
+	for _, entries := range [][]device.Device{{oldPort, moved}, {moved, oldPort}} {
+		database := testStore(t)
+		if err := database.UpsertDevice(context.Background(), config); err != nil {
+			t.Fatal(err)
+		}
+		devices := &fakeATDevices{entries: entries}
+		mapper := ATMapper{Store: database, Devices: devices}
+		entry, err := mapper.Get(config.ID)
+		if err != nil || entry.ID != moved.ID {
+			t.Fatalf("Get() = %#v, %v, want moved reader", entry, err)
+		}
+		if _, err := mapper.ExecuteAPDU(context.Background(), config.ID, modem.APDUCGLA, 0, []byte{0x00, 0xA4}); err != nil {
+			t.Fatal(err)
+		}
+		if devices.apduID != moved.ID {
+			t.Fatalf("APDU physical ID = %q, want %q", devices.apduID, moved.ID)
+		}
+	}
+}
+
+func TestMatchPhysicalDevicePCSCRejectsConflictsAndAmbiguity(t *testing.T) {
+	const name = "Alcor Link AK9563 00 00"
+	config := store.Device{
+		ID: "configured-reader", DeviceType: store.DeviceTypeUSBSIMReader,
+		ControlDevice: name, USBPath: "1-1",
+	}
+	reader := func(id, readerName, path string) device.Device {
+		return device.Device{ID: id, Discovered: true, Candidate: modem.Candidate{
+			HardwareKind: pcsc.HardwareKind, ReaderName: readerName, USBPath: path,
+		}}
+	}
+	tests := []struct {
+		name    string
+		config  store.Device
+		entries []device.Device
+		wantID  string
+	}{
+		{"conflicting reader at old port and ID", config, []device.Device{reader(config.ID, "Other Reader 00 00", "1-1")}, ""},
+		{"non-PCSC device at old port and ID", config, []device.Device{{ID: config.ID, Discovered: true, Candidate: modem.Candidate{USBPath: "1-1"}}}, ""},
+		{"ambiguous names ignore path-derived ID hint", config, []device.Device{reader(config.ID, name, "2-1"), reader("other", name, "3-1")}, ""},
+		{"exact pair among duplicate names", config, []device.Device{reader("other", name, "2-1"), reader("paired", name, "1-1")}, "paired"},
+		{"name-based move with legacy backend marker", store.Device{ID: config.ID, DeviceBackend: pcsc.HardwareKind, ControlDevice: name, USBPath: "1-1"}, []device.Device{reader("moved", name, "2-1")}, "moved"},
+		{"legacy path-only reader", store.Device{ID: config.ID, DeviceType: store.DeviceTypeUSBSIMReader, USBPath: "1-1"}, []device.Device{reader("legacy", "Other Reader 00 00", "1-1")}, "legacy"},
+		{"legacy ID-only reader", store.Device{ID: config.ID, DeviceType: store.DeviceTypeUSBSIMReader}, []device.Device{reader(config.ID, name, "2-1")}, config.ID},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := MatchPhysicalDevice(test.config, test.entries)
+			if test.wantID == "" {
+				if !errors.Is(err, device.ErrNotFound) {
+					t.Fatalf("MatchPhysicalDevice() = %#v, %v, want not found", got, err)
+				}
+				return
+			}
+			if err != nil || got.ID != test.wantID {
+				t.Fatalf("MatchPhysicalDevice() = %#v, %v, want %q", got, err, test.wantID)
+			}
+		})
 	}
 }

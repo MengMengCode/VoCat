@@ -227,7 +227,7 @@ func (backend *nativeBackend) Open(ctx context.Context, selector Selector) (Card
 	if err != nil {
 		return nil, err
 	}
-	reader, ok := matchReader(readers, selector)
+	reader, ok := MatchReader(readers, selector)
 	if !ok {
 		return nil, ErrReaderNotFound
 	}

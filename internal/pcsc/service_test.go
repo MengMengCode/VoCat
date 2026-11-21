@@ -122,6 +122,76 @@ func TestSnapshotRejectsPhysicalReaderUntilPCSCDIsReady(t *testing.T) {
 	}
 }
 
+func TestMatchReaderRecoversUSBMovesWithoutSwitchingReaders(t *testing.T) {
+	const name = "Alcor Link AK9563 00 00"
+	moved := Reader{Name: name, USBPath: "2-1"}
+	other := Reader{Name: "Other Reader 00 00", USBPath: "1-1"}
+	placeholder := Reader{Name: "USB smart card reader", USBPath: "1-1", DiscoveryIssue: "pcsc_service_unavailable"}
+	tests := []struct {
+		name     string
+		readers  []Reader
+		selector Selector
+		want     Reader
+		found    bool
+	}{
+		{"moved reader after old port occupant", []Reader{other, moved}, Selector{USBPath: "1-1", ReaderName: name}, moved, true},
+		{"moved reader before old port occupant", []Reader{moved, other}, Selector{USBPath: "1-1", ReaderName: name}, moved, true},
+		{"old port occupied while named reader absent", []Reader{other}, Selector{USBPath: "1-1", ReaderName: name}, Reader{}, false},
+		{"exact pair disambiguates duplicate names", []Reader{moved, {Name: name, USBPath: "1-1"}}, Selector{USBPath: "2-1", ReaderName: name}, moved, true},
+		{"duplicate names after port move", []Reader{moved, {Name: name, USBPath: "3-1"}}, Selector{USBPath: "1-1", ReaderName: name}, Reader{}, false},
+		{"legacy path only", []Reader{other, moved}, Selector{USBPath: "2-1"}, moved, true},
+		{"path shared by multiple slots", []Reader{moved, {Name: "Alcor Link AK9563 00 01", USBPath: "2-1"}}, Selector{USBPath: "2-1"}, Reader{}, false},
+		{"different slot is a different name", []Reader{{Name: "Alcor Link AK9563 00 01", USBPath: "1-1"}}, Selector{USBPath: "1-1", ReaderName: name}, Reader{}, false},
+		{"unique name only", []Reader{other, moved}, Selector{ReaderName: name}, moved, true},
+		{"surrounding whitespace preserves native name", []Reader{{Name: " " + name + " ", USBPath: "2-1"}}, Selector{ReaderName: " " + name}, Reader{Name: " " + name + " ", USBPath: "2-1"}, true},
+		{"missing name permits path fallback", []Reader{{USBPath: "1-1"}}, Selector{USBPath: "1-1", ReaderName: name}, Reader{USBPath: "1-1"}, true},
+		{"diagnostic USB placeholder", []Reader{placeholder}, Selector{USBPath: "1-1", ReaderName: name}, placeholder, true},
+		{"ready named reader outranks stale placeholder", []Reader{placeholder, moved}, Selector{USBPath: "1-1", ReaderName: name}, moved, true},
+		{"empty selector", []Reader{moved}, Selector{}, Reader{}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, found := MatchReader(test.readers, test.selector)
+			if found != test.found || got != test.want {
+				t.Fatalf("MatchReader() = %#v, %v, want %#v, %v", got, found, test.want, test.found)
+			}
+		})
+	}
+}
+
+type selectionReaderBackend struct {
+	readers []Reader
+	opened  bool
+}
+
+func (backend *selectionReaderBackend) Readers(context.Context) ([]Reader, error) {
+	return backend.readers, nil
+}
+
+func (backend *selectionReaderBackend) Open(context.Context, Selector) (Card, error) {
+	backend.opened = true
+	return nil, errors.New("unexpected card open")
+}
+
+func TestSnapshotUsesNamedReaderAfterUSBMove(t *testing.T) {
+	const name = "Alcor Link AK9563 00 00"
+	backend := &selectionReaderBackend{readers: []Reader{
+		{Name: "Other Reader 00 00", USBPath: "1-1", CardPresent: true},
+		{Name: name, USBPath: "2-1"},
+	}}
+	service := NewWithBackend(backend)
+	snapshot, err := service.Snapshot(context.Background(), Selector{USBPath: "1-1", ReaderName: name}, "")
+	if !errors.Is(err, ErrNoCard) || snapshot.Reader.Name != name || snapshot.Reader.USBPath != "2-1" || backend.opened {
+		t.Fatalf("Snapshot() = %#v, %v, card opened %v", snapshot, err, backend.opened)
+	}
+
+	backend.readers = backend.readers[:1]
+	_, err = service.Snapshot(context.Background(), Selector{USBPath: "1-1", ReaderName: name}, "")
+	if !errors.Is(err, ErrReaderNotFound) || backend.opened {
+		t.Fatalf("absent named reader = %v, card opened %v", err, backend.opened)
+	}
+}
+
 type scriptedBackend struct {
 	card Card
 }

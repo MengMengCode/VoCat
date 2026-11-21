@@ -121,7 +121,7 @@ func (service *Service) Snapshot(ctx context.Context, selector Selector, pin str
 	if err != nil {
 		return Snapshot{}, err
 	}
-	reader, ok := matchReader(readers, selector)
+	reader, ok := MatchReader(readers, selector)
 	if !ok {
 		return Snapshot{}, ErrReaderNotFound
 	}
@@ -248,20 +248,45 @@ func (service *Service) AuthenticateWithPreference(
 	return parseAKAResponse(data)
 }
 
-func matchReader(readers []Reader, selector Selector) (Reader, bool) {
+// ReaderMatchScore ranks full PC/SC names above USB topology. A diagnostic USB
+// placeholder has no authoritative PC/SC name, so only its path can match.
+func ReaderMatchScore(reader Reader, selector Selector) int {
 	path := strings.TrimSpace(selector.USBPath)
 	name := strings.TrimSpace(selector.ReaderName)
+	readerName := strings.TrimSpace(reader.Name)
+	if name != "" && readerName != "" && reader.DiscoveryIssue == "" && readerName != name {
+		return 0
+	}
+	score := 0
+	if name != "" && readerName == name && reader.DiscoveryIssue == "" {
+		score += 300
+	}
+	if path != "" && reader.USBPath == path {
+		score += 100
+	}
+	return score
+}
+
+// MatchReader selects an exact name/path pair first, then a unique full name
+// after a USB port move. Equally strong matches require explicit disambiguation.
+func MatchReader(readers []Reader, selector Selector) (Reader, bool) {
+	var best Reader
+	bestScore := 0
+	ambiguous := false
 	for _, reader := range readers {
-		if path != "" && reader.USBPath == path {
-			return reader, true
+		score := ReaderMatchScore(reader, selector)
+		if score > bestScore {
+			best = reader
+			bestScore = score
+			ambiguous = false
+		} else if score > 0 && score == bestScore {
+			ambiguous = true
 		}
 	}
-	for _, reader := range readers {
-		if name != "" && reader.Name == name {
-			return reader, true
-		}
+	if bestScore == 0 || ambiguous {
+		return Reader{}, false
 	}
-	return Reader{}, false
+	return best, true
 }
 
 func readIdentity(ctx context.Context, card Card, pin string) (Identity, error) {

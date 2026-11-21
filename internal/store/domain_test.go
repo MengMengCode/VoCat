@@ -629,6 +629,33 @@ func TestUSBSIMReaderConfigurationIsWiFiCallingOnly(t *testing.T) {
 	}
 }
 
+func TestRefreshPCSCUSBPathPreservesUpdatedConfig(t *testing.T) {
+	ctx := context.Background()
+	database := openTestStore(t, ":memory:")
+	saved := Device{ID: "reader", Name: "Reader", DeviceType: DeviceTypeUSBSIMReader, ControlDevice: "Reader 00 00", USBPath: "1-1"}
+	if err := database.UpsertDevice(ctx, saved); err != nil {
+		t.Fatal(err)
+	}
+	edited := saved
+	edited.Name = "Renamed reader"
+	if err := database.UpsertDevice(ctx, edited); err != nil {
+		t.Fatal(err)
+	}
+	if updated, err := database.RefreshPCSCUSBPath(ctx, saved, "2-1"); err != nil || !updated {
+		t.Fatalf("refresh path: updated=%v, err=%v", updated, err)
+	}
+	if updated, err := database.RefreshPCSCUSBPath(ctx, saved, "3-1"); err != nil || updated {
+		t.Fatalf("stale path refresh: updated=%v, err=%v", updated, err)
+	}
+	got, err := database.Device(ctx, saved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.USBPath != "2-1" || got.Name != edited.Name {
+		t.Fatalf("path refresh saved path=%q and name=%q", got.USBPath, got.Name)
+	}
+}
+
 func TestSMSPersistenceAndDerivedThreads(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t, ":memory:")

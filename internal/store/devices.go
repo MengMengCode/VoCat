@@ -50,6 +50,20 @@ func (s *Store) UpsertDevice(ctx context.Context, value Device) error {
 	return upsertDevice(ctx, s.db, value)
 }
 
+// RefreshPCSCUSBPath updates the topology of a matched reader. If the saved
+// reader binding changed since discovery, the caller must resolve it again.
+func (s *Store) RefreshPCSCUSBPath(ctx context.Context, saved Device, path string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE devices SET usb_path = ?, updated_at = ?
+		WHERE id = ? AND device_type = ? AND control_device = ? AND usb_path = ?
+	`, path, time.Now().UTC().Unix(), saved.ID, DeviceTypeUSBSIMReader, saved.ControlDevice, saved.USBPath)
+	if err != nil {
+		return false, fmt.Errorf("refresh PC/SC USB path for device %q: %w", saved.ID, err)
+	}
+	affected, err := result.RowsAffected()
+	return affected > 0, err
+}
+
 // SaveDeviceState stores configuration and the supplied runtime snapshots in
 // one transaction. A nil runtime leaves that snapshot untouched.
 func (s *Store) SaveDeviceState(

@@ -20,6 +20,7 @@ import (
 	"vocat/internal/remoteproc"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
+	"vocat/internal/vowifi/integration"
 	vowifiruntime "vocat/internal/vowifi/runtime"
 )
 
@@ -404,6 +405,17 @@ func (s *Server) handleDiscoveredDevices(w http.ResponseWriter, r *http.Request)
 		s.writeStoreError(w, err)
 		return true
 	}
+	// Resolve each configured reader against the full scan once so ambiguous
+	// names are left unbound in the discovery dialog as well as runtime actions.
+	readerBindings := make(map[string]string)
+	for _, config := range configured {
+		if config.DeviceBackend == pcsc.HardwareKind || store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeUSBSIMReader {
+			readerBindings[config.ID] = ""
+			if matched, err := integration.MatchPhysicalDevice(config, devices); err == nil {
+				readerBindings[config.ID] = matched.ID
+			}
+		}
+	}
 	result := make([]map[string]any, 0, len(devices))
 	for _, entry := range devices {
 		if !entry.Discovered {
@@ -422,6 +434,13 @@ func (s *Server) handleDiscoveredDevices(w http.ResponseWriter, r *http.Request)
 		}
 		configuredID := ""
 		for _, config := range configured {
+			if physicalID, readerConfig := readerBindings[config.ID]; readerConfig {
+				if physicalID == entry.ID {
+					configuredID = config.ID
+					break
+				}
+				continue
+			}
 			if physicalMatchesConfig(entry, config) {
 				configuredID = config.ID
 				break
@@ -1882,6 +1901,13 @@ func (s *Server) dashboardDevices() []map[string]any {
 func (s *Server) physicalForConfig(config store.Device) (device.Device, string, bool) {
 	if s.devices == nil {
 		return device.Device{ID: config.ID}, "", false
+	}
+	if config.DeviceBackend == pcsc.HardwareKind || store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeUSBSIMReader {
+		entry, err := integration.MatchPhysicalDevice(config, s.devices.List())
+		if err != nil {
+			return device.Device{ID: config.ID}, "", false
+		}
+		return entry, entry.ID, true
 	}
 	if entry, err := s.devices.Get(config.ID); err == nil && entry.Discovered {
 		return entry, entry.ID, true

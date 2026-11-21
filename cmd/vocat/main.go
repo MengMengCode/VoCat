@@ -1730,7 +1730,10 @@ func (r *cardPolicyReconciler) reconcileDevice(ctx context.Context, configuredID
 		// do not reconnect against the missing SIM or interrupt owned recovery.
 		if errors.Is(err, device.ErrNotFound) && !r.wifi.InMaintenance(configuredID) {
 			if state, stateErr := r.wifi.State(configuredID); stateErr == nil && (state.Enabled || state.Active) {
-				_, _ = r.wifi.RequestEnabled(configuredID, false)
+				if _, disableErr := r.wifi.RequestEnabled(configuredID, false); disableErr == nil {
+					r.logger.Warn("VoWiFi stop requested because the physical device could not be resolved",
+						"device_id", configuredID, "reason", err)
+				}
 			}
 			r.observedCards[configuredID] = "missing"
 		}
@@ -1756,6 +1759,22 @@ func (r *cardPolicyReconciler) reconcileDevice(ctx context.Context, configuredID
 	currentPhysicalID, err := integration.ResolvePhysicalID(ctx, r.database, r.devices, configuredID)
 	if err != nil || currentPhysicalID != physicalID {
 		return
+	}
+	if config.DeviceType == store.DeviceTypeUSBSIMReader && entry.Candidate.HardwareKind == pcsc.HardwareKind &&
+		entry.Candidate.DiscoveryIssue == "" && strings.TrimSpace(config.ControlDevice) != "" &&
+		strings.TrimSpace(config.ControlDevice) == strings.TrimSpace(entry.Candidate.ReaderName) {
+		path := strings.TrimSpace(entry.Candidate.USBPath)
+		if path != "" && !strings.HasPrefix(path, "pcsc:") && path != config.USBPath {
+			updated, err := r.database.RefreshPCSCUSBPath(ctx, config, path)
+			if err != nil {
+				r.logger.Warn("reconcile card policy: refresh PC/SC USB path", "device_id", config.ID, "error", err)
+				return
+			}
+			if !updated {
+				return
+			}
+			config.USBPath = path
+		}
 	}
 	hotSwappableSIM := config.DeviceType == store.DeviceTypeUSBSIMReader || config.DeviceType == store.DeviceTypeWiFi410
 	if entry.Snapshot == nil || !entry.Snapshot.Responsive || !entry.Snapshot.SIMReady || strings.TrimSpace(entry.Snapshot.ICCID) == "" {

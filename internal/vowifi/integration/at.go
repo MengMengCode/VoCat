@@ -8,6 +8,7 @@ import (
 
 	"vocat/internal/device"
 	"vocat/internal/modem"
+	"vocat/internal/pcsc"
 	"vocat/internal/store"
 	"vocat/internal/vowifi"
 )
@@ -171,27 +172,46 @@ func ResolvePhysicalID(
 	if err != nil {
 		return "", err
 	}
+	entry, err := MatchPhysicalDevice(config, devices.List())
+	if err != nil {
+		return "", err
+	}
+	return entry.ID, nil
+}
+
+// MatchPhysicalDevice scores physical identity evidence without changing the
+// saved configuration.
+func MatchPhysicalDevice(config store.Device, entries []device.Device) (device.Device, error) {
 	// Score every physical candidate before choosing one. Returning the first
 	// partial match made two EC20s on the same hub vulnerable to iteration order:
 	// a stale USB path on one configured row could win before the other
 	// candidate's AT port, QMI node, or live IMEI was considered. The result was
 	// two logical devices issuing APDUs to the same SIM.
-	bestID := ""
+	var best device.Device
 	bestScore := 0
-	for _, entry := range devices.List() {
+	ambiguous := false
+	readerConfig := config.DeviceBackend == pcsc.HardwareKind ||
+		store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeUSBSIMReader
+	for _, entry := range entries {
 		if !entry.Discovered {
 			continue
 		}
-		score := physicalMatchScore(configuredID, config, entry)
+		score := physicalMatchScore(config.ID, config, entry)
 		if score > bestScore {
-			bestID = entry.ID
+			best = entry
 			bestScore = score
+			ambiguous = false
+		} else if readerConfig && score > 0 && score == bestScore {
+			ambiguous = true
 		}
 	}
-	if bestID != "" {
-		return bestID, nil
+	if ambiguous {
+		return device.Device{}, fmt.Errorf("%w: physical reader match is ambiguous", device.ErrNotFound)
 	}
-	return "", device.ErrNotFound
+	if bestScore > 0 {
+		return best, nil
+	}
+	return device.Device{}, device.ErrNotFound
 }
 
 func (mapper ATMapper) resolve(
@@ -203,6 +223,20 @@ func (mapper ATMapper) resolve(
 
 func physicalMatchScore(configuredID string, config store.Device, entry device.Device) int {
 	candidate := entry.Candidate
+	if config.DeviceBackend == pcsc.HardwareKind ||
+		store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeUSBSIMReader {
+		if candidate.HardwareKind != pcsc.HardwareKind {
+			return 0
+		}
+		selector := pcsc.Selector{USBPath: config.USBPath, ReaderName: config.ControlDevice}
+		if strings.TrimSpace(selector.USBPath) == "" && strings.TrimSpace(selector.ReaderName) == "" && entry.ID == configuredID {
+			return 25
+		}
+		return pcsc.ReaderMatchScore(pcsc.Reader{
+			Name: candidate.ReaderName, USBPath: candidate.USBPath,
+			DiscoveryIssue: candidate.DiscoveryIssue,
+		}, selector)
+	}
 	score := 0
 	// A live modem identity is the strongest evidence and must override stale
 	// Linux node names or a USB topology saved before devices were rearranged.
