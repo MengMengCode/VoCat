@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestValidateUserspaceRoutesAllowsOnlyNegotiatedEndpoints(t *testing.T) {
@@ -94,6 +96,77 @@ func (blockingNATTRelay) SendESP(ctx context.Context, _ []byte) error {
 func (blockingNATTRelay) ReceiveESP(ctx context.Context, _ []byte) (int, error) {
 	<-ctx.Done()
 	return 0, ctx.Err()
+}
+
+type scriptedUserspaceSendRelay struct {
+	blockingNATTRelay
+	sendErrors []error
+	sent       int
+}
+
+func (relay *scriptedUserspaceSendRelay) SendESP(context.Context, []byte) error {
+	if relay.sent >= len(relay.sendErrors) {
+		return errors.New("unexpected extra ESP send")
+	}
+	err := relay.sendErrors[relay.sent]
+	relay.sent++
+	return err
+}
+
+func TestUserspaceESPOversizeDoesNotStopTunnel(t *testing.T) {
+	t.Parallel()
+	descriptors, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unix.Close(descriptors[0])
+		_ = unix.Close(descriptors[1])
+	})
+
+	transportFailure := errors.New("relay closed unexpectedly")
+	relay := &scriptedUserspaceSendRelay{sendErrors: []error{
+		&net.OpError{Op: "write", Err: os.NewSyscallError("write", unix.EMSGSIZE)},
+		nil,
+		transportFailure,
+	}}
+	local := net.IPv4(10, 0, 0, 2)
+	remote := net.IPv4(10, 0, 0, 9)
+	runContext, cancel := context.WithCancel(context.Background())
+	handle := &linuxUserspaceHandle{
+		config:     ChildSAConfig{InnerLocalIPv4: local},
+		tunnel:     mustTestESPTunnel(t, "aes-cbc-128", "hmac-sha1-96", make([]byte, 16), make([]byte, 20)),
+		tunFD:      descriptors[0],
+		relay:      relay,
+		runContext: runContext,
+		cancel:     cancel,
+		failures:   make(chan error, 1),
+	}
+	t.Cleanup(func() {
+		cancel()
+		handle.wait.Wait()
+	})
+	handle.wait.Add(1)
+	go handle.copyTUNToRelay()
+
+	for _, payload := range [][]byte{make([]byte, 1252), []byte("small"), []byte("fatal")} {
+		packet := testIPv4UDPPacket(local, remote, 42000, 5060, payload)
+		if err := unix.Send(descriptors[1], packet, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case err := <-handle.Failures():
+		if !errors.Is(err, transportFailure) {
+			t.Fatalf("tunnel reported the wrong failure: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the fatal relay error did not stop the tunnel")
+	}
+	handle.wait.Wait()
+	if relay.sent != len(relay.sendErrors) {
+		t.Fatalf("relay sent %d packets, want %d", relay.sent, len(relay.sendErrors))
+	}
 }
 
 func TestLinuxUserspaceInstallerLifecycle(t *testing.T) {

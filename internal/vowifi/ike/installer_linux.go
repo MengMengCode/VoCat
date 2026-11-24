@@ -89,6 +89,8 @@ func (handle *linuxXFRMHandle) install(ctx context.Context) error {
 			return err
 		}
 	}
+	// The dummy interface holds the inner addresses. XFRM derives the
+	// tunnel PMTU from the actual egress route and the ESP overhead.
 	if err := handle.run(ctx, "enable tunnel interface", "link", "set", "dev", config.Name, "up"); err != nil {
 		return err
 	}

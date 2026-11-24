@@ -274,6 +274,7 @@ type ChildSAConfig struct {
 	ResponderSelectors []trafficSelector
 	UDPEncapsulation   bool
 	ProxyMode          vowifi.ProxyMode
+	MTUCompatibility   bool
 	Relay              NATTPacketRelay
 	// Logger receives non-fatal dataplane diagnostics; nil uses slog.Default.
 	Logger *slog.Logger

@@ -280,7 +280,10 @@ func decryptPayloads(
 	return header, payloads, nil
 }
 
-const defaultIKEFragmentSize = 1100
+const (
+	defaultIKEFragmentSize = 1100
+	compatIKEFragmentSize  = 960
+)
 
 func encryptPayloadsFragmented(
 	header ikeHeader,

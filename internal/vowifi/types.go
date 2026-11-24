@@ -233,15 +233,17 @@ type TunnelEvidence struct {
 	Established   bool
 	Name          string
 	DataplaneMode string
-	LocalIPv4     string
-	LocalIPv6     string
-	PCSCF         []string
-	ResponderAUTH ResponderAUTHStatus
-	IKEEncryption string
-	IKEIntegrity  string
-	IKEDHGroup    string
-	ESPEncryption string
-	ESPIntegrity  string
+	// MTUCompatibility is the setting captured when establishing this tunnel.
+	MTUCompatibility bool
+	LocalIPv4        string
+	LocalIPv6        string
+	PCSCF            []string
+	ResponderAUTH    ResponderAUTHStatus
+	IKEEncryption    string
+	IKEIntegrity     string
+	IKEDHGroup       string
+	ESPEncryption    string
+	ESPIntegrity     string
 }
 
 type IMSRequest struct {

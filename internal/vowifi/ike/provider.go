@@ -33,7 +33,10 @@ type Config struct {
 	IdentityType         uint8
 	APN                  string
 	AutoProposalFallback bool
-	Logger               *slog.Logger
+	// MTUCompatibility opts the SWu tunnel, routes, and IKE fragmentation into
+	// conservative sizes for low-MTU outer paths. Nil disables it.
+	MTUCompatibility func(context.Context) bool
+	Logger           *slog.Logger
 }
 
 type Provider struct {
@@ -86,7 +89,11 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	if provider == nil {
 		return nil, errors.New("ike: nil provider")
 	}
-	session, err := provider.start(ctx, request, false)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	mtuCompatibility := provider.config.MTUCompatibility != nil && provider.config.MTUCompatibility(ctx)
+	session, err := provider.start(ctx, request, false, mtuCompatibility)
 	if err == nil || !provider.config.AutoProposalFallback {
 		return session, err
 	}
@@ -97,7 +104,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	provider.config.Logger.Warn("IKE ePDG rejected modern proposal; trying bounded legacy fallback",
 		"carrier_profile", profile.ID, "from_proposal", vowifi.IKEProposalModern,
 		"to_proposal", vowifi.IKEProposalLegacy, "error", err)
-	session, fallbackErr := provider.start(ctx, request, true)
+	session, fallbackErr := provider.start(ctx, request, true, mtuCompatibility)
 	if fallbackErr != nil {
 		return nil, errors.Join(err, fmt.Errorf("ike: legacy proposal fallback failed: %w", fallbackErr))
 	}
@@ -106,13 +113,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.TunnelReques
 	return session, nil
 }
 
-func (provider *Provider) start(ctx context.Context, request vowifi.TunnelRequest, forceLegacy bool) (vowifi.TunnelSession, error) {
-	if provider == nil {
-		return nil, errors.New("ike: nil provider")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (provider *Provider) start(ctx context.Context, request vowifi.TunnelRequest, forceLegacy, mtuCompatibility bool) (vowifi.TunnelSession, error) {
 	if request.AKA == nil {
 		return nil, errors.New("ike: AKA provider is required")
 	}
@@ -326,6 +327,11 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		}
 	}()
 
+	maxFragmentSize := defaultIKEFragmentSize
+	if mtuCompatibility {
+		maxFragmentSize = compatIKEFragmentSize
+	}
+
 	var childInboundSPIBytes [4]byte
 	if err := fillNonzero(provider.config.Random, childInboundSPIBytes[:]); err != nil {
 		return nil, err
@@ -355,6 +361,7 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		ikeSuite,
 		keys,
 		peerSupportsFragmentation,
+		maxFragmentSize,
 		provider.config.Random,
 	)
 	if err != nil {
@@ -435,6 +442,7 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 			ikeSuite,
 			keys,
 			peerSupportsFragmentation,
+			maxFragmentSize,
 			provider.config.Random,
 		)
 		if err != nil {
@@ -475,6 +483,7 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		ikeSuite,
 		keys,
 		peerSupportsFragmentation,
+		maxFragmentSize,
 		provider.config.Random,
 	)
 	if err != nil {
@@ -600,6 +609,7 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		ResponderSelectors: responderSelectors,
 		UDPEncapsulation:   natDetected,
 		ProxyMode:          request.Proxy.Mode,
+		MTUCompatibility:   mtuCompatibility,
 		Relay:              relay,
 		Logger:             provider.config.Logger,
 	})
@@ -619,18 +629,19 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		}
 	}
 	evidence := vowifi.TunnelEvidence{
-		Established:   true,
-		Name:          name,
-		DataplaneMode: dataplaneMode,
-		LocalIPv4:     ipString(network.LocalIPv4),
-		LocalIPv6:     ipString(network.LocalIPv6),
-		PCSCF:         ipStrings(network.PCSCF),
-		ResponderAUTH: responderAUTH,
-		IKEEncryption: fmt.Sprintf("aes-cbc-%d", ikeSuite.EncryptionBits),
-		IKEIntegrity:  ikeIntegrityName(ikeSuite.IntegrityID),
-		IKEDHGroup:    dhName(ikeSuite.DHID),
-		ESPEncryption: encryptionName,
-		ESPIntegrity:  integrityName,
+		Established:      true,
+		Name:             name,
+		DataplaneMode:    dataplaneMode,
+		MTUCompatibility: mtuCompatibility,
+		LocalIPv4:        ipString(network.LocalIPv4),
+		LocalIPv6:        ipString(network.LocalIPv6),
+		PCSCF:            ipStrings(network.PCSCF),
+		ResponderAUTH:    responderAUTH,
+		IKEEncryption:    fmt.Sprintf("aes-cbc-%d", ikeSuite.EncryptionBits),
+		IKEIntegrity:     ikeIntegrityName(ikeSuite.IntegrityID),
+		IKEDHGroup:       dhName(ikeSuite.DHID),
+		ESPEncryption:    encryptionName,
+		ESPIntegrity:     integrityName,
 	}
 	session := &Session{
 		evidence: evidence,
@@ -825,12 +836,13 @@ func sendAndReceiveIKEPayloads(
 	suite negotiatedSuite,
 	keys ikeKeys,
 	peerSupportsFragmentation bool,
+	maxFragmentSize int,
 	random io.Reader,
 ) (ikeHeader, []payload, error) {
 	var outboundPackets [][]byte
 	var err error
 	if peerSupportsFragmentation {
-		outboundPackets, err = encryptPayloadsFragmented(header, payloads, suite, keys.SKei, keys.SKai, defaultIKEFragmentSize, random)
+		outboundPackets, err = encryptPayloadsFragmented(header, payloads, suite, keys.SKei, keys.SKai, maxFragmentSize, random)
 	} else {
 		pkt, encryptErr := encryptPayloads(header, payloads, suite, keys.SKei, keys.SKai, random)
 		if encryptErr != nil {

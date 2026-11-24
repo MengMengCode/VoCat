@@ -64,6 +64,7 @@ type innerPacketMetadata struct {
 	protocol        uint8
 	sourcePort      uint16
 	destinationPort uint16
+	portsKnown      bool
 	nextHeader      uint8
 }
 
@@ -405,7 +406,7 @@ func parseInnerIPv6(packet []byte) (innerPacketMetadata, error) {
 	}
 	protocol := packet[6]
 	offset := 40
-	firstFragment := true
+	seenFragmentHeader := false
 	for {
 		switch protocol {
 		case 0, 43, 60:
@@ -419,10 +420,15 @@ func parseInnerIPv6(packet []byte) (innerPacketMetadata, error) {
 			protocol = packet[offset]
 			offset += length
 		case 44:
-			if offset+8 > len(packet) {
-				return innerPacketMetadata{}, errors.New("ike: inner IPv6 fragment header is truncated")
+			if seenFragmentHeader || offset+8 > len(packet) {
+				return innerPacketMetadata{}, errors.New("ike: inner IPv6 fragment header is invalid")
 			}
-			firstFragment = binary.BigEndian.Uint16(packet[offset+2:offset+4])&0xfff8 == 0
+			seenFragmentHeader = true
+			if binary.BigEndian.Uint16(packet[offset+2:offset+4])&0xfff8 != 0 {
+				// Only the initial fragment's Next Header is used during
+				// reassembly (RFC 8200 Section 4.5).
+				return metadata, nil
+			}
 			protocol = packet[offset]
 			offset += 8
 		case 51:
@@ -437,9 +443,7 @@ func parseInnerIPv6(packet []byte) (innerPacketMetadata, error) {
 			offset += length
 		default:
 			metadata.protocol = protocol
-			if firstFragment {
-				parseTransportPorts(packet[offset:], &metadata)
-			}
+			parseTransportPorts(packet[offset:], &metadata)
 			return metadata, nil
 		}
 	}
@@ -451,6 +455,7 @@ func parseTransportPorts(payload []byte, metadata *innerPacketMetadata) {
 	}
 	metadata.sourcePort = binary.BigEndian.Uint16(payload[0:2])
 	metadata.destinationPort = binary.BigEndian.Uint16(payload[2:4])
+	metadata.portsKnown = true
 }
 
 func packetAllowed(
@@ -462,18 +467,25 @@ func packetAllowed(
 		metadata.source,
 		metadata.protocol,
 		metadata.sourcePort,
+		metadata.portsKnown,
 		sourceSelectors,
 	) && endpointAllowed(
 		metadata.destination,
 		metadata.protocol,
 		metadata.destinationPort,
+		metadata.portsKnown,
 		destinationSelectors,
 	)
 }
 
-func endpointAllowed(ip net.IP, protocol uint8, port uint16, selectors []trafficSelector) bool {
+func endpointAllowed(ip net.IP, protocol uint8, port uint16, portKnown bool, selectors []trafficSelector) bool {
 	for _, selector := range selectors {
 		if selector.IPProtocol != 0 && selector.IPProtocol != protocol {
+			continue
+		}
+		// Without NON_FIRST_FRAGMENTS_ALSO, only ANY ports can match
+		// fragments that lack transport ports (RFC 4301 Section 7).
+		if !portKnown && (selector.StartPort != 0 || selector.EndPort != math.MaxUint16) {
 			continue
 		}
 		if port < selector.StartPort || port > selector.EndPort {

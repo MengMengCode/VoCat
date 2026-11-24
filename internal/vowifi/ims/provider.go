@@ -34,22 +34,19 @@ var (
 	ErrSessionClosed             = errors.New("ims: session is closed")
 	ErrRegistrationExpired       = errors.New("ims: registration has expired")
 	ErrSMSCapabilityNotConfirmed = errors.New("ims: registrar did not confirm the +g.3gpp.smsip contact")
+	errRegisterRequiresTCP       = errors.New("ims: SIP REGISTER requires TCP in MTU compatibility mode")
 )
 
 // Config defines only deployment-specific SIP details. If PCSCF or
 // LocalAddress is empty, Provider uses the corresponding value proven by the
 // TunnelSession. The default transport is TCP and the default port is 5060.
 type Config struct {
-	// MTUCompatibility opts new protected TCP connections into conservative MSS.
-	// Nil disables it. The callback is evaluated on connection establishment.
-	MTUCompatibility func(context.Context) bool
-	PCSCF            string
-	LocalAddress     string
-	Transport        string
-	TransportByPLMN  map[string]string
-	// AutoTransportFallback tries the alternate TCP/UDP transport only when
-	// the initial P-CSCF attempt produced no SIP response at all. A challenge
-	// or rejection is authoritative and is never retried as another transport.
+	PCSCF           string
+	LocalAddress    string
+	Transport       string
+	TransportByPLMN map[string]string
+	// AutoTransportFallback tries the alternate transport when there is no SIP
+	// response or a UDP REGISTER locally exceeds the compatibility mode budget.
 	AutoTransportFallback bool
 	Port                  int
 	RegistrationExpiry    time.Duration
@@ -268,7 +265,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 			return nil, errors.New("ims: configured P-CSCF is not proven by the SWu tunnel")
 		}
 		transport, carrierSelected := carrierTransportForIdentity(provider.config, request.Identity)
-		if cached := provider.cachedTransport(request.Identity); cached != "" {
+		if cached := provider.cachedTransport(request.Identity, tunnel.MTUCompatibility); cached != "" {
 			transport = cached
 			carrierSelected = true
 		}
@@ -309,7 +306,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 			transports = append(transports, alternate)
 		}
 		for attempt, candidate := range transports {
-			connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address(), false)
+			connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address(), tunnel.MTUCompatibility)
 			if dialErr != nil {
 				lastErr = fmt.Errorf("ims: connect to P-CSCF over %s: %w", candidate, dialErr)
 				if attempt+1 < len(transports) && ctx.Err() == nil {
@@ -318,7 +315,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 				}
 				break
 			}
-			session, sessionErr := newSession(provider, request, identities, endpoint, candidate, connection)
+			session, sessionErr := newSessionWithContext(ctx, provider, request, identities, endpoint, candidate, connection, tunnel)
 			if sessionErr != nil {
 				_ = connection.Close()
 				lastErr = sessionErr
@@ -326,7 +323,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 			}
 			establishErr := session.establish(ctx)
 			if establishErr == nil {
-				provider.rememberTransport(request.Identity, candidate)
+				provider.rememberTransport(request.Identity, candidate, tunnel.MTUCompatibility)
 				if attempt > 0 || pcscfIndex > 0 {
 					provider.config.Logger.Info("IMS automatic transport fallback succeeded",
 						"carrier_profile", vowifi.ResolveCarrierProfile(request.Identity).ID,
@@ -335,15 +332,23 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 				return session, nil
 			}
 			sipResponseObserved := session.evidence.LastSIPCode != 0
-			session.abort()
+			requiresTCP := errors.Is(establishErr, errRegisterRequiresTCP)
+			cleanupErr := session.abort()
 			lastErr = establishErr
-			if sipResponseObserved {
+			if requiresTCP && cleanupErr != nil {
+				return nil, errors.Join(establishErr, fmt.Errorf("ims: roll back UDP registration: %w", cleanupErr))
+			}
+			if sipResponseObserved && !requiresTCP {
 				return nil, establishErr
 			}
 			if attempt+1 >= len(transports) || ctx.Err() != nil {
 				break
 			}
-			provider.logTransportFallback(request.Identity, candidate, transports[attempt+1], establishErr)
+			if requiresTCP {
+				provider.config.Logger.Info("IMS SIP REGISTER exceeds the UDP budget; trying TCP", "error", establishErr)
+			} else {
+				provider.logTransportFallback(request.Identity, candidate, transports[attempt+1], establishErr)
+			}
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -371,23 +376,27 @@ func carrierTransportForIdentity(config Config, identity vowifi.SIMIdentity) (st
 	return "", false
 }
 
-func transportCacheKey(identity vowifi.SIMIdentity) string {
-	if iccid := strings.TrimSpace(identity.ICCID); iccid != "" {
-		return "iccid:" + iccid
+func transportCacheKey(identity vowifi.SIMIdentity, mtuCompatibility bool) string {
+	prefix := ""
+	if mtuCompatibility {
+		prefix = "mtu:"
 	}
-	return "plmn:" + strings.TrimSpace(identity.HomeMCC) + "/" + strings.TrimSpace(identity.HomeMNC)
+	if iccid := strings.TrimSpace(identity.ICCID); iccid != "" {
+		return prefix + "iccid:" + iccid
+	}
+	return prefix + "plmn:" + strings.TrimSpace(identity.HomeMCC) + "/" + strings.TrimSpace(identity.HomeMNC)
 }
 
-func (provider *Provider) cachedTransport(identity vowifi.SIMIdentity) string {
+func (provider *Provider) cachedTransport(identity vowifi.SIMIdentity, mtuCompatibility bool) string {
 	provider.transportMu.RLock()
-	transport := provider.transportCache[transportCacheKey(identity)]
+	transport := provider.transportCache[transportCacheKey(identity, mtuCompatibility)]
 	provider.transportMu.RUnlock()
 	return transport
 }
 
-func (provider *Provider) rememberTransport(identity vowifi.SIMIdentity, transport string) {
+func (provider *Provider) rememberTransport(identity vowifi.SIMIdentity, transport string, mtuCompatibility bool) {
 	provider.transportMu.Lock()
-	provider.transportCache[transportCacheKey(identity)] = transport
+	provider.transportCache[transportCacheKey(identity, mtuCompatibility)] = transport
 	provider.transportMu.Unlock()
 }
 
@@ -595,6 +604,32 @@ func dialSIP(
 	return dialer.DialContext(ctx, transport, remoteAddress)
 }
 
+func listenProtectedTCP(
+	ctx context.Context,
+	localIP net.IP,
+	port int,
+	mtuCompatibility bool,
+) (*net.TCPListener, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	listenConfig := net.ListenConfig{}
+	if mtuCompatibility {
+		configureProtectedTCPListener(&listenConfig)
+	}
+	address := net.JoinHostPort(localIP.String(), strconv.Itoa(port))
+	rawListener, err := listenConfig.Listen(ctx, "tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	tcpListener, ok := rawListener.(*net.TCPListener)
+	if !ok {
+		_ = rawListener.Close()
+		return nil, errors.New("ims: protected TCP listener is not a TCP listener")
+	}
+	return tcpListener, nil
+}
+
 type authenticationState struct {
 	challenge digestChallenge
 	response  []byte
@@ -604,16 +639,18 @@ type authenticationState struct {
 }
 
 type Session struct {
-	provider         *Provider
-	request          vowifi.IMSRequest
-	identity         identitySet
-	endpoint         pcscfEndpoint
-	transport        string
-	conn             net.Conn
-	reader           *bufio.Reader
-	initialEndpoint  pcscfEndpoint
-	securityMode     SecurityMode
-	securityDeclined bool
+	provider          *Provider
+	request           vowifi.IMSRequest
+	identity          identitySet
+	endpoint          pcscfEndpoint
+	transport         string
+	conn              net.Conn
+	reader            *bufio.Reader
+	initialEndpoint   pcscfEndpoint
+	securityMode      SecurityMode
+	securityDeclined  bool
+	mtuCompatibility  bool
+	udpRegisterBudget int
 
 	callID             string
 	fromTag            string
@@ -676,6 +713,19 @@ func newSession(
 	transport string,
 	connection net.Conn,
 ) (*Session, error) {
+	return newSessionWithContext(context.Background(), provider, request, identity, endpoint, transport, connection, vowifi.TunnelEvidence{})
+}
+
+func newSessionWithContext(
+	ctx context.Context,
+	provider *Provider,
+	request vowifi.IMSRequest,
+	identity identitySet,
+	endpoint pcscfEndpoint,
+	transport string,
+	connection net.Conn,
+	tunnel vowifi.TunnelEvidence,
+) (*Session, error) {
 	callToken, err := randomHex(18)
 	if err != nil {
 		return nil, err
@@ -706,6 +756,7 @@ func newSession(
 		endpoint:           endpoint,
 		initialEndpoint:    endpoint,
 		transport:          transport,
+		mtuCompatibility:   tunnel.MTUCompatibility,
 		conn:               connection,
 		callID:             callToken + "@" + addressHost(connection.LocalAddr()),
 		fromTag:            fromTag,
@@ -736,6 +787,8 @@ func newSession(
 	}
 	if transport == "tcp" {
 		session.reader = bufio.NewReader(connection)
+	} else if tunnel.MTUCompatibility {
+		session.udpRegisterBudget = udpRegisterBudget(tunnel.DataplaneMode, addressIP(connection.LocalAddr()))
 	}
 	if securityMode != SecurityDisabled {
 		localIP := addressIP(connection.LocalAddr())
@@ -771,9 +824,11 @@ func newSession(
 			proposal.encryptionAlgorithmsList = []string{"aes-cbc"}
 		}
 		session.securityProposal = proposal
-		protectedTCP, err := net.ListenTCP(
-			"tcp",
-			&net.TCPAddr{IP: append(net.IP(nil), localIP...), Port: proposal.portServer},
+		protectedTCP, err := listenProtectedTCP(
+			ctx,
+			append(net.IP(nil), localIP...),
+			proposal.portServer,
+			session.mtuCompatibility,
 		)
 		if err != nil {
 			refreshCancel()
@@ -798,7 +853,7 @@ func securityEncryptionForIdentity(identity vowifi.SIMIdentity) string {
 	return vowifi.ResolveCarrierProfile(identity).IMSIPSecEncryption
 }
 
-func (session *Session) abort() {
+func (session *Session) abort() error {
 	session.refreshCancel()
 	_ = session.conn.Close()
 	if session.protectedTCP != nil {
@@ -807,10 +862,11 @@ func (session *Session) abort() {
 	if session.protectedUDP != nil {
 		_ = session.protectedUDP.Close()
 	}
-	if session.ipsecHandle != nil {
-		_ = session.ipsecHandle.Close(context.Background())
-	}
 	session.clearAuthentication()
+	if session.ipsecHandle != nil {
+		return session.ipsecHandle.Close(context.Background())
+	}
+	return nil
 }
 
 func (session *Session) establish(ctx context.Context) error {
@@ -923,6 +979,15 @@ func (session *Session) register(ctx context.Context, expires int) (*sipResponse
 		request, err := session.buildRegister(cseq, expires, authorizationHeader, authorization)
 		if err != nil {
 			return nil, err
+		}
+		if !session.runtimeStarted && session.udpRegisterBudget > 0 {
+			budget := session.udpRegisterBudget
+			if session.securityActive {
+				budget -= imsESPOverhead(session.securityAgreement.selected.encryption)
+			}
+			if len(request) >= budget {
+				return nil, fmt.Errorf("%w: %d-byte request, UDP budget %d bytes", errRegisterRequiresTCP, len(request), budget)
+			}
 		}
 		response, err := session.exchange(ctx, request, cseq)
 		if err != nil {
@@ -1336,6 +1401,41 @@ func ueProvidedPANI(value string) string {
 		filtered = append(filtered, part)
 	}
 	return strings.Join(filtered, ";")
+}
+
+// MTU compatibility targets an outer path with MTU 1280. RFC 3261 §18.1.1
+// requires TCP within 200 bytes of the effective path MTU. Budget for the
+// maximum SWu ESP padding, IPv6 outer headers and, for the userspace path,
+// NAT-T plus a SOCKS5 UDP header with an IPv6 destination.
+func udpRegisterBudget(dataplaneMode string, innerIP net.IP) int {
+	const (
+		outerMTU        = 1280
+		sipHeadroom     = 200
+		ipv4Header      = 20
+		ipv6Header      = 40
+		udpHeader       = 8
+		swuESPOverhead  = 8 + 16 + 15 + 2 + 16
+		socks5UDPHeader = 22
+	)
+	budget := outerMTU - sipHeadroom - ipv6Header - swuESPOverhead - udpHeader
+	if innerIP.To4() != nil {
+		budget -= ipv4Header
+	} else {
+		budget -= ipv6Header
+	}
+	if dataplaneMode != "xfrm" {
+		budget -= udpHeader + socks5UDPHeader
+	}
+	return budget
+}
+
+func imsESPOverhead(encryption string) int {
+	// ESP header, trailer and ICV, plus padding and any CBC IV.
+	const fixed = 8 + 2 + 12
+	if encryption == "null" {
+		return fixed + 3
+	}
+	return fixed + 16 + 15
 }
 
 func (session *Session) exchange(ctx context.Context, request []byte, cseq uint32) (*sipResponse, error) {

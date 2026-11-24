@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -155,6 +157,29 @@ func TestSessionRelayCloseInterruptsStuckTransportRead(t *testing.T) {
 func (transport *fakeSessionTransport) Close() error {
 	transport.once.Do(func() { close(transport.closed) })
 	return nil
+}
+
+func TestSessionRelayKeepsReceivingAfterPacketTooBig(t *testing.T) {
+	transport := newFakeSessionTransport()
+	relay := newSessionRelay(transport, legacyTestSuite(), ikeKeys{}, [8]byte{1}, [8]byte{2}, 9, true, time.Hour)
+	defer relay.Close()
+
+	transport.incoming <- fakeSessionPacket{err: &net.OpError{Op: "read", Err: os.NewSyscallError("read", syscall.EMSGSIZE)}}
+	esp := []byte{0, 0, 0, 9, 0, 0, 0, 1, 0xaa}
+	transport.incoming <- fakeSessionPacket{data: esp}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	buffer := make([]byte, len(esp))
+	n, err := relay.ReceiveESP(ctx, buffer)
+	if err != nil || !bytes.Equal(buffer[:n], esp) {
+		t.Fatalf("ReceiveESP after Packet Too Big = %x, %v, want %x", buffer[:n], err, esp)
+	}
+
+	terminal := errors.New("relay receive failed")
+	transport.incoming <- fakeSessionPacket{err: terminal}
+	if _, err := relay.ReceiveESP(ctx, buffer); !errors.Is(err, terminal) {
+		t.Fatalf("ReceiveESP after terminal failure = %v, want %v", err, terminal)
+	}
 }
 
 func TestSessionRelayDemuxesESPAndAnswersEncryptedDPD(t *testing.T) {
