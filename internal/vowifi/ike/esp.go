@@ -65,15 +65,16 @@ type replayWindow struct {
 }
 
 type innerPacketMetadata struct {
-	source          net.IP
-	destination     net.IP
-	protocol        uint8
-	sourcePort      uint16
-	destinationPort uint16
-	nextHeader      uint8
-	fragmented      bool
-	firstFragment   bool
-	fragmentID      uint32
+	source              net.IP
+	destination         net.IP
+	protocol            uint8
+	sourcePort          uint16
+	destinationPort     uint16
+	nextHeader          uint8
+	fragmented          bool
+	firstFragment       bool
+	fragmentID          uint32
+	fragmentKeyProtocol uint8
 }
 
 func newESPTunnel(config ChildSAConfig, randomSource io.Reader) (*espTunnel, error) {
@@ -399,6 +400,7 @@ func parseInnerIPv4(packet []byte) (innerPacketMetadata, error) {
 		metadata.fragmented = true
 		metadata.firstFragment = fragmentOffset == 0
 		metadata.fragmentID = uint32(binary.BigEndian.Uint16(packet[4:6]))
+		metadata.fragmentKeyProtocol = metadata.protocol
 	}
 	if fragmentOffset == 0 {
 		parseTransportPorts(packet[headerLength:], &metadata)
@@ -423,7 +425,6 @@ func parseInnerIPv6(packet []byte) (innerPacketMetadata, error) {
 	}
 	protocol := packet[6]
 	offset := 40
-	firstFragment := true
 	seenFragmentHeader := false
 	for {
 		switch protocol {
@@ -449,12 +450,12 @@ func parseInnerIPv6(packet []byte) (innerPacketMetadata, error) {
 				metadata.fragmented = true
 				metadata.firstFragment = fragOffset == 0
 				metadata.fragmentID = binary.BigEndian.Uint32(packet[offset+4 : offset+8])
+				metadata.fragmentKeyProtocol = packet[offset]
 			}
 			if fragOffset != 0 {
 				metadata.protocol = packet[offset]
 				return metadata, nil
 			}
-			firstFragment = true
 			protocol = packet[offset]
 			offset += 8
 		case 51:
@@ -469,9 +470,7 @@ func parseInnerIPv6(packet []byte) (innerPacketMetadata, error) {
 			offset += length
 		default:
 			metadata.protocol = protocol
-			if firstFragment {
-				parseTransportPorts(packet[offset:], &metadata)
-			}
+			parseTransportPorts(packet[offset:], &metadata)
 			return metadata, nil
 		}
 	}
@@ -494,6 +493,7 @@ type fragmentKey struct {
 }
 
 type fragmentPortEntry struct {
+	protocol        uint8
 	sourcePort      uint16
 	destinationPort uint16
 	expiresAt       time.Time
@@ -507,7 +507,7 @@ type fragmentPortCache struct {
 func makeFragmentKey(metadata innerPacketMetadata) fragmentKey {
 	key := fragmentKey{
 		nextHeader: metadata.nextHeader,
-		protocol:   metadata.protocol,
+		protocol:   metadata.fragmentKeyProtocol,
 		id:         metadata.fragmentID,
 	}
 	if source := metadata.source.To16(); source != nil {
@@ -519,7 +519,7 @@ func makeFragmentKey(metadata innerPacketMetadata) fragmentKey {
 	return key
 }
 
-func (cache *fragmentPortCache) record(key fragmentKey, sourcePort uint16, destinationPort uint16, now time.Time) {
+func (cache *fragmentPortCache) record(key fragmentKey, protocol uint8, sourcePort uint16, destinationPort uint16, now time.Time) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.entries == nil {
@@ -546,24 +546,25 @@ func (cache *fragmentPortCache) record(key fragmentKey, sourcePort uint16, desti
 		}
 	}
 	cache.entries[key] = fragmentPortEntry{
+		protocol:        protocol,
 		sourcePort:      sourcePort,
 		destinationPort: destinationPort,
 		expiresAt:       now.Add(espFragmentCacheTTL),
 	}
 }
 
-func (cache *fragmentPortCache) lookup(key fragmentKey, now time.Time) (uint16, uint16, bool) {
+func (cache *fragmentPortCache) lookup(key fragmentKey, now time.Time) (uint8, uint16, uint16, bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	entry, ok := cache.entries[key]
 	if !ok {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 	if !now.Before(entry.expiresAt) {
 		delete(cache.entries, key)
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	return entry.sourcePort, entry.destinationPort, true
+	return entry.protocol, entry.sourcePort, entry.destinationPort, true
 }
 
 func (cache *fragmentPortCache) delete(key fragmentKey) {
@@ -585,13 +586,14 @@ func (tunnel *espTunnel) packetAllowedWithFragments(
 	now := time.Now()
 	if metadata.firstFragment {
 		if packetAllowed(metadata, sourceSelectors, destinationSelectors) {
-			fragments.record(key, metadata.sourcePort, metadata.destinationPort, now)
+			fragments.record(key, metadata.protocol, metadata.sourcePort, metadata.destinationPort, now)
 			return true
 		}
 		fragments.delete(key)
 		return false
 	}
-	if sourcePort, destinationPort, ok := fragments.lookup(key, now); ok {
+	if protocol, sourcePort, destinationPort, ok := fragments.lookup(key, now); ok {
+		metadata.protocol = protocol
 		metadata.sourcePort = sourcePort
 		metadata.destinationPort = destinationPort
 	}
