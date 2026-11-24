@@ -89,7 +89,12 @@ func (handle *linuxXFRMHandle) install(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := handle.run(ctx, "enable tunnel interface", "link", "set", "dev", config.Name, "up"); err != nil {
+	linkUpArgs := []string{"link", "set", "dev", config.Name}
+	if config.MTUCompatibility {
+		linkUpArgs = append(linkUpArgs, "mtu", strconv.Itoa(tunnelInterfaceMTU(config)))
+	}
+	linkUpArgs = append(linkUpArgs, "up")
+	if err := handle.run(ctx, "enable tunnel interface", linkUpArgs...); err != nil {
 		return err
 	}
 	outboundState := handle.stateArguments(

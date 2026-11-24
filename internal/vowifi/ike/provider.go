@@ -33,7 +33,10 @@ type Config struct {
 	IdentityType         uint8
 	APN                  string
 	AutoProposalFallback bool
-	Logger               *slog.Logger
+	// MTUCompatibility opts the SWu tunnel, routes, and IKE fragmentation into
+	// conservative sizes for low-MTU outer paths. Nil disables it.
+	MTUCompatibility func(context.Context) bool
+	Logger           *slog.Logger
 }
 
 type Provider struct {
@@ -326,6 +329,13 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		}
 	}()
 
+	mtuCompatibility := provider.config.MTUCompatibility != nil &&
+		provider.config.MTUCompatibility(ctx)
+	maxFragmentSize := defaultIKEFragmentSize
+	if mtuCompatibility {
+		maxFragmentSize = compatIKEFragmentSize
+	}
+
 	var childInboundSPIBytes [4]byte
 	if err := fillNonzero(provider.config.Random, childInboundSPIBytes[:]); err != nil {
 		return nil, err
@@ -355,6 +365,7 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		ikeSuite,
 		keys,
 		peerSupportsFragmentation,
+		maxFragmentSize,
 		provider.config.Random,
 	)
 	if err != nil {
@@ -435,6 +446,7 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 			ikeSuite,
 			keys,
 			peerSupportsFragmentation,
+			maxFragmentSize,
 			provider.config.Random,
 		)
 		if err != nil {
@@ -475,6 +487,7 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		ikeSuite,
 		keys,
 		peerSupportsFragmentation,
+		maxFragmentSize,
 		provider.config.Random,
 	)
 	if err != nil {
@@ -600,6 +613,7 @@ func (provider *Provider) start(ctx context.Context, request vowifi.TunnelReques
 		ResponderSelectors: responderSelectors,
 		UDPEncapsulation:   natDetected,
 		ProxyMode:          request.Proxy.Mode,
+		MTUCompatibility:   mtuCompatibility,
 		Relay:              relay,
 		Logger:             provider.config.Logger,
 	})
@@ -825,12 +839,13 @@ func sendAndReceiveIKEPayloads(
 	suite negotiatedSuite,
 	keys ikeKeys,
 	peerSupportsFragmentation bool,
+	maxFragmentSize int,
 	random io.Reader,
 ) (ikeHeader, []payload, error) {
 	var outboundPackets [][]byte
 	var err error
 	if peerSupportsFragmentation {
-		outboundPackets, err = encryptPayloadsFragmented(header, payloads, suite, keys.SKei, keys.SKai, defaultIKEFragmentSize, random)
+		outboundPackets, err = encryptPayloadsFragmented(header, payloads, suite, keys.SKei, keys.SKai, maxFragmentSize, random)
 	} else {
 		pkt, encryptErr := encryptPayloads(header, payloads, suite, keys.SKei, keys.SKai, random)
 		if encryptErr != nil {

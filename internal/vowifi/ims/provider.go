@@ -40,8 +40,9 @@ var (
 // LocalAddress is empty, Provider uses the corresponding value proven by the
 // TunnelSession. The default transport is TCP and the default port is 5060.
 type Config struct {
-	// MTUCompatibility opts new protected TCP connections into conservative MSS.
-	// Nil disables it. The callback is evaluated on connection establishment.
+	// MTUCompatibility opts IMS TCP connections (initial, outbound protected,
+	// and inbound protected listeners) into conservative MSS. Nil disables it.
+	// The callback is evaluated on connection establishment.
 	MTUCompatibility func(context.Context) bool
 	PCSCF            string
 	LocalAddress     string
@@ -308,8 +309,10 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 			}
 			transports = append(transports, alternate)
 		}
+		mtuCompatibility := provider.config.MTUCompatibility != nil &&
+			provider.config.MTUCompatibility(ctx)
 		for attempt, candidate := range transports {
-			connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address(), false)
+			connection, dialErr := dialSIP(ctx, candidate, localAddress, 0, endpoint.address(), mtuCompatibility)
 			if dialErr != nil {
 				lastErr = fmt.Errorf("ims: connect to P-CSCF over %s: %w", candidate, dialErr)
 				if attempt+1 < len(transports) && ctx.Err() == nil {
@@ -318,7 +321,7 @@ func (provider *Provider) Start(ctx context.Context, request vowifi.IMSRequest) 
 				}
 				break
 			}
-			session, sessionErr := newSession(provider, request, identities, endpoint, candidate, connection)
+			session, sessionErr := newSessionWithContext(ctx, provider, request, identities, endpoint, candidate, connection)
 			if sessionErr != nil {
 				_ = connection.Close()
 				lastErr = sessionErr
@@ -595,6 +598,32 @@ func dialSIP(
 	return dialer.DialContext(ctx, transport, remoteAddress)
 }
 
+func listenProtectedTCP(
+	ctx context.Context,
+	localIP net.IP,
+	port int,
+	mtuCompatibility bool,
+) (*net.TCPListener, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	listenConfig := net.ListenConfig{}
+	if mtuCompatibility {
+		configureProtectedTCPListener(&listenConfig)
+	}
+	address := net.JoinHostPort(localIP.String(), strconv.Itoa(port))
+	rawListener, err := listenConfig.Listen(ctx, "tcp", address)
+	if err != nil {
+		return nil, err
+	}
+	tcpListener, ok := rawListener.(*net.TCPListener)
+	if !ok {
+		_ = rawListener.Close()
+		return nil, errors.New("ims: protected TCP listener is not a TCP listener")
+	}
+	return tcpListener, nil
+}
+
 type authenticationState struct {
 	challenge digestChallenge
 	response  []byte
@@ -669,6 +698,18 @@ func (session *Session) configuredSecurityMode() SecurityMode {
 }
 
 func newSession(
+	provider *Provider,
+	request vowifi.IMSRequest,
+	identity identitySet,
+	endpoint pcscfEndpoint,
+	transport string,
+	connection net.Conn,
+) (*Session, error) {
+	return newSessionWithContext(context.Background(), provider, request, identity, endpoint, transport, connection)
+}
+
+func newSessionWithContext(
+	ctx context.Context,
 	provider *Provider,
 	request vowifi.IMSRequest,
 	identity identitySet,
@@ -771,9 +812,13 @@ func newSession(
 			proposal.encryptionAlgorithmsList = []string{"aes-cbc"}
 		}
 		session.securityProposal = proposal
-		protectedTCP, err := net.ListenTCP(
-			"tcp",
-			&net.TCPAddr{IP: append(net.IP(nil), localIP...), Port: proposal.portServer},
+		mtuCompatibility := provider.config.MTUCompatibility != nil &&
+			provider.config.MTUCompatibility(ctx)
+		protectedTCP, err := listenProtectedTCP(
+			ctx,
+			append(net.IP(nil), localIP...),
+			proposal.portServer,
+			mtuCompatibility,
 		)
 		if err != nil {
 			refreshCancel()

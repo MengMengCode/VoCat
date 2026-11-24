@@ -19,7 +19,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const userspaceTunnelMTU = 1380
+const (
+	userspaceTunnelMTU           = 1380
+	userspaceTunnelCompatIPv6MTU = 1280
+	userspaceTunnelCompatIPv4MTU = 1160
+	userspaceTunnelCompatAdvMSS  = 1020
+)
+
+func tunnelInterfaceMTU(config ChildSAConfig) int {
+	if !config.MTUCompatibility {
+		return userspaceTunnelMTU
+	}
+	// Linux drops IPv6 addresses from interfaces whose MTU falls below 1280.
+	if config.InnerLocalIPv6 != nil {
+		return userspaceTunnelCompatIPv6MTU
+	}
+	return userspaceTunnelCompatIPv4MTU
+}
 
 const userspaceTunnelPollInterval = 100 * time.Millisecond
 
@@ -233,7 +249,7 @@ func (handle *linuxUserspaceHandle) configure(ctx context.Context) error {
 		ctx,
 		"enable TUN interface",
 		"link", "set", "dev", name,
-		"mtu", strconv.Itoa(userspaceTunnelMTU),
+		"mtu", strconv.Itoa(tunnelInterfaceMTU(handle.config)),
 		"up",
 	); err != nil {
 		return err
@@ -476,6 +492,17 @@ func (handle *linuxUserspaceHandle) configureFamily(
 			hostPrefix,
 			"dev", handle.config.Name,
 			"src", local.String(),
+		}
+		if handle.config.MTUCompatibility {
+			routeMTU := userspaceTunnelCompatIPv4MTU
+			if family == "-6" {
+				routeMTU = userspaceTunnelCompatIPv6MTU
+			}
+			routeArguments = append(
+				routeArguments,
+				"mtu", strconv.Itoa(routeMTU),
+				"advmss", strconv.Itoa(userspaceTunnelCompatAdvMSS),
+			)
 		}
 		if err := handle.run(ctx, "install P-CSCF host route", routeArguments...); err != nil {
 			return err

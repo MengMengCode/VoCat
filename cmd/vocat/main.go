@@ -1230,17 +1230,19 @@ func newVoWiFiOrchestrator(
 	// the cellular data APN cached on the device or card policy.
 	apn := vowifisettings.IMSAPN(ctx, database)
 	vowifiLogger := logger.With("category", "vowifi", "device_id", deviceConfig.ID)
+	mtuCompatibility := func(ctx context.Context) bool {
+		return vowifisettings.MTUCompatibility(ctx, database)
+	}
 	tunnelProvider, err := ike.NewProvider(ike.Config{
 		APN: apn, Logger: vowifiLogger, AutoProposalFallback: true,
+		MTUCompatibility: mtuCompatibility,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("device %q IKE provider: %w", deviceConfig.ID, err)
 	}
 	imsProvider, err := ims.NewProvider(adapter, ims.Config{
-		MTUCompatibility: func(ctx context.Context) bool {
-			return vowifisettings.MTUCompatibility(ctx, database)
-		},
-		Logger: vowifiLogger,
+		MTUCompatibility: mtuCompatibility,
+		Logger:           vowifiLogger,
 		// Carrier-specific transport and SMSC defaults live in the shared data
 		// profile. Prefer network-provided P-CSCF hints, then safely try the
 		// alternate transport only if no SIP response was observed.
