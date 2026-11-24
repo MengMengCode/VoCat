@@ -664,6 +664,7 @@ func (handle *linuxUserspaceHandle) recordCleanup(operation string, arguments ..
 func (handle *linuxUserspaceHandle) copyTUNToRelay() {
 	defer handle.wait.Done()
 	buffer := make([]byte, 65535)
+	reportedMTUError := false
 	for {
 		count, err := readTUNPacket(handle.runContext, handle.tunFD, buffer)
 		if err != nil {
@@ -686,9 +687,20 @@ func (handle *linuxUserspaceHandle) copyTUNToRelay() {
 			return
 		}
 		if err := handle.relay.SendESP(handle.runContext, protected); err != nil {
-			if handle.runContext.Err() == nil {
-				handle.fail(fmt.Errorf("ike: relay outbound ESP: %w", err))
+			if handle.runContext.Err() != nil {
+				return
 			}
+			if errors.Is(err, unix.EMSGSIZE) {
+				// The outer path rejected this datagram. Smaller packets can
+				// still use the same Child SA.
+				if !reportedMTUError {
+					handle.logger().Warn("Dropped an ESP datagram that exceeds the outer path MTU",
+						"interface", handle.config.Name, "esp_bytes", len(protected))
+					reportedMTUError = true
+				}
+				continue
+			}
+			handle.fail(fmt.Errorf("ike: relay outbound ESP: %w", err))
 			return
 		}
 	}

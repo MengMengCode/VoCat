@@ -89,12 +89,9 @@ func (handle *linuxXFRMHandle) install(ctx context.Context) error {
 			return err
 		}
 	}
-	linkUpArgs := []string{"link", "set", "dev", config.Name}
-	if config.MTUCompatibility {
-		linkUpArgs = append(linkUpArgs, "mtu", strconv.Itoa(tunnelInterfaceMTU(config)))
-	}
-	linkUpArgs = append(linkUpArgs, "up")
-	if err := handle.run(ctx, "enable tunnel interface", linkUpArgs...); err != nil {
+	// The dummy interface holds the inner addresses. XFRM derives the
+	// tunnel PMTU from the actual egress route and the ESP overhead.
+	if err := handle.run(ctx, "enable tunnel interface", "link", "set", "dev", config.Name, "up"); err != nil {
 		return err
 	}
 	outboundState := handle.stateArguments(

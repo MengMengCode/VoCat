@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -73,6 +74,11 @@ func (relay *sessionRelay) run() {
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
 				return
+			}
+			if errors.Is(err, syscall.EMSGSIZE) {
+				// A connected UDP socket can report Packet Too Big on a
+				// read for an earlier datagram. The socket is still usable.
+				continue
 			}
 			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 				if relay.natt && time.Since(lastKeepalive) >= relay.keepalive {

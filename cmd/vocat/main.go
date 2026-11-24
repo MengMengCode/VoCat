@@ -1241,11 +1241,11 @@ func newVoWiFiOrchestrator(
 		return nil, fmt.Errorf("device %q IKE provider: %w", deviceConfig.ID, err)
 	}
 	imsProvider, err := ims.NewProvider(adapter, ims.Config{
-		MTUCompatibility: mtuCompatibility,
-		Logger:           vowifiLogger,
+		Logger: vowifiLogger,
 		// Carrier-specific transport and SMSC defaults live in the shared data
 		// profile. Prefer network-provided P-CSCF hints, then safely try the
-		// alternate transport only if no SIP response was observed.
+		// alternate transport when the peer does not respond or the REGISTER
+		// exceeds the UDP budget in MTU compatibility mode.
 		Transport:             "tcp",
 		AutoTransportFallback: true,
 		OnIncomingCall:        onIncomingCall,

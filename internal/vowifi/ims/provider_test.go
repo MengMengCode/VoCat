@@ -172,12 +172,19 @@ func TestProviderCachesSuccessfulTransportPerSIM(t *testing.T) {
 	provider := &Provider{transportCache: make(map[string]string)}
 	first := vowifi.SIMIdentity{ICCID: "8901000000000000001", HomeMCC: "001", HomeMNC: "01"}
 	second := vowifi.SIMIdentity{ICCID: "8901000000000000002", HomeMCC: "001", HomeMNC: "01"}
-	provider.rememberTransport(first, "udp")
-	if got := provider.cachedTransport(first); got != "udp" {
+	provider.rememberTransport(first, "udp", false)
+	if got := provider.cachedTransport(first, false); got != "udp" {
 		t.Fatalf("cached first transport = %q", got)
 	}
-	if got := provider.cachedTransport(second); got != "" {
+	if got := provider.cachedTransport(second, false); got != "" {
 		t.Fatalf("second SIM inherited cached transport %q", got)
+	}
+	if got := provider.cachedTransport(first, true); got != "" {
+		t.Fatalf("compatibility mode inherited the default transport %q", got)
+	}
+	provider.rememberTransport(first, "tcp", true)
+	if got := provider.cachedTransport(first, false); got != "udp" {
+		t.Fatalf("default transport changed to %q", got)
 	}
 }
 
@@ -983,7 +990,7 @@ func newStableInstanceTestSession(t *testing.T, request vowifi.IMSRequest) *Sess
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(session.abort)
+	t.Cleanup(func() { _ = session.abort() })
 	return session
 }
 

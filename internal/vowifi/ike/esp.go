@@ -16,14 +16,11 @@ import (
 	"math"
 	"net"
 	"sync"
-	"time"
 )
 
 const (
-	espHeaderLength            = 8
-	espReplayWindow            = 64
-	espFragmentCacheTTL        = 30 * time.Second
-	espFragmentCacheMaxEntries = 256
+	espHeaderLength = 8
+	espReplayWindow = 64
 )
 
 var (
@@ -41,9 +38,6 @@ type espTunnel struct {
 
 	initiatorSelectors []trafficSelector
 	responderSelectors []trafficSelector
-
-	outboundFragments fragmentPortCache
-	inboundFragments  fragmentPortCache
 }
 
 type espDirection struct {
@@ -65,16 +59,13 @@ type replayWindow struct {
 }
 
 type innerPacketMetadata struct {
-	source              net.IP
-	destination         net.IP
-	protocol            uint8
-	sourcePort          uint16
-	destinationPort     uint16
-	nextHeader          uint8
-	fragmented          bool
-	firstFragment       bool
-	fragmentID          uint32
-	fragmentKeyProtocol uint8
+	source          net.IP
+	destination     net.IP
+	protocol        uint8
+	sourcePort      uint16
+	destinationPort uint16
+	portsKnown      bool
+	nextHeader      uint8
 }
 
 func newESPTunnel(config ChildSAConfig, randomSource io.Reader) (*espTunnel, error) {
@@ -178,11 +169,10 @@ func (tunnel *espTunnel) seal(innerPacket []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errESPPolicyDrop, err)
 	}
-	if !tunnel.packetAllowedWithFragments(
+	if !packetAllowed(
 		metadata,
 		tunnel.initiatorSelectors,
 		tunnel.responderSelectors,
-		&tunnel.outboundFragments,
 	) {
 		return nil, fmt.Errorf("%w: outbound packet is outside negotiated traffic selectors", errESPPolicyDrop)
 	}
@@ -201,11 +191,10 @@ func (tunnel *espTunnel) open(packet []byte) ([]byte, error) {
 		if metadata.nextHeader != nextHeader {
 			return errors.New("ike: ESP trailer does not match the inner IP version")
 		}
-		if !tunnel.packetAllowedWithFragments(
+		if !packetAllowed(
 			metadata,
 			tunnel.responderSelectors,
 			tunnel.initiatorSelectors,
-			&tunnel.inboundFragments,
 		) {
 			return errors.New("ike: inbound packet is outside negotiated traffic selectors")
 		}
@@ -393,15 +382,7 @@ func parseInnerIPv4(packet []byte) (innerPacketMetadata, error) {
 		protocol:    packet[9],
 		nextHeader:  4,
 	}
-	flagsAndOffset := binary.BigEndian.Uint16(packet[6:8])
-	fragmentOffset := flagsAndOffset & 0x1fff
-	moreFragments := flagsAndOffset&0x2000 != 0
-	if fragmentOffset != 0 || moreFragments {
-		metadata.fragmented = true
-		metadata.firstFragment = fragmentOffset == 0
-		metadata.fragmentID = uint32(binary.BigEndian.Uint16(packet[4:6]))
-		metadata.fragmentKeyProtocol = metadata.protocol
-	}
+	fragmentOffset := binary.BigEndian.Uint16(packet[6:8]) & 0x1fff
 	if fragmentOffset == 0 {
 		parseTransportPorts(packet[headerLength:], &metadata)
 	}
@@ -443,17 +424,9 @@ func parseInnerIPv6(packet []byte) (innerPacketMetadata, error) {
 				return innerPacketMetadata{}, errors.New("ike: inner IPv6 fragment header is invalid")
 			}
 			seenFragmentHeader = true
-			flagsAndOffset := binary.BigEndian.Uint16(packet[offset+2 : offset+4])
-			fragOffset := flagsAndOffset & 0xfff8
-			moreFragments := flagsAndOffset&0x0001 != 0
-			if fragOffset != 0 || moreFragments {
-				metadata.fragmented = true
-				metadata.firstFragment = fragOffset == 0
-				metadata.fragmentID = binary.BigEndian.Uint32(packet[offset+4 : offset+8])
-				metadata.fragmentKeyProtocol = packet[offset]
-			}
-			if fragOffset != 0 {
-				metadata.protocol = packet[offset]
+			if binary.BigEndian.Uint16(packet[offset+2:offset+4])&0xfff8 != 0 {
+				// Only the initial fragment's Next Header is used during
+				// reassembly (RFC 8200 Section 4.5).
 				return metadata, nil
 			}
 			protocol = packet[offset]
@@ -482,122 +455,7 @@ func parseTransportPorts(payload []byte, metadata *innerPacketMetadata) {
 	}
 	metadata.sourcePort = binary.BigEndian.Uint16(payload[0:2])
 	metadata.destinationPort = binary.BigEndian.Uint16(payload[2:4])
-}
-
-type fragmentKey struct {
-	nextHeader  uint8
-	protocol    uint8
-	source      [16]byte
-	destination [16]byte
-	id          uint32
-}
-
-type fragmentPortEntry struct {
-	protocol        uint8
-	sourcePort      uint16
-	destinationPort uint16
-	expiresAt       time.Time
-}
-
-type fragmentPortCache struct {
-	mu      sync.Mutex
-	entries map[fragmentKey]fragmentPortEntry
-}
-
-func makeFragmentKey(metadata innerPacketMetadata) fragmentKey {
-	key := fragmentKey{
-		nextHeader: metadata.nextHeader,
-		protocol:   metadata.fragmentKeyProtocol,
-		id:         metadata.fragmentID,
-	}
-	if source := metadata.source.To16(); source != nil {
-		copy(key.source[:], source)
-	}
-	if destination := metadata.destination.To16(); destination != nil {
-		copy(key.destination[:], destination)
-	}
-	return key
-}
-
-func (cache *fragmentPortCache) record(key fragmentKey, protocol uint8, sourcePort uint16, destinationPort uint16, now time.Time) {
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	if cache.entries == nil {
-		cache.entries = make(map[fragmentKey]fragmentPortEntry)
-	}
-	for existingKey, entry := range cache.entries {
-		if !now.Before(entry.expiresAt) {
-			delete(cache.entries, existingKey)
-		}
-	}
-	if _, exists := cache.entries[key]; !exists && len(cache.entries) >= espFragmentCacheMaxEntries {
-		var oldestKey fragmentKey
-		var oldestExpiry time.Time
-		first := true
-		for existingKey, entry := range cache.entries {
-			if first || entry.expiresAt.Before(oldestExpiry) {
-				oldestKey = existingKey
-				oldestExpiry = entry.expiresAt
-				first = false
-			}
-		}
-		if !first {
-			delete(cache.entries, oldestKey)
-		}
-	}
-	cache.entries[key] = fragmentPortEntry{
-		protocol:        protocol,
-		sourcePort:      sourcePort,
-		destinationPort: destinationPort,
-		expiresAt:       now.Add(espFragmentCacheTTL),
-	}
-}
-
-func (cache *fragmentPortCache) lookup(key fragmentKey, now time.Time) (uint8, uint16, uint16, bool) {
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	entry, ok := cache.entries[key]
-	if !ok {
-		return 0, 0, 0, false
-	}
-	if !now.Before(entry.expiresAt) {
-		delete(cache.entries, key)
-		return 0, 0, 0, false
-	}
-	return entry.protocol, entry.sourcePort, entry.destinationPort, true
-}
-
-func (cache *fragmentPortCache) delete(key fragmentKey) {
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	delete(cache.entries, key)
-}
-
-func (tunnel *espTunnel) packetAllowedWithFragments(
-	metadata innerPacketMetadata,
-	sourceSelectors []trafficSelector,
-	destinationSelectors []trafficSelector,
-	fragments *fragmentPortCache,
-) bool {
-	if !metadata.fragmented {
-		return packetAllowed(metadata, sourceSelectors, destinationSelectors)
-	}
-	key := makeFragmentKey(metadata)
-	now := time.Now()
-	if metadata.firstFragment {
-		if packetAllowed(metadata, sourceSelectors, destinationSelectors) {
-			fragments.record(key, metadata.protocol, metadata.sourcePort, metadata.destinationPort, now)
-			return true
-		}
-		fragments.delete(key)
-		return false
-	}
-	if protocol, sourcePort, destinationPort, ok := fragments.lookup(key, now); ok {
-		metadata.protocol = protocol
-		metadata.sourcePort = sourcePort
-		metadata.destinationPort = destinationPort
-	}
-	return packetAllowed(metadata, sourceSelectors, destinationSelectors)
+	metadata.portsKnown = true
 }
 
 func packetAllowed(
@@ -609,18 +467,25 @@ func packetAllowed(
 		metadata.source,
 		metadata.protocol,
 		metadata.sourcePort,
+		metadata.portsKnown,
 		sourceSelectors,
 	) && endpointAllowed(
 		metadata.destination,
 		metadata.protocol,
 		metadata.destinationPort,
+		metadata.portsKnown,
 		destinationSelectors,
 	)
 }
 
-func endpointAllowed(ip net.IP, protocol uint8, port uint16, selectors []trafficSelector) bool {
+func endpointAllowed(ip net.IP, protocol uint8, port uint16, portKnown bool, selectors []trafficSelector) bool {
 	for _, selector := range selectors {
 		if selector.IPProtocol != 0 && selector.IPProtocol != protocol {
+			continue
+		}
+		// Without NON_FIRST_FRAGMENTS_ALSO, only ANY ports can match
+		// fragments that lack transport ports (RFC 4301 Section 7).
+		if !portKnown && (selector.StartPort != 0 || selector.EndPort != math.MaxUint16) {
 			continue
 		}
 		if port < selector.StartPort || port > selector.EndPort {

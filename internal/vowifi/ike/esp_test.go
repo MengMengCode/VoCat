@@ -284,6 +284,73 @@ func TestESPTrafficSelectorsAreEnforcedInBothDirections(t *testing.T) {
 	}
 }
 
+func TestESPFragmentTrafficSelectors(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name        string
+		source      net.IP
+		destination net.IP
+	}{
+		{name: "IPv4", source: net.IPv4(10, 0, 0, 2), destination: net.IPv4(10, 0, 0, 9)},
+		{name: "IPv6", source: net.ParseIP("2001:db8::1"), destination: net.ParseIP("2001:db8::2")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			isIPv4 := test.source.To4() != nil
+			var first, later []byte
+			if isIPv4 {
+				first = testIPv4UDPPacket(test.source, test.destination, 40000, 5060, nil)
+				binary.BigEndian.PutUint16(first[6:8], 0x2000)
+				binary.BigEndian.PutUint16(first[24:26], 16)
+				later = append(append([]byte(nil), first[:20]...), make([]byte, 8)...)
+				binary.BigEndian.PutUint16(later[6:8], 1)
+			} else {
+				first = make([]byte, 56)
+				first[0] = 0x60
+				binary.BigEndian.PutUint16(first[4:6], 16)
+				first[6], first[7] = 44, 64
+				copy(first[8:24], test.source)
+				copy(first[24:40], test.destination)
+				first[40] = 17
+				binary.BigEndian.PutUint16(first[42:44], 1)
+				binary.BigEndian.PutUint16(first[48:50], 40000)
+				binary.BigEndian.PutUint16(first[50:52], 5060)
+				binary.BigEndian.PutUint16(first[52:54], 16)
+				later = append(append([]byte(nil), first[:48]...), make([]byte, 8)...)
+				binary.BigEndian.PutUint16(later[42:44], 8)
+			}
+
+			source := trafficSelector{EndPort: math.MaxUint16, StartIP: test.source, EndIP: test.source}
+			destination := trafficSelector{EndPort: math.MaxUint16, StartIP: test.destination, EndIP: test.destination}
+			sip := destination
+			sip.IPProtocol = 17
+			sip.EndPort = 5060
+			udp := destination
+			udp.IPProtocol = 17
+
+			check := func(packet []byte, destination trafficSelector, want bool) {
+				t.Helper()
+				metadata, err := parseInnerPacket(packet)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if allowed := packetAllowed(metadata, []trafficSelector{source}, []trafficSelector{destination}); allowed != want {
+					t.Errorf("packetAllowed(%+v, %+v) = %t, want %t", metadata, destination, allowed, want)
+				}
+			}
+			check(first, sip, true)
+			check(later, destination, true)
+			check(later, udp, isIPv4)
+			check(later, sip, false)
+			if !isIPv4 {
+				atomic := append([]byte(nil), first...)
+				binary.BigEndian.PutUint16(atomic[42:44], 0)
+				binary.BigEndian.PutUint16(atomic[52:54], 8)
+				check(atomic, sip, true)
+			}
+		})
+	}
+}
+
 func TestESPSequenceExhaustionRequiresRekey(t *testing.T) {
 	t.Parallel()
 	tunnel := mustDefaultESPTunnel(t)
