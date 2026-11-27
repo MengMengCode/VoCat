@@ -189,7 +189,8 @@ export function ThreadPanel(props: ThreadPanelProps) {
 </div>
 <div
   className={cx(
-    "rounded-2xl border px-5 py-4 text-sm leading-[1.75] shadow-sm",
+    // pre-wrap keeps the line breaks senders type; normal white-space would fold them into spaces.
+    "whitespace-pre-wrap break-words rounded-2xl border px-5 py-4 text-sm leading-[1.75] shadow-sm",
     outbound
       ? "border-indigo-100 bg-indigo-50 text-gray-800 dark:border-indigo-500/20 dark:bg-indigo-500/10 dark:text-gray-100"
       : "border-gray-100 bg-white/90 text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-200",
