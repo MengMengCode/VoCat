@@ -96,7 +96,14 @@ export function DeviceConfigTab({ editConfig, deviceStatus, saving, deleting, on
             </div>
           </Field>
           <Field label={t("IMEI 绑定")}>
-            <Input value={editConfig.modemImei || ""} disabled placeholder={t("自动识别（添加时绑定）")} />
+            <Input
+              value={editConfig.modemImei || ""}
+              onChange={(e) => onEditConfig({ ...editConfig, modemImei: e.target.value.replace(/\D/g, "").slice(0, 15) })}
+              disabled={!isReader}
+              maxLength={15}
+              inputMode="numeric"
+              placeholder={isReader ? t("可选：填写 15 位 IMEI 用于 VoWiFi（留空则使用默认）") : t("自动识别（添加时绑定）")}
+            />
           </Field>
           <Field label={t("设备路径")}>
             <Input value={usbPath || ""} disabled placeholder={t("由系统自动探测")} />

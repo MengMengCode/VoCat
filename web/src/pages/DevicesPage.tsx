@@ -83,6 +83,14 @@ export default function DevicesPage() {
 
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const addReaderImeiRef = useRef<{ usbPath: string; controlDevice: string; imei: string } | null>(null);
+  if (addConfig.deviceBackend === "pcsc" && (addConfig.usbPath || addConfig.controlDevice)) {
+    addReaderImeiRef.current = {
+      usbPath: addConfig.usbPath,
+      controlDevice: addConfig.controlDevice,
+      imei: addConfig.modemImei,
+    };
+  }
   const detailRef = useRef(detail);
   detailRef.current = detail;
   const activeTabRef = useRef(activeTab);
@@ -420,6 +428,7 @@ export default function DevicesPage() {
   }, [loadDevices, setSearchParams]);
 
   const openAddDialog = useCallback(() => {
+    addReaderImeiRef.current = null;
     setAddOpen(true);
     setAddSelected(null);
     setAddConfig(EMPTY_ADD);
@@ -458,12 +467,21 @@ export default function DevicesPage() {
       const mode = String(d.mode || "").toLowerCase();
       const isReader = d.hardwareKind === "pcsc" || mode === "pcsc";
       const backend = isReader ? "pcsc" : mode === "mbim" ? "mbim" : isQmiControl(d.controlPath) || (mode === "qmi" && d.controlPath) ? "qmi" : "at";
+      const savedReader = addReaderImeiRef.current;
+      const sameReader =
+        isReader &&
+        savedReader !== null &&
+        savedReader.usbPath === (d.usbPath || "") &&
+        savedReader.controlDevice === (d.controlPath || "");
+      if (!isReader) {
+        addReaderImeiRef.current = null;
+      }
       return {
         ...prev,
         interface: d.netInterface || "",
         atPort: d.atPort || "",
         controlDevice: d.controlPath || "",
-        modemImei: d.imei || "",
+        modemImei: d.imei || (sameReader ? savedReader.imei : ""),
         usbPath: d.usbPath || "",
         deviceBackend: backend,
 		deviceType: d.deviceType || (isReader ? "usb_sim_reader" : prev.deviceType),
@@ -802,7 +820,10 @@ export default function DevicesPage() {
         addSelected={addSelected}
         addConfig={addConfig}
         addSaving={addSaving}
-        onClose={() => setAddOpen(false)}
+        onClose={() => {
+          addReaderImeiRef.current = null;
+          setAddOpen(false);
+        }}
         onRefresh={() => void loadDiscovered()}
         onSelectDevice={selectDiscovered}
         onConfigChange={setAddConfig}

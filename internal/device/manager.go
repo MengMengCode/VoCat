@@ -856,6 +856,8 @@ func (manager *Manager) refreshCardReader(ctx context.Context, id string, state 
 		result.ICCID = card.Identity.ICCID
 		result.IMSI = card.Identity.IMSI
 		result.SPN = card.Identity.SPN
+		result.GID1 = card.Identity.GID1
+		result.GID2 = card.Identity.GID2
 		result.MNCLength = card.Identity.MNCLength
 		result.SIMChanged = previousICCID != "" && !strings.EqualFold(previousICCID, result.ICCID)
 		state.lastICCID = result.ICCID

@@ -258,12 +258,16 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) bool {
 			s.writeDeviceError(w, err)
 			return true
 		}
+		config := payload.toStoreDevice()
+		if !isValidModemIMEI(config.ModemIMEI) {
+			writeError(w, http.StatusBadRequest, "invalid_modem_imei", "modem IMEI must be exactly 15 ASCII digits")
+			return true
+		}
 		selected := findDiscoveredDevice(devices, payload)
 		if selected == nil {
 			writeError(w, http.StatusNotFound, "device_not_found", "the selected Linux modem was not discovered")
 			return true
 		}
-		config := payload.toStoreDevice()
 		isNative410 := config.DeviceType == store.DeviceTypeWiFi410
 		// Newly added hardware starts fail-closed: RF is disabled immediately and
 		// VoWiFi becomes the desired service on supported devices. Native 410
@@ -352,8 +356,25 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+func isValidModemIMEI(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) != 15 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func findDiscoveredDevice(devices []device.Device, config deviceConfigPayload) *device.Device {
-	if config.ModemIMEI != "" {
+	isReader := store.NormalizeDeviceType(config.DeviceType) == store.DeviceTypeUSBSIMReader ||
+		strings.EqualFold(strings.TrimSpace(config.DeviceBackend), pcsc.HardwareKind)
+	if !isReader && config.ModemIMEI != "" {
 		for index := range devices {
 			if devices[index].Snapshot != nil && devices[index].Snapshot.IMEI == config.ModemIMEI {
 				return &devices[index]
@@ -539,6 +560,10 @@ func (s *Server) handleDevicePath(
 				return true
 			}
 			next := payload.toStoreDevice()
+			if !isValidModemIMEI(next.ModemIMEI) {
+				writeError(w, http.StatusBadRequest, "invalid_modem_imei", "modem IMEI must be exactly 15 ASCII digits")
+				return true
+			}
 			if !s.developerActive(r.Context()) {
 				next.NetworkEnabled = false
 			}
@@ -2029,6 +2054,13 @@ func (s *Server) configuredDeviceSummary(
 	runtimeEnabled, _ := runtimeResponse["enabled"].(bool)
 	runtimeTunnelReady, _ := runtimeResponse["tunnel_ready"].(bool)
 	result["vowifi_active"] = config.VoWiFiEnabled && runtimeMatchesCard && runtimeEnabled && runtimeTunnelReady
+	if configuredIMEI := strings.TrimSpace(config.ModemIMEI); configuredIMEI != "" {
+		if modemStatus, ok := result["modem"].(map[string]any); ok {
+			if current, _ := modemStatus["imei"].(string); strings.TrimSpace(current) == "" {
+				modemStatus["imei"] = configuredIMEI
+			}
+		}
+	}
 	// Numbers are SIM-owned data. Resolve the association by the live ICCID
 	// instead of reusing the last VoWiFi runtime attached to this device ID.
 	if entry != nil && entry.Snapshot != nil {

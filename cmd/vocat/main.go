@@ -1011,6 +1011,13 @@ func configureVoWiFiRuntime(
 	if err != nil {
 		return nil, err
 	}
+	pcscAdapter.SetIMEIResolver(func(ctx context.Context, deviceID string) string {
+		config, resolveErr := database.Device(ctx, strings.TrimSpace(deviceID))
+		if resolveErr != nil {
+			return ""
+		}
+		return strings.TrimSpace(config.ModemIMEI)
+	})
 	projector := integration.StateProjector{
 		Store:   database,
 		Devices: mapper,

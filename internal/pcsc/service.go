@@ -336,6 +336,12 @@ func readIdentity(ctx context.Context, card Card, pin string) (Identity, error) 
 	if _, selectErr := selectApplication(ctx, card, aid); selectErr == nil {
 		identity.SMSC = readSMSC(ctx, card)
 	}
+	if _, selectErr := selectApplication(ctx, card, aid); selectErr == nil {
+		identity.GID1 = readGroupID(ctx, card, []byte{0x6F, 0x3E})
+	}
+	if _, selectErr := selectApplication(ctx, card, aid); selectErr == nil {
+		identity.GID2 = readGroupID(ctx, card, []byte{0x6F, 0x3F})
+	}
 	return identity, nil
 }
 
@@ -442,12 +448,20 @@ func selectMF(ctx context.Context, card Card) error {
 }
 
 func selectFile(ctx context.Context, card Card, fileID []byte) error {
+	_, err := selectFileWithFCP(ctx, card, fileID)
+	return err
+}
+
+func selectFileWithFCP(ctx context.Context, card Card, fileID []byte) ([]byte, error) {
 	if len(fileID) != 2 {
-		return errors.New("pcsc: invalid file identifier")
+		return nil, errors.New("pcsc: invalid file identifier")
 	}
 	apdu := []byte{0x00, 0xA4, 0x00, 0x04, 0x02, fileID[0], fileID[1], 0x00}
-	_, sw, err := card.Transmit(ctx, apdu)
-	return requireStatus("select file", sw, err)
+	data, sw, err := card.Transmit(ctx, apdu)
+	if err := requireStatus("select file", sw, err); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func selectApplication(ctx context.Context, card Card, aid []byte) ([]byte, error) {
@@ -679,6 +693,38 @@ func readSPN(ctx context.Context, card Card) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimRight(string(data[1:]), "\x00\xFF"))
+}
+
+func readGroupID(ctx context.Context, card Card, fileID []byte) string {
+	fcp, err := selectFileWithFCP(ctx, card, fileID)
+	if err != nil {
+		return ""
+	}
+	length := 256
+	if sizeBytes := findTLV(fcp, 0x80); len(sizeBytes) > 0 {
+		parsed := 0
+		for _, b := range sizeBytes {
+			parsed = (parsed << 8) | int(b)
+		}
+		if parsed > 0 && parsed <= 256 {
+			length = parsed
+		}
+	}
+	data, err := readBinary(ctx, card, length)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	allPadding := true
+	for _, b := range data {
+		if b != 0xFF {
+			allPadding = false
+			break
+		}
+	}
+	if allPadding {
+		return ""
+	}
+	return strings.ToUpper(hex.EncodeToString(data))
 }
 
 func readSMSC(ctx context.Context, card Card) string {
