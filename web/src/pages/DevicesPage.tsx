@@ -458,12 +458,17 @@ export default function DevicesPage() {
       const mode = String(d.mode || "").toLowerCase();
       const isReader = d.hardwareKind === "pcsc" || mode === "pcsc";
       const backend = isReader ? "pcsc" : mode === "mbim" ? "mbim" : isQmiControl(d.controlPath) || (mode === "qmi" && d.controlPath) ? "qmi" : "at";
+      const sameReader =
+        isReader &&
+        prev.deviceBackend === "pcsc" &&
+        prev.usbPath === (d.usbPath || "") &&
+        prev.controlDevice === (d.controlPath || "");
       return {
         ...prev,
         interface: d.netInterface || "",
         atPort: d.atPort || "",
         controlDevice: d.controlPath || "",
-        modemImei: d.imei || (isReader ? prev.modemImei : ""),
+        modemImei: d.imei || (sameReader ? prev.modemImei : ""),
         usbPath: d.usbPath || "",
         deviceBackend: backend,
 		deviceType: d.deviceType || (isReader ? "usb_sim_reader" : prev.deviceType),
