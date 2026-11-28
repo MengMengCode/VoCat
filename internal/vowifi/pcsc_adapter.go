@@ -15,10 +15,27 @@ type PCSCBindingResolver func(context.Context, string) (pcsc.Selector, string, e
 // PCSCAdapter uses a directly attached USB smart-card reader as the UICC for
 // Wi-Fi Calling. It deliberately exposes no cellular-radio behaviour.
 type PCSCAdapter struct {
-	service  *pcsc.Service
-	resolve  PCSCBindingResolver
-	mu       sync.RWMutex
-	bindings map[string]string
+	service      *pcsc.Service
+	resolve      PCSCBindingResolver
+	imeiResolver func(context.Context, string) string
+	mu           sync.RWMutex
+	bindings     map[string]string
+}
+
+func (adapter *PCSCAdapter) SetIMEIResolver(resolver func(context.Context, string) string) {
+	adapter.mu.Lock()
+	adapter.imeiResolver = resolver
+	adapter.mu.Unlock()
+}
+
+func (adapter *PCSCAdapter) configuredIMEI(ctx context.Context, deviceID string) string {
+	adapter.mu.RLock()
+	resolver := adapter.imeiResolver
+	adapter.mu.RUnlock()
+	if resolver == nil {
+		return ""
+	}
+	return strings.TrimSpace(resolver(ctx, strings.TrimSpace(deviceID)))
 }
 
 var (
@@ -57,7 +74,7 @@ func (adapter *PCSCAdapter) ReadIdentity(ctx context.Context, deviceID string) (
 	mncLength := identity.MNCLength
 	if mncLength != 2 && mncLength != 3 {
 		if mcc, mnc, ok := assignedHomePLMN(identity.IMSI); ok {
-			return applyAssignedCarrierRoute(SIMIdentity{ICCID: identity.ICCID, IMSI: identity.IMSI, HomeMCC: mcc, HomeMNC: mnc, SMSC: identity.SMSC, SPN: identity.SPN}), nil
+			return applyAssignedCarrierRoute(SIMIdentity{ICCID: identity.ICCID, IMSI: identity.IMSI, IMEI: adapter.configuredIMEI(ctx, deviceID), HomeMCC: mcc, HomeMNC: mnc, SMSC: identity.SMSC, SPN: identity.SPN, GID1: identity.GID1, GID2: identity.GID2}), nil
 		}
 		return SIMIdentity{}, ErrEC20MNCUnavailable
 	}
@@ -65,9 +82,9 @@ func (adapter *PCSCAdapter) ReadIdentity(ctx context.Context, deviceID string) (
 		return SIMIdentity{}, errors.New("vocat: USB SIM IMSI is shorter than its EF_AD home PLMN")
 	}
 	return applyAssignedCarrierRoute(SIMIdentity{
-		ICCID: identity.ICCID, IMSI: identity.IMSI,
+		ICCID: identity.ICCID, IMSI: identity.IMSI, IMEI: adapter.configuredIMEI(ctx, deviceID),
 		HomeMCC: identity.IMSI[:3], HomeMNC: identity.IMSI[3 : 3+mncLength],
-		SMSC: identity.SMSC, SPN: identity.SPN,
+		SMSC: identity.SMSC, SPN: identity.SPN, GID1: identity.GID1, GID2: identity.GID2,
 	}), nil
 }
 

@@ -153,7 +153,14 @@ export function DeviceAddDialog(props: DeviceAddDialogProps) {
           <Input value={addConfig.name} onChange={(e) => set({ name: e.target.value })} placeholder={t("显示名称（可选）")} />
         </Field>
         <Field label={t("IMEI 绑定")}>
-          <Input value={addConfig.modemImei} disabled placeholder={t("自动识别（从发现设备填充）")} />
+          <Input
+            value={addConfig.modemImei}
+            onChange={(e) => set({ modemImei: e.target.value.replace(/\D/g, "").slice(0, 15) })}
+            disabled={!isReader}
+            maxLength={15}
+            inputMode="numeric"
+            placeholder={isReader ? t("可选：填写 15 位 IMEI 用于 VoWiFi") : t("自动识别（从发现设备填充）")}
+          />
         </Field>
         <Field label={t("硬件路径")}>
           <Input value={addConfig.usbPath} disabled />

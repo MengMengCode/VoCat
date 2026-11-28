@@ -2029,6 +2029,13 @@ func (s *Server) configuredDeviceSummary(
 	runtimeEnabled, _ := runtimeResponse["enabled"].(bool)
 	runtimeTunnelReady, _ := runtimeResponse["tunnel_ready"].(bool)
 	result["vowifi_active"] = config.VoWiFiEnabled && runtimeMatchesCard && runtimeEnabled && runtimeTunnelReady
+	if configuredIMEI := strings.TrimSpace(config.ModemIMEI); configuredIMEI != "" {
+		if modemStatus, ok := result["modem"].(map[string]any); ok {
+			if current, _ := modemStatus["imei"].(string); strings.TrimSpace(current) == "" {
+				modemStatus["imei"] = configuredIMEI
+			}
+		}
+	}
 	// Numbers are SIM-owned data. Resolve the association by the live ICCID
 	// instead of reusing the last VoWiFi runtime attached to this device ID.
 	if entry != nil && entry.Snapshot != nil {

@@ -57,6 +57,8 @@ type Identity struct {
 	USIMAID     []byte
 	SMSC        string
 	SPN         string
+	GID1        string
+	GID2        string
 	PINRequired bool
 	PINTries    int
 }

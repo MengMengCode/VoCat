@@ -463,7 +463,7 @@ export default function DevicesPage() {
         interface: d.netInterface || "",
         atPort: d.atPort || "",
         controlDevice: d.controlPath || "",
-        modemImei: d.imei || "",
+        modemImei: d.imei || (isReader ? prev.modemImei : ""),
         usbPath: d.usbPath || "",
         deviceBackend: backend,
 		deviceType: d.deviceType || (isReader ? "usb_sim_reader" : prev.deviceType),
